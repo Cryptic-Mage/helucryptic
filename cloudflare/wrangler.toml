@@ -1,0 +1,14 @@
+name = "helucryptic-signaling"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# Durable Object that acts as the single signaling hub (holds all live
+# WebSocket connections + room membership and relays SDP/ICE between peers).
+[[durable_objects.bindings]]
+name = "SIGNAL_HUB"
+class_name = "SignalHub"
+
+# SQLite-backed Durable Object => eligible on the Workers free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalHub"]

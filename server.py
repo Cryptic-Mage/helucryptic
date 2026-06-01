@@ -1,8 +1,15 @@
+import hmac
 import json
+import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 
 app = FastAPI(title="helucryptic-signaling")
+
+# Shared access token. When set (via env), every WebSocket connection must send
+# a matching `?password=` query param or it is rejected before joining. Empty
+# means the server is open (back-compat / LAN use).
+_EXPECTED_PASSWORD = os.getenv("HELUCRYPTIC_SERVER_PASSWORD", "")
 
 active_connections: dict[str, WebSocket] = {}
 rooms:   dict[str, set[str]] = {}   # room_id → {username, ...}
@@ -12,13 +19,31 @@ room_of: dict[str, str]      = {}   # username → room_id
 _SERVER_TYPES = {"peer_joined", "peer_left", "room_state", "error"}
 
 
+def _password_ok(supplied: Optional[str]) -> bool:
+    if not _EXPECTED_PASSWORD:
+        return True  # no password configured → open server
+    # Constant-time comparison to avoid leaking the token via timing.
+    return hmac.compare_digest(supplied or "", _EXPECTED_PASSWORD)
+
+
 @app.websocket("/ws/{username}")
 async def websocket_endpoint(
     websocket: WebSocket,
     username: str,
     room: Optional[str] = Query(default=None),
+    password: Optional[str] = Query(default=None),
 ):
     await websocket.accept()
+
+    # --- Access control ---
+    if not _password_ok(password):
+        await websocket.send_text(json.dumps({
+            "sender": "system",
+            "type": "error",
+            "data": "Invalid server access password.",
+        }))
+        await websocket.close()
+        return
 
     # --- Username uniqueness ---
     # Reject a second live connection for an already-connected username so a

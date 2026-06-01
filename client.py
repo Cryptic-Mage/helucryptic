@@ -11,12 +11,17 @@ import re as _re
 import secrets
 import shutil
 import string
+import time
+import urllib.parse
+from io import BytesIO
 from pathlib import Path
 
-import cv2
 import flet as ft
+import numpy as np
 import websockets
+from PIL import Image
 
+import config
 from contacts import (
     delete_contact,
     get_contact,
@@ -26,16 +31,20 @@ from contacts import (
     upsert_contact,
 )
 from crypto import derive_history_key, generate_and_save_keys, load_or_create_keys
+import backup
+import identity
+import paths
 from history import init_db, read_messages, read_room_messages, run_retention_policy, write_message
-from settings import load_settings, save_settings
+from settings import PROFILES, apply_profile, load_settings, save_settings
 from sounds import manager as sounds
 from webrtc_engine import WebRTCEngine
 
 # ---------------------------------------------------------------------------
-# Change this to your deployed server URL when you go public
+# Deployment config comes from the environment / .env (see config.py), never
+# hardcoded here. Override via HELUCRYPTIC_SIGNALING_URL / _SERVER_PASSWORD.
 # ---------------------------------------------------------------------------
-HELUCRYPTIC_SERVER_URL      = "https://helucryptic-signaling.crypticmage00.workers.dev/"
-HELUCRYPTIC_SERVER_PASSWORD = "CrypticKodu"
+HELUCRYPTIC_SERVER_URL      = config.DEFAULT_SIGNALING_URL
+HELUCRYPTIC_SERVER_PASSWORD = config.SERVER_PASSWORD
 
 
 def generate_room_code() -> str:
@@ -89,12 +98,27 @@ class HelucrypticApp:
         self._muted:           bool            = False
         self._ringing:         bool            = False
         self._ring_timeout_task = None
+        self._diag_open:       bool            = False
+        # Contacts the user allowed for THIS session despite Verified-Only mode.
+        self._session_allowed: set[str]        = set()
+        # Shared access token sent to the signaling server (validated server-side).
+        self._server_password: str             = HELUCRYPTIC_SERVER_PASSWORD
+        # Incoming-video render throttle (per sender) + encode quality. Lower in
+        # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
+        self._last_tile_render: dict[str, float] = {}
+        self._update_perf_parameters()
 
         init_db()
         run_retention_policy(self.settings.retention_days)
         self._build_ui()
         self._wire_engine_callbacks()
         asyncio.ensure_future(self._retention_background_loop())
+
+    def _update_perf_parameters(self) -> None:
+        # Drive the incoming-video render throttle + JPEG quality from the active
+        # performance profile (settings). Call after settings change to apply.
+        self._tile_render_interval = 1.0 / max(1, getattr(self.settings, "tile_render_fps", 10))
+        self._jpeg_quality = int(getattr(self.settings, "jpeg_quality", 55))
 
     # ------------------------------------------------------------------
     # UI construction
@@ -104,6 +128,7 @@ class HelucrypticApp:
         # --- Sidebar controls ---
         self.contact_list     = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=2)
         self.btn_add_contact  = ft.TextButton("+ Add Contact", on_click=self._show_add_contact)
+        self.btn_import_id    = ft.TextButton("Import from code", on_click=self._show_import_identity)
         self.username_input   = ft.TextField(
             label="Your username", width=200, dense=True,
             border_color="#40444b", focused_border_color="#5865f2", color="#dcddde",
@@ -155,6 +180,7 @@ class HelucrypticApp:
                 ft.Divider(color="#40444b"),
                 self.contact_list,
                 self.btn_add_contact,
+                self.btn_import_id,
             ], spacing=8),
         )
 
@@ -173,6 +199,7 @@ class HelucrypticApp:
         self.btn_file     = ft.IconButton(ft.Icons.ATTACH_FILE,  on_click=self._send_file,    disabled=True, tooltip="Send file")
         self.btn_mute     = ft.IconButton(ft.Icons.MIC,          on_click=self._toggle_mute,  disabled=True, tooltip="Mute mic")
         self.btn_hangup   = ft.IconButton(ft.Icons.CALL_END,     on_click=self._hangup,       disabled=True, icon_color="#ed4245", tooltip="Hang up")
+        self.btn_diag     = ft.IconButton(ft.Icons.INFO_OUTLINE, on_click=self._show_diagnostics, tooltip="Connection diagnostics")
         self.btn_settings = ft.IconButton(ft.Icons.SETTINGS,     on_click=self._show_settings, tooltip="Settings")
 
         # Persistent banner shown while the mic is muted during a call
@@ -197,7 +224,7 @@ class HelucrypticApp:
                 self.file_progress,
                 ft.Row([self.msg_input]),
                 ft.Row([self.btn_call, self.btn_screen, self.btn_file, self.btn_mute,
-                        self.btn_hangup, ft.Container(expand=True), self.btn_settings]),
+                        self.btn_hangup, ft.Container(expand=True), self.btn_diag, self.btn_settings]),
             ]),
         )
 
@@ -270,6 +297,12 @@ class HelucrypticApp:
                     self._ring_timeout_task = None
 
             def accept(e):
+                if not self._is_allowed(sender):
+                    _stop_ring()
+                    self.engine.reject_call(sender)
+                    self._close_dialog(dlg)
+                    self._block_unverified(sender)
+                    return
                 _stop_ring()
                 self.engine.accept_call(sender)
                 sounds.play("call_start")
@@ -336,17 +369,57 @@ class HelucrypticApp:
             self.page.update()
 
         def on_video_frame(sender: str, img):
+            # Coalesce to a UI-friendly rate so a fast sender can't pile up
+            # per-frame work on a weak receiver, then update ONLY the affected
+            # image control instead of repainting the whole page tree.
+            now  = time.monotonic()
+            last = self._last_tile_render.get(sender, 0.0)
+            if now - last < self._tile_render_interval:
+                return
+            self._last_tile_render[sender] = now
             try:
-                _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                b64 = base64.b64encode(buf).decode()
+                # img is BGR (bgr24); flip to RGB for Pillow, then JPEG-encode.
+                rgb = np.ascontiguousarray(img[:, :, ::-1])
+                bio = BytesIO()
+                Image.fromarray(rgb).save(bio, format="JPEG", quality=self._jpeg_quality)
+                b64 = base64.b64encode(bio.getvalue()).decode()
                 if sender not in self._video_tiles:
                     self._add_video_tile(sender)
-                self._video_tiles[sender].src_base64 = b64
-                self.page.update()
+                tile = self._video_tiles[sender]
+                tile.src_base64 = b64
+                tile.update()
             except Exception:
                 pass
 
+        def on_key_change(peer: str):
+            # The contact's identity key changed after we had verified it —
+            # surface a loud warning. The contact is already auto-unverified.
+            # A changed key also revokes any temporary "allow for this session".
+            self._session_allowed.discard(peer)
+            self._refresh_contact_list()
+            self._refresh_participant_list()
+            display = peer
+            c = get_contact(peer)
+            if c and c.nickname:
+                display = c.nickname
+            self._log(f"⚠ SECURITY: {display}'s identity key changed — verification removed. "
+                      f"Re-verify their fingerprint out-of-band before trusting.")
+            dlg = ft.AlertDialog(
+                title=ft.Text("⚠ Contact key changed"),
+                content=ft.Text(
+                    f"{display}'s encryption key is different from the one you "
+                    f"previously verified.\n\nThis can happen if they reinstalled or "
+                    f"regenerated keys — but it can also indicate an impersonation "
+                    f"or man-in-the-middle attempt.\n\nVerification has been removed. "
+                    f"Confirm their new fingerprint out-of-band before trusting it."
+                ),
+                actions=[ft.TextButton("Understood", on_click=lambda e: self._close_dialog(dlg))],
+            )
+            self._show_dialog(dlg)
+            self.page.update()
+
         self.engine.on_state_change   = on_state
+        self.engine.on_key_change     = on_key_change
         self.engine.on_message        = on_message
         self.engine.on_call_incoming  = on_call_incoming
         self.engine.on_call_accepted  = on_call_accepted
@@ -367,10 +440,23 @@ class HelucrypticApp:
             print("[connect] aborted: empty username", flush=True)
             return
         self.engine.my_username = uname
-        suffix = f"?room={room}" if room else ""
+        params = {}
+        if room:
+            params["room"] = room
+        if self._server_password:
+            params["password"] = self._server_password
+        suffix = ("?" + urllib.parse.urlencode(params)) if params else ""
         base   = _to_ws_url(self.settings.signaling_url)
-        url    = f"{base}/ws/{uname}{suffix}"
-        print(f"[connect] dialing {url}", flush=True)
+        url    = f"{base}/ws/{urllib.parse.quote(uname, safe='')}{suffix}"
+        
+        # Redact password in printed logs
+        safe_params = dict(params)
+        if "password" in safe_params:
+            safe_params["password"] = "<redacted>"
+        safe_suffix = ("?" + urllib.parse.urlencode(safe_params)) if safe_params else ""
+        safe_url = f"{base}/ws/{urllib.parse.quote(uname, safe='')}{safe_suffix}"
+        
+        print(f"[connect] dialing {safe_url}", flush=True)
         if self.ws:
             try:
                 await self.ws.close()
@@ -380,10 +466,11 @@ class HelucrypticApp:
             self.ws = await websockets.connect(url)
             self._update_status("SIGNALING", "#fee75c")
             self._log(f"Connected as '{uname}'" + (f" in {room}" if room else "") + ".")
-            print(f"[connect] websocket OPEN to {url}", flush=True)
+            print(f"[connect] websocket OPEN to {safe_url}", flush=True)
             sounds.play("reactivated")
             asyncio.ensure_future(self._signaling_listener())
         except Exception as ex:
+            self.engine.last_error = f"signaling: {type(ex).__name__}"
             self._log(f"[Error] Cannot reach server: {ex}")
             print(f"[connect] FAILED: {type(ex).__name__}: {ex}", flush=True)
 
@@ -735,6 +822,11 @@ class HelucrypticApp:
         text = self.msg_input.value.strip()
         if not text:
             return
+        # Verified-Only gate (1-to-1 only; leaves the text in the box so the
+        # user can re-send after verifying / allowing).
+        if not self._room_id and not self._is_allowed(self._active_contact):
+            self._block_unverified(self._active_contact)
+            return
         await self.engine.send_chat(text)
         contact = self._room_id if self._room_id else self._active_contact
         if contact:
@@ -757,6 +849,9 @@ class HelucrypticApp:
         # ask which peer to send to so the destination is never ambiguous.
         peer = await self._choose_file_target()
         if peer is None:
+            return
+        if not self._is_allowed(peer):
+            self._block_unverified(peer)
             return
         # Flet 0.85: FilePicker is a service; pick_files() is async and returns the files.
         picker = ft.FilePicker()
@@ -826,6 +921,9 @@ class HelucrypticApp:
         else:
             if not self._active_contact:
                 return
+            if not self._is_allowed(self._active_contact):
+                self._block_unverified(self._active_contact)
+                return
             if not self.engine.pcs.get(self._active_contact):
                 await self.engine.create_offer(self._active_contact, ws_send)
             await self.engine.start_voice_call(self._active_contact)
@@ -847,6 +945,9 @@ class HelucrypticApp:
                     await self.engine.start_screen_share(peer)
         else:
             if not self._active_contact:
+                return
+            if not self._is_allowed(self._active_contact):
+                self._block_unverified(self._active_contact)
                 return
             if not self.engine.pcs.get(self._active_contact):
                 await self.engine.create_offer(self._active_contact, ws_send)
@@ -929,6 +1030,310 @@ class HelucrypticApp:
     # Settings dialog
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Identity QR / verification code
+    # ------------------------------------------------------------------
+
+    def _show_my_identity(self, e=None) -> None:
+        uname = (self.engine.my_username or self.username_input.value or "").strip()
+        if not uname:
+            self._log("Enter your username first to show your identity code.")
+            return
+        code = identity.encode_identity(
+            uname, self.keys["x25519_public"], self.keys["ed25519_public"])
+        controls = []
+        try:
+            controls.append(ft.Image(src_base64=identity.qr_png_base64(code),
+                                     width=220, height=220))
+        except Exception:
+            pass  # QR optional; the text code below is the source of truth
+        controls += [
+            ft.Text("Your verification code (share with a contact):",
+                    size=12, color="#72767d"),
+            ft.TextField(value=code, read_only=True, multiline=True, min_lines=2,
+                         max_lines=4, width=360, text_size=11),
+            ft.Text("They paste this into 'Import from code'. Compare the "
+                    "fingerprint out-of-band before trusting.", size=11, color="#72767d"),
+        ]
+        dlg = ft.AlertDialog(
+            title=ft.Text("My identity"),
+            content=ft.Column(controls, tight=True, spacing=8,
+                              horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                              scroll=ft.ScrollMode.AUTO),
+            actions=[ft.TextButton("Close", on_click=lambda ev: self._close_dialog(dlg))],
+        )
+        self._show_dialog(dlg)
+
+    def _show_import_identity(self, e=None) -> None:
+        field = ft.TextField(label="Paste verification code (HELU1:…)",
+                             autofocus=True, multiline=True, min_lines=2, max_lines=4, width=360)
+        error = ft.Text("", color="#ed4245", size=11, visible=False)
+
+        def do_import(ev):
+            try:
+                info = identity.decode_identity(field.value)
+            except ValueError as ex:
+                error.value = str(ex); error.visible = True; self.page.update(); return
+            self._close_dialog(dlg)
+            self._confirm_import(info)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Import contact from code"),
+            content=ft.Column([field, error], tight=True, spacing=6),
+            actions=[
+                ft.TextButton("Import", on_click=do_import),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    def _confirm_import(self, info: dict) -> None:
+        # Never auto-verify: the user must explicitly confirm this identity.
+        def confirm(ev):
+            upsert_contact(info["username"],
+                           x25519_pub=info["x25519_pub"], ed25519_pub=info["ed25519_pub"])
+            set_verified(info["username"], True)
+            self._refresh_contact_list()
+            self._refresh_participant_list()
+            self._session_allowed.discard(info["username"])
+            self._close_dialog(dlg)
+            self._log(f"Imported and verified {info['username']}.")
+
+        dlg = ft.AlertDialog(
+            title=ft.Text(f"Verify {info['username']}?"),
+            content=ft.Column([
+                ft.Text("Confirm this fingerprint matches what your contact shows "
+                        "you out-of-band:", size=12, color="#b9bbbe"),
+                ft.Text(info["fingerprint"], font_family="monospace", size=12, color="#dcddde",
+                        selectable=True),
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("Add & mark verified", on_click=confirm),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    # ------------------------------------------------------------------
+    # Encrypted backup / restore / emergency wipe
+    # ------------------------------------------------------------------
+
+    def _show_backup(self, e=None) -> None:
+        pw1 = ft.TextField(label="Backup passphrase", password=True,
+                           can_reveal_password=True, width=280, dense=True)
+        pw2 = ft.TextField(label="Confirm passphrase", password=True,
+                           width=280, dense=True)
+        incl = ft.Checkbox(label="Include message history", value=False)
+        err = ft.Text("", color="#ed4245", size=11, visible=False)
+
+        async def do_backup(ev):
+            if not pw1.value:
+                err.value = "Enter a passphrase"; err.visible = True; self.page.update(); return
+            if pw1.value != pw2.value:
+                err.value = "Passphrases do not match"; err.visible = True; self.page.update(); return
+            blob = backup.export_backup(pw1.value, include_history=incl.value)
+            self._close_dialog(dlg)
+            picker = ft.FilePicker()
+            self.page.services.append(picker)
+            self.page.update()
+            await picker.save_file(file_name="helucryptic-backup.helu", src_bytes=blob)
+            self._log("Encrypted backup saved.")
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Backup profile"),
+            content=ft.Column([
+                ft.Text("Encrypts keys, contacts and settings with your passphrase.",
+                        size=11, color="#72767d"),
+                pw1, pw2, incl, err,
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("Create backup", on_click=do_backup),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    def _show_restore(self, e=None) -> None:
+        pw = ft.TextField(label="Backup passphrase", password=True,
+                          can_reveal_password=True, width=280, dense=True)
+        err = ft.Text("", color="#ed4245", size=11, visible=False)
+
+        async def do_restore(ev):
+            if not pw.value:
+                err.value = "Enter the passphrase"; err.visible = True; self.page.update(); return
+            picker = ft.FilePicker()
+            self.page.services.append(picker)
+            self.page.update()
+            files = await picker.pick_files(allowed_extensions=["helu"])
+            if not files:
+                return
+            try:
+                data = Path(files[0].path).read_bytes()
+                restored = backup.import_backup(data, pw.value)
+            except ValueError as ex:
+                err.value = str(ex); err.visible = True; self.page.update(); return
+            # Reload everything from the restored files.
+            self.keys        = load_or_create_keys()
+            self.history_key = derive_history_key(self.keys["ed25519_private"])
+            self.engine.keys = self.keys
+            self.settings    = load_settings()
+            self.engine.settings = self.settings
+            self._update_perf_parameters()
+            self._refresh_contact_list()
+            self._close_dialog(dlg)
+            self._log(f"Restored: {', '.join(restored)}. Previous files saved as .bak")
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Restore profile"),
+            content=ft.Column([
+                ft.Text("Choose a .helu backup. Existing files are saved as .bak first.",
+                        size=11, color="#72767d"),
+                pw, err,
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("Choose file & restore", on_click=do_restore),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    def _show_wipe(self, e=None) -> None:
+        phrase = ft.TextField(label='Type WIPE to confirm', width=280, dense=True, autofocus=True)
+        err = ft.Text("", color="#ed4245", size=11, visible=False)
+
+        async def do_wipe(ev):
+            if phrase.value.strip() != "WIPE":
+                err.value = 'Type WIPE exactly to confirm'; err.visible = True; self.page.update(); return
+            # Close active connections first, then delete local data.
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except Exception:
+                    pass
+            for p in list(self.engine.pcs.keys()):
+                try:
+                    await self.engine.remove_peer(p)
+                except Exception:
+                    pass
+            removed = backup.emergency_wipe()
+            self._close_dialog(dlg)
+            self.page.controls.clear()
+            self.page.add(ft.Container(
+                padding=ft.Padding.all(40),
+                content=ft.Column([
+                    ft.Icon(ft.Icons.DELETE_FOREVER, color="#ed4245", size=40),
+                    ft.Text("Local profile wiped", size=20, weight=ft.FontWeight.BOLD, color="#ffffff"),
+                    ft.Text(f"Removed: {', '.join(removed) or '(nothing)'}", size=12, color="#b9bbbe"),
+                    ft.Text("Please restart helucryptic. A new identity will be created; "
+                            "contacts will need to re-verify you.", size=12, color="#72767d"),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            ))
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("⚠ Emergency wipe"),
+            content=ft.Column([
+                ft.Text("This permanently deletes your identity keys, contacts, settings "
+                        "and message history from this device. It cannot be undone, and "
+                        "contacts will need to re-verify you.", color="#dcddde", size=12),
+                phrase, err,
+            ], tight=True, spacing=8),
+            actions=[
+                ft.TextButton("Wipe everything", on_click=do_wipe),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    # ------------------------------------------------------------------
+    # Verified-Only gating
+    # ------------------------------------------------------------------
+
+    def _is_allowed(self, contact: str) -> bool:
+        if not self.settings.verified_only:
+            return True
+        if not contact:
+            return True  # room/group actions are not gated here
+        c = get_contact(contact)
+        if c and c.verified:
+            return True
+        return contact in self._session_allowed
+
+    def _block_unverified(self, contact: str) -> None:
+        c = get_contact(contact)
+        name = (c.nickname if c and c.nickname else contact)
+
+        def allow(ev):
+            self._session_allowed.add(contact)
+            self._close_dialog(dlg)
+            self._log(f"Allowed {name} for this session. Re-try the action.")
+
+        def verify(ev):
+            self._close_dialog(dlg)
+            self._show_contact_menu(contact)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Contact not verified"),
+            content=ft.Text(
+                f"Verified-Only mode is on and {name} isn't verified.\n\n"
+                f"Verify their fingerprint (View Fingerprint or Import from code), "
+                f"or allow them just for this session."),
+            actions=[
+                ft.TextButton("Verify…", on_click=verify),
+                ft.TextButton("Allow this session", on_click=allow),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+            ],
+        )
+        self._show_dialog(dlg)
+
+    def _show_diagnostics(self, e) -> None:
+        body = ft.Text("", size=12, color="#dcddde", selectable=True, font_family="monospace")
+        self._diag_open = True
+
+        def render() -> str:
+            d = self.engine.get_diagnostics()
+            lines = [
+                f"Signaling : {d['signaling']}",
+                f"TURN      : {'configured' if d['turn_configured'] else 'not configured'}",
+                f"Last error: {d['last_error'] or '(none)'}",
+                "Peers:",
+            ]
+            if not d["peers"]:
+                lines.append("  (none)")
+            for p in d["peers"]:
+                lines.append(f"  {p['peer']}: conn={p['connection']} ice={p['ice']}")
+            return "\n".join(lines)
+
+        body.value = render()
+
+        async def refresh_loop():
+            while self._diag_open:
+                body.value = render()
+                try:
+                    body.update()
+                except Exception:
+                    break
+                await asyncio.sleep(1)
+
+        def copy_safe(ev):
+            self.page.clipboard.set(render())
+            self._log("Safe diagnostics copied.")
+
+        def close(ev):
+            self._diag_open = False
+            self._close_dialog(dlg)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Connection diagnostics"),
+            content=ft.Column([body], width=420, height=260, scroll=ft.ScrollMode.AUTO),
+            actions=[
+                ft.TextButton("Copy safe diagnostics", on_click=copy_safe),
+                ft.TextButton("Close", on_click=close),
+            ],
+        )
+        self._show_dialog(dlg)
+        asyncio.ensure_future(refresh_loop())
+
     def _show_settings(self, e) -> None:
         mode_radio    = ft.RadioGroup(
             value=self.settings.security_mode,
@@ -967,9 +1372,51 @@ class HelucrypticApp:
         url_field = ft.TextField(
             value=self.settings.signaling_url, label="Signaling URL", width=280, dense=True,
         )
+        # --- Trust ---
+        verified_only_cb = ft.Checkbox(
+            label="Verified-Only mode (block actions with unverified contacts)",
+            value=self.settings.verified_only,
+        )
+        btn_show_identity = ft.TextButton("Show My Identity (QR / code)",
+                                          on_click=self._show_my_identity)
+        # --- Performance profile ---
+        _profile_labels = {
+            "old_pc": "Old PC (480p/5fps)", "balanced": "Balanced (720p/10fps)",
+            "quality": "Quality (1080p/30fps)", "overclock": "Overclock (2K/60fps)",
+        }
+        profile_opts = [ft.dropdown.Option(k, _profile_labels[k]) for k in PROFILES]
+        if self.settings.performance_profile not in PROFILES:
+            profile_opts.append(ft.dropdown.Option("custom", "Custom (from .env)"))
+        profile_dd = ft.Dropdown(
+            value=self.settings.performance_profile, width=240, options=profile_opts,
+        )
+        overclock_warn = ft.Text(
+            "⚠ Overclock (2K/60) is very CPU/bandwidth heavy and may not reach "
+            "60 FPS with software encoding.",
+            size=11, color="#faa61a", visible=self.settings.performance_profile == "overclock",
+        )
+        def on_profile_change(ev):
+            overclock_warn.visible = profile_dd.value == "overclock"
+            self.page.update()
+        profile_dd.on_change = on_profile_change
+
+        # --- TURN relay ---
+        turn_url_f  = ft.TextField(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
+                                   width=280, dense=True)
+        turn_user_f = ft.TextField(label="TURN username", value=self.settings.turn_username,
+                                   width=280, dense=True)
+        turn_pass_f = ft.TextField(label="TURN password", value=self.settings.turn_password,
+                                   width=280, dense=True, password=True, can_reveal_password=True)
+        turn_result = ft.Text("", size=11)
+        async def do_test_turn(ev):
+            from webrtc_engine import test_turn
+            turn_result.value = "Testing…"; turn_result.color = "#b9bbbe"; self.page.update()
+            ok, msg = await test_turn(turn_url_f.value.strip(), turn_user_f.value.strip(), turn_pass_f.value)
+            turn_result.value = msg; turn_result.color = "#57f287" if ok else "#ed4245"; self.page.update()
+        btn_test_turn = ft.TextButton("Test TURN", on_click=do_test_turn)
 
         async def export_keys(ev):
-            data   = (Path.home() / ".helucryptic" / "keys.json").read_bytes()
+            data   = (paths.DATA_DIR / "keys.json").read_bytes()
             picker = ft.FilePicker()
             self.page.services.append(picker)
             self.page.update()
@@ -981,7 +1428,8 @@ class HelucrypticApp:
             self.page.update()
             files = await picker.pick_files(allowed_extensions=["json"])
             if files:
-                shutil.copy(files[0].path, Path.home() / ".helucryptic" / "keys.json")
+                paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy(files[0].path, paths.DATA_DIR / "keys.json")
                 self.keys        = load_or_create_keys()
                 self.history_key = derive_history_key(self.keys["ed25519_private"])
                 self.engine.keys = self.keys
@@ -1025,7 +1473,16 @@ class HelucrypticApp:
                 self.settings.retention_days = int(retention_dd.value)
             self.settings.security_mode = mode_radio.value
             self.settings.signaling_url = url_field.value
+            # Applying a profile sets the 5 concrete knobs + label; "custom"
+            # leaves the existing concrete values untouched.
+            if profile_dd.value in PROFILES:
+                apply_profile(self.settings, profile_dd.value)
+            self.settings.turn_url      = turn_url_f.value.strip()
+            self.settings.turn_username = turn_user_f.value.strip()
+            self.settings.turn_password = turn_pass_f.value
+            self.settings.verified_only = verified_only_cb.value
             save_settings(self.settings)
+            self._update_perf_parameters()  # apply jpeg/tile knobs live
             self._close_dialog(dlg)
 
         dlg = ft.AlertDialog(
@@ -1038,11 +1495,36 @@ class HelucrypticApp:
                 custom_error,
                 url_field,
                 ft.Divider(color="#40444b"),
+                ft.Text("Performance profile", size=12, color="#72767d"),
+                profile_dd,
+                overclock_warn,
+                ft.Divider(color="#40444b"),
+                ft.Text("TURN relay (optional — fixes strict-NAT connections)", size=12, color="#72767d"),
+                turn_url_f,
+                turn_user_f,
+                turn_pass_f,
+                ft.Row([btn_test_turn, turn_result]),
+                ft.Divider(color="#40444b"),
+                ft.Text("Trust & verification", size=12, color="#72767d"),
+                verified_only_cb,
+                btn_show_identity,
+                ft.Divider(color="#40444b"),
                 ft.Row([
                     ft.FilledButton("Export Keys",     on_click=export_keys),
                     ft.FilledButton("Import Keys",     on_click=import_keys),
                     ft.FilledButton("Regenerate Keys", on_click=regen_keys),
                 ], wrap=True, spacing=6),
+                ft.Divider(color="#40444b"),
+                ft.Text("Data & backup", size=12, color="#72767d"),
+                ft.Text(f"Data folder: {paths.DATA_DIR}"
+                        + ("  (portable)" if paths.is_portable() else ""),
+                        size=11, color="#b9bbbe", selectable=True),
+                ft.Row([
+                    ft.FilledButton("Backup Profile…",  on_click=self._show_backup),
+                    ft.FilledButton("Restore Profile…", on_click=self._show_restore),
+                ], wrap=True, spacing=6),
+                ft.TextButton("⚠ Emergency Wipe…", on_click=self._show_wipe,
+                              style=ft.ButtonStyle(color="#ed4245")),
             ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO),
             actions=[
                 ft.TextButton("Save",   on_click=save_settings_cb),
@@ -1101,6 +1583,7 @@ class HelucrypticApp:
         self.status_dot.bgcolor   = color
         self.status_label.value   = label
         self.status_label.color   = color
+        self.engine.signaling_status = label.lower()
         self.page.update()
 
     def _append_to_log(self, direction: str, text: str, verified: bool, label: str = "") -> None:
@@ -1144,6 +1627,11 @@ class StartupScreen:
             hint_text="ws://your-server-ip:8000",
             border_color="#40444b", focused_border_color="#5865f2", color="#dcddde",
         )
+        self._custom_pw_field = ft.TextField(
+            label="Server password (optional)", password=True, can_reveal_password=True,
+            width=280, dense=True,
+            border_color="#40444b", focused_border_color="#5865f2", color="#dcddde",
+        )
         self._url_error = ft.Text("", color="#ed4245", size=11, visible=False)
 
         card_a = ft.Container(
@@ -1165,6 +1653,7 @@ class StartupScreen:
                         ft.Text("Custom server", weight=ft.FontWeight.BOLD, color="#dcddde")], spacing=8),
                 ft.Text("Connect to your own self-hosted server.", size=12, color="#b9bbbe"),
                 self._url_field,
+                self._custom_pw_field,
                 self._url_error,
             ], spacing=8, tight=True),
         )
@@ -1182,13 +1671,14 @@ class StartupScreen:
 
         def connect(e):
             if self._selected == "a":
-                if self._pw_field.value != HELUCRYPTIC_SERVER_PASSWORD:
-                    self._pw_error.value   = "Incorrect password"
+                pw = self._pw_field.value or ""
+                if not pw:
+                    self._pw_error.value   = "Enter the server access password"
                     self._pw_error.visible = True
                     self.page.update()
                     return
                 sounds.play("authorized")
-                self.on_done(HELUCRYPTIC_SERVER_URL)
+                self.on_done(HELUCRYPTIC_SERVER_URL, pw)
             else:
                 url = self._url_field.value.strip()
                 if not url.startswith(("ws://", "wss://", "http://", "https://")):
@@ -1197,7 +1687,7 @@ class StartupScreen:
                     self.page.update()
                     return
                 # Store normalized to a WebSocket scheme (https -> wss, http -> ws)
-                self.on_done(_to_ws_url(url))
+                self.on_done(_to_ws_url(url), self._custom_pw_field.value or "")
 
         self.page.add(
             ft.Column([
@@ -1255,13 +1745,15 @@ async def main(page: ft.Page) -> None:
     else:
         page.window.icon = str(Path(__file__).parent / "icon.ico")
 
-    def launch_app(signaling_url: str) -> None:
+    def launch_app(signaling_url: str, password: str = "") -> None:
         page.controls.clear()
         page.update()
         s = load_settings()
         s.signaling_url = signaling_url
         save_settings(s)
         app = HelucrypticApp(page)
+        # Thread the access token through so the app sends it to the server.
+        app._server_password = password or config.SERVER_PASSWORD
         app._refresh_contact_list()
 
     StartupScreen(page, on_done=launch_app)

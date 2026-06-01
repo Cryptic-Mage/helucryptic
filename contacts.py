@@ -6,7 +6,7 @@ from typing import Optional
 
 from crypto import compute_fingerprint
 
-DATA_DIR = Path.home() / ".helucryptic"
+from paths import DATA_DIR
 _CONTACTS_PATH = DATA_DIR / "contacts.json"
 
 
@@ -57,11 +57,20 @@ def upsert_contact(
     contacts = load_contacts()
     existing = next((c for c in contacts if c.username == username), None)
     if existing:
+        # A changed public key on a known contact may indicate a MITM or a
+        # re-keyed peer. Either way the old verification no longer applies, so
+        # drop the verified flag — the user must re-verify the new fingerprint.
+        key_changed = bool(
+            (x25519_pub  and existing.x25519_pub  and x25519_pub  != existing.x25519_pub) or
+            (ed25519_pub and existing.ed25519_pub and ed25519_pub != existing.ed25519_pub)
+        )
         if x25519_pub:
             existing.x25519_pub = x25519_pub
             existing.fingerprint = compute_fingerprint(x25519_pub)
         if ed25519_pub:
             existing.ed25519_pub = ed25519_pub
+        if key_changed:
+            existing.verified = False
         existing.last_seen = datetime.now(timezone.utc).isoformat()
         save_contacts(contacts)
         return existing

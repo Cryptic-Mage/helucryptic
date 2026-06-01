@@ -5,7 +5,7 @@ from typing import Optional
 
 from crypto import paseto_decrypt, paseto_encrypt
 
-DATA_DIR = Path.home() / ".helucryptic"
+from paths import DATA_DIR
 _DB_PATH  = DATA_DIR / "history.db"
 
 
@@ -13,6 +13,14 @@ def _get_conn() -> sqlite3.Connection:
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
+    # WAL lets the UI read while a write is in flight (no "database is locked"
+    # stalls on slow disks); NORMAL sync keeps writes cheap without risking
+    # corruption on crash.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
     return conn
 
 
@@ -36,6 +44,16 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {typedef}")
             except Exception:
                 pass  # column already exists
+        # Indices so the per-conversation history reads don't full-scan + sort
+        # the whole table (matters once history grows on an old drive).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_contact_ts "
+            "ON messages (contact, timestamp DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_msg_room_ts "
+            "ON messages (room_id, timestamp DESC)"
+        )
 
 
 def write_message(

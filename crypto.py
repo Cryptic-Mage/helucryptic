@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.serialization import (
 import pyseto
 from pyseto import Key
 
-DATA_DIR = Path.home() / ".helucryptic"
+from paths import DATA_DIR
 
 
 def ensure_data_dir() -> None:

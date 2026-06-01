@@ -1,7 +1,14 @@
-docs
+docs/*
+!docs/FEATURE_SPEC.md
 tests
 dist
 build
-cloudflare
+cloudflare/.wrangler
 __pycache__
 .pytest_cache
+.pytest-tmp-*
+.env
+*.spec.bak
+Helucryptic.spec
+
+
