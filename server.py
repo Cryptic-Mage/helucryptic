@@ -4,6 +4,12 @@ import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 app = FastAPI(title="helucryptic-signaling")
 
 # Shared access token. When set (via env), every WebSocket connection must send

@@ -54,8 +54,16 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
     ]))
     try:
         pc.createDataChannel("probe")
-        # setLocalDescription blocks until (non-trickle) ICE gathering completes.
-        await asyncio.wait_for(pc.setLocalDescription(await pc.createOffer()), timeout=8)
+        # setLocalDescription starts ICE gathering.
+        await pc.setLocalDescription(await pc.createOffer())
+        
+        # Wait for ICE gathering to complete (timeout at 8s).
+        if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
+            async def wait_gathering():
+                while pc.iceGatheringState != "complete":
+                    await asyncio.sleep(0.05)
+            await asyncio.wait_for(wait_gathering(), timeout=8.0)
+            
         sdp = pc.localDescription.sdp if pc.localDescription else ""
         if "typ relay" in sdp:
             return (True, "Relay reachable")
@@ -701,6 +709,18 @@ class WebRTCEngine:
             print(f"[rtc] {self.my_username}: creating OFFER for {peer} (gathering ICE…)", flush=True)
             offer = await self.pcs[peer].createOffer()
             await self.pcs[peer].setLocalDescription(offer)
+            
+            # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
+            pc = self.pcs[peer]
+            if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
+                try:
+                    for _ in range(100):
+                        if pc.iceGatheringState == "complete":
+                            break
+                        await asyncio.sleep(0.05)
+                except Exception as ex:
+                    print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
+
             await self._send_ws({
                 "target": peer,
                 "type":   "offer",
@@ -735,6 +755,18 @@ class WebRTCEngine:
             )
             answer = await self.pcs[sender].createAnswer()
             await self.pcs[sender].setLocalDescription(answer)
+            
+            # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
+            pc = self.pcs[sender]
+            if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
+                try:
+                    for _ in range(100):
+                        if pc.iceGatheringState == "complete":
+                            break
+                        await asyncio.sleep(0.05)
+                except Exception as ex:
+                    print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
+
             await ws_send({
                 "target": sender,
                 "type":   "answer",
