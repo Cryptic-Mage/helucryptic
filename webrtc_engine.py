@@ -452,16 +452,34 @@ class WebRTCEngine:
     def get_diagnostics(self) -> dict:
         """Redacted connection snapshot for the diagnostics UI — never includes
         passwords, keys, SDP, or ICE candidate strings."""
-        peers = [
-            {"peer": peer, "connection": pc.connectionState,
-             "ice": self._ice_states.get(peer, "new")}
-            for peer, pc in self.pcs.items()
-        ]
+        peers = []
+        for peer, pc in self.pcs.items():
+            dc = self.data_channels.get(peer)
+            peers.append({
+                "peer":          peer,
+                "connection":    pc.connectionState,
+                "signaling":     pc.signalingState,
+                "ice":           self._ice_states.get(peer, pc.iceConnectionState),
+                "ice_gathering": pc.iceGatheringState,
+                "datachannel":   getattr(dc, "readyState", "—") if dc else "none",
+                "hello_sent":    bool(self._hello_sent.get(peer)),
+                "hello_ok":      bool(self._peer_hello_verified.get(peer)),
+                "session_key":   peer in self.session_keys,
+            })
+        try:
+            hub = self.current_hub() if self.room_id else ""
+        except Exception:
+            hub = "?"
         return {
-            "signaling": self.signaling_status,
+            "signaling":       self.signaling_status,
+            "my_username":     self.my_username,
+            "room_id":         self.room_id or "",
+            "hub":             hub,
+            "security_mode":   getattr(self.settings, "security_mode", ""),
             "turn_configured": bool(getattr(self.settings, "turn_url", "")),
-            "last_error": self.last_error,
-            "peers": peers,
+            "num_peers":       len(self.pcs),
+            "last_error":      self.last_error,
+            "peers":           peers,
         }
 
     # ------------------------------------------------------------------
@@ -688,25 +706,62 @@ class WebRTCEngine:
             return
         if self.settings.security_mode == "e2ee":
             prior = get_contact(peer)
-            # SEC-01: Verify against the pre-stored public key if we already know this contact.
-            # Only use the self-claimed public key for new contacts (TOFU).
+            # The hello's signed payload always carries the sender's self-claimed
+            # ed25519 key. Pull it out so we can tell a genuine key rotation (a
+            # different but internally-consistent identity) apart from garbage.
+            try:
+                parts = frame["token"].split(".")
+                claimed_pub = json.loads(
+                    _b64.urlsafe_b64decode(parts[2] + "==")[:-64]
+                )["ed25519_pub"]
+            except Exception:
+                claimed_pub = None
+
+            # SEC-01: Verify against the pre-stored public key if we already know
+            # this contact. Only use the self-claimed key for new contacts (TOFU).
             if prior and prior.ed25519_pub:
                 verify_pub = prior.ed25519_pub
             else:
-                try:
-                    parts = frame["token"].split(".")
-                    raw = _b64.urlsafe_b64decode(parts[2] + "==")
-                    verify_pub = json.loads(raw[:-64])["ed25519_pub"]
-                except Exception:
+                verify_pub = claimed_pub
+                if verify_pub is None:
                     return
 
             try:
                 payload = paseto_verify(frame["token"], verify_pub)
             except Exception:
-                # Signature mismatch: either the key doesn't match the signature,
-                # or the signature is invalid for the stored key.
-                print(f"[crypto] Signature verification failed for peer {peer}.", flush=True)
-                return
+                # The hello didn't verify against the key we have pinned. Decide
+                # whether the peer simply re-keyed (reinstalled / regenerated) by
+                # checking the hello against the key it claims for itself. A valid
+                # signature there means a real identity — just a different one than
+                # we pinned — i.e. a key rotation, not noise.
+                rotation = bool(
+                    claimed_pub and prior and prior.ed25519_pub
+                    and claimed_pub != prior.ed25519_pub
+                )
+                if rotation:
+                    try:
+                        payload = paseto_verify(frame["token"], claimed_pub)
+                    except Exception:
+                        rotation = False
+                if not rotation:
+                    print(f"[crypto] Signature verification failed for peer {peer}.", flush=True)
+                    return
+                # A VERIFIED contact's signing key changing is a security event
+                # (possible MITM): alert the user and abort — never auto-accept.
+                if prior.verified:
+                    print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
+                    if self.on_key_change:
+                        self.on_key_change(peer)
+                    asyncio.create_task(self.remove_peer(peer))
+                    return
+                # An UNVERIFIED (trust-on-first-use) contact re-keyed. Don't drop
+                # their frames silently — surface the change AND re-pin the new key
+                # (the success path below calls upsert_contact) so chat and calls
+                # keep working after the peer regenerated its identity.
+                print(f"[crypto] Unverified contact {peer} re-keyed — re-pinning (TOFU).", flush=True)
+                if self.on_key_change:
+                    self.on_key_change(peer)
+                # `payload` is set from the claimed-key verification; fall through.
 
             # Bind the claimed identity to the signaling peer name. A peer
             # connected to signaling as `peer` must not be able to assert a
@@ -1145,15 +1200,37 @@ class WebRTCEngine:
         self._send_ws    = ws_send
         if sender not in self.pcs:
             self._init_pc(sender)
+        pc = self.pcs[sender]
+
+        # Perfect-negotiation glare handling. add_peer makes the alphabetically
+        # LOWER username the designated offerer; the other side is "polite". If an
+        # offer arrives while our pc isn't "stable", both sides offered at once (a
+        # collision): the offerer keeps its own offer and ignores theirs; the
+        # polite peer discards its half-built offer and accepts theirs. Without
+        # this, setRemoteDescription(offer) raises InvalidStateError and the
+        # connection is stuck at "connecting" forever (no answer, ICE never runs).
+        if pc.signalingState != "stable":
+            polite = self.my_username > sender
+            print(f"[rtc] {self.my_username}: offer GLARE with {sender} "
+                  f"(state={pc.signalingState}, polite={polite})", flush=True)
+            if not polite:
+                print(f"[rtc] {self.my_username}: ignoring colliding offer from {sender} "
+                      f"(we are the designated offerer)", flush=True)
+                return
+            # Polite peer: rebuild the pc clean and take their offer (aiortc has
+            # no reliable rollback).
+            await self.remove_peer(sender)
+            self._init_pc(sender)
+            pc = self.pcs[sender]
+
         try:
-            await self.pcs[sender].setRemoteDescription(
+            await pc.setRemoteDescription(
                 RTCSessionDescription(sdp=data["sdp"], type="offer")
             )
-            answer = await self.pcs[sender].createAnswer()
-            await self.pcs[sender].setLocalDescription(answer)
-            
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+
             # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
-            pc = self.pcs[sender]
             if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
                 try:
                     for _ in range(100):
@@ -1166,11 +1243,11 @@ class WebRTCEngine:
             await ws_send({
                 "target": sender,
                 "type":   "answer",
-                "data":   {"sdp": self.pcs[sender].localDescription.sdp, "type": "answer"},
+                "data":   {"sdp": pc.localDescription.sdp, "type": "answer"},
             })
             print(f"[rtc] {self.my_username}: SENT answer to {sender}", flush=True)
         except Exception as ex:
-            self.last_error = f"offer from {sender}: {type(ex).__name__}"
+            self.last_error = f"offer from {sender}: {type(ex).__name__}: {ex}"
             print(f"[rtc] {self.my_username}: handle_offer FAILED for {sender}: {type(ex).__name__}: {ex}", flush=True)
 
     async def handle_answer(self, data: dict, sender: str = "") -> None:

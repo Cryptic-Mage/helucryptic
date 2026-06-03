@@ -119,6 +119,22 @@ async def websocket_endpoint(
             target   = payload.get("target")
             msg_type = payload.get("type")
 
+            # --- Presence query (directed at the server, not a peer) ---
+            # The client sends the usernames it cares about (its local contacts)
+            # and we reply with the subset that currently hold a live connection.
+            # Privacy-preserving: the server never volunteers who is online, it
+            # only confirms names the asker already knows. Additive + backward
+            # compatible — older clients simply never send this.
+            if msg_type == "presence":
+                wanted = (payload.get("data") or {}).get("usernames", [])
+                online = [u for u in wanted if u in active_connections]
+                await websocket.send_text(json.dumps({
+                    "sender": "system",
+                    "type":   "presence",
+                    "data":   {"online": online},
+                }))
+                continue
+
             if not target or not msg_type:
                 continue
 

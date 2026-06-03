@@ -19,6 +19,14 @@ def _base_dir() -> Path:
 
 
 def resolve_data_dir(base: Path | None = None) -> Path:
+    # Explicit override wins — lets you run several clients (each its own
+    # identity) on one machine for testing:
+    #   $env:HELUCRYPTIC_DATA_DIR = "C:\hc\rest"; python client_claude.py
+    # Without distinct data dirs the instances share one keys.json (one
+    # identity), which breaks E2EE session-key agreement.
+    override = os.environ.get("HELUCRYPTIC_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
     base = base if base is not None else _base_dir()
     if (base / _PORTABLE_FLAG).exists():
         return base / "data"

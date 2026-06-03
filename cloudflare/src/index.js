@@ -151,6 +151,21 @@ export class SignalHub {
     }
     const target = payload.target;
     const type = payload.type;
+
+    // --- Presence query (directed at the server, not a peer) ---
+    // The client sends the usernames it cares about (its local contacts)
+    // and we reply with the subset that currently hold a live connection.
+    if (type === "presence") {
+      const wanted = (payload.data || {}).usernames || [];
+      const online = wanted.filter((u) => this._findUser(u) !== null);
+      ws.send(JSON.stringify({
+        sender: "system",
+        type: "presence",
+        data: { online },
+      }));
+      return;
+    }
+
     if (!target || !type) return;
     if (SERVER_TYPES.has(type)) return; // never relay server-generated types
 

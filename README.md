@@ -27,7 +27,7 @@ No message ever touches a server. No file is ever parked in a bucket. There's no
 - **🔐 Real cryptography, not vibes** — **forward-secret** X25519 ECDH with a fresh ephemeral key every session → HKDF-SHA256 session keys, Ed25519-signed identities, and PASETO v4 (XChaCha20-Poly1305) message tokens.
 - **🧬 Fingerprint verification** that *watches its own back* — if a verified contact's key ever changes, helucryptic un-verifies them and warns you of a possible impostor.
 - **🗄️ Encrypted local history** (SQLite in WAL mode) with a retention policy you control.
-- **🌍 Punches through NATs** with STUN, optional TURN relays, and automatic NAT-PMP port forwarding (great with VPN P2P port forwarding).
+- **🌍 NAT Traversal & Port Forwarding** — Traverses firewalls with STUN, TURN relays, and **automatic NAT-PMP port-forwarding** (auto-detects VPN/router port mapping). Automatically publishes mapped ports to signaling, monitors reachability changes, and binds the WebRTC engine's ICE agent to the forwarded port pool to facilitate direct P2P connection even behind tough NATs. **Crucially, only one of the two peers needs to have an open/forwarded port for a direct P2P connection to succeed (the peer behind a strict NAT can establish a connection by sending traffic to the forwarded port of the reachable peer).**
 - **🪶 Runs on a potato** — purpose-built to stay smooth on old, weak hardware (details below).
 
 ## 🔒 The crypto stack
@@ -45,7 +45,8 @@ No message ever touches a server. No file is ever parked in a bucket. There's no
 | File / Folder | Role |
 |---|---|
 | `main.py` | Entry point (`flet` app) |
-| `client.py` | Flet UI + signaling client + app wiring |
+| `client.py` | Original Flet UI + signaling client + app wiring |
+| `client_gem.py` | Premium reskinned Flet UI: featuring custom Google Fonts (Outfit, Inter, Fira Code), dynamic animated card transitions, speech bubble styling, and visual online status indicator badges/WiFi icons |
 | `webrtc_engine.py` | WebRTC engine: peers, media tracks, encryption, file transfer, group relay |
 | `server.py` | FastAPI signaling server (relays SDP/ICE only) |
 | `natpmp.py` | NAT-PMP port-forward discovery & renewal (VPN/router reachability) |
@@ -162,7 +163,7 @@ python main.py
 
 Want a friend on the call? Spin up a second client, point it at the same signaling URL, create a room, and share the code.
 
-For VPS/HTTPS deployment and a full feature walkthrough, see **`GUIDE.md`**.
+For VPS/HTTPS deployment and a full feature walkthrough, see [GUIDE.md](GUIDE.md).
 For WebSocket hosting troubleshooting, see **`DEPLOY-WEBSOCKETS.md`**.
 
 ## 📦 Building a standalone executable

@@ -262,6 +262,30 @@ Click the **phone** icon to start a voice-only call. The receiver sees an "Incom
 
 ---
 
+## NAT Traversal, Port Forwarding & Hub-Election
+
+helucryptic features a state-of-the-art traversal engine designed to enable direct P2P connections under difficult network conditions.
+
+### 1. Automatic NAT-PMP Port Forwarding
+When **Port Forwarding** is enabled in Settings, the client:
+- Automatically discovers the local network gateway (using NAT-PMP) or VPN tunnel.
+- Allocates and requests a mapped port pool.
+- Binds the local WebRTC engine's ICE agent socket to bind directly to this forwarded port.
+- Publishes the mapped port(s) to the signaling server, which other peers fetch to connect directly without intermediate relay server latency.
+
+**Crucially, only one of the two peers needs to have an open/forwarded port (or public IP) for a direct P2P connection to succeed.** The peer behind a strict symmetric NAT can connect directly to the forwarded port of the reachable peer, bypassing the need for a TURN relay. This means that if you are behind a strict firewall/NAT, as long as the contact you are calling has port forwarding enabled and working (or is on a public IP), you will still establish a direct, low-latency P2P connection.
+
+
+### 2. Hub-Election (Group Call Relay)
+In group calls (rooms), establishing a mesh of voice/video feeds between all participants is extremely heavy. helucryptic solves this using a dynamic **Hub-Election algorithm**:
+- **Capability Announcement**: Every peer monitors their own reachability (e.g. public IP, port-forwarded, behind strict symmetric NAT).
+- **Announcements**: Peers broadcast their capability tier (0 to 3) and epoch sequence number to all room members.
+- **Election**: The client automatically elects the host with the highest reachability tier (i.e. the one with a port forward or public IP) as the **Media Relay Hub**.
+- **Media Fan-out**: All audio/video streams are sent *only* to the elected Hub, which then duplicates and forwards (relays) them to the other participants.
+- **E2EE Integrity**: While media is decrypted at the hub for forwarding (requiring trust in the elected hub), text chat and files remain fully end-to-end encrypted with the room's group key. The signaling server is still excluded from the media path.
+
+---
+
 ## Data stored on your computer
 
 | File | Contents |
