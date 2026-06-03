@@ -4,7 +4,7 @@ from pathlib import Path
 
 import config
 
-from paths import DATA_DIR
+from paths import DATA_DIR, write_private_text
 _SETTINGS_PATH = DATA_DIR / "settings.json"
 
 # Performance profiles map a single user choice to the concrete media caps.
@@ -39,6 +39,9 @@ class Settings:
     turn_url: str = ""
     turn_username: str = ""
     turn_password: str = ""
+    # Port forwarding (VPN/router) — bind ICE to a reachable forwarded port
+    port_forward_enabled: bool = False
+    forwarded_port: int = 0
     # Trust: when on, block 1-to-1 actions with unverified contacts.
     verified_only: bool = False
 
@@ -71,6 +74,14 @@ def _clamp(s: "Settings") -> None:
         except (TypeError, ValueError):
             v = lo
         setattr(s, name, max(lo, min(hi, v)))
+    # The forwarded port only matters when enabled; clamp it to a valid,
+    # non-privileged range then. Left at 0 (unset) when disabled.
+    if s.port_forward_enabled:
+        try:
+            p = int(s.forwarded_port)
+        except (TypeError, ValueError):
+            p = 1024
+        s.forwarded_port = max(1024, min(65535, p))
 
 
 def _seed_missing(s: "Settings", raw: dict) -> None:
@@ -81,6 +92,8 @@ def _seed_missing(s: "Settings", raw: dict) -> None:
         "screen_fps": config.SCREEN_FPS, "jpeg_quality": config.JPEG_QUALITY,
         "tile_render_fps": config.TILE_RENDER_FPS, "turn_url": config.TURN_URL,
         "turn_username": config.TURN_USERNAME, "turn_password": config.TURN_PASSWORD,
+        "port_forward_enabled": config.PORT_FORWARD_ENABLED,
+        "forwarded_port": config.FORWARDED_PORT,
     }
     for k, v in seeds.items():
         if k not in raw:
@@ -105,7 +118,7 @@ def load_settings() -> Settings:
 
 def save_settings(s: Settings) -> None:
     DATA_DIR.mkdir(exist_ok=True)
-    _SETTINGS_PATH.write_text(json.dumps(asdict(s), indent=2))
+    write_private_text(_SETTINGS_PATH, json.dumps(asdict(s), indent=2))
 
 
 # Convenience re-export so callers can do `from settings import asdict`.

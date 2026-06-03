@@ -3,6 +3,7 @@ import base64 as _b64
 import hashlib
 import json
 import os
+import tempfile
 import threading
 from collections import deque
 from typing import Callable, Optional
@@ -29,7 +30,8 @@ from aiortc.contrib.media import MediaRelay
 
 import config
 from crypto import (
-    derive_session_key,
+    derive_session_key_v2,
+    generate_ephemeral_x25519,
     paseto_decrypt,
     paseto_encrypt,
     paseto_sign,
@@ -42,6 +44,101 @@ _STUN_SERVERS = [
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
 ]
+
+MAX_PRE_HELLO_FRAMES = 64
+MAX_PRE_HELLO_BYTES = 1 * 1024 * 1024
+MAX_INCOMING_FILE_SIZE = 2 * 1024 * 1024 * 1024
+
+# Reject a signed hello whose timestamp is implausibly far from now. Generous
+# enough to tolerate badly-set clocks; the real replay defence is the ephemeral
+# DH (a replayed hello carries a stale ephemeral the attacker can't complete).
+MAX_HELLO_SKEW_SECONDS = 24 * 3600
+
+
+# --- VPN/router forwarded-port ICE binding (Approach A) ---------------------
+# When a user has a genuinely reachable forwarded port (e.g. Proton VPN P2P
+# port forwarding), we bind aioice's host socket to that port instead of a
+# random one. aioice hardcodes ``local_addr=(address, 0)`` (aioice/ice.py) and
+# exposes no port knob, so we wrap the event loop's create_datagram_endpoint
+# once and rewrite ONLY that exact bind. The bound socket is a normal host
+# socket, so aioice's existing STUN step auto-advertises the public mapping
+# (ExitIP:forwarded_port) as a srflx candidate — no candidate injection. The
+# feature is purely additive: if the bind fails (e.g. port already in use by
+# another peer connection), aioice's own ``except OSError`` skips it and normal
+# gathering continues.
+_forward_active = False
+_vpn_ip: str | None = None
+_forward_port = 0
+_forward_pool: list = []     # available mapped ports to assign, in order
+_forward_used: int = 0       # how many pool ports already assigned this gather cycle
+
+
+def set_forwarded_ports(vpn_ip: str, ports) -> None:
+    """Publish a pool of forwarded ports; each new matching ICE bind takes the next one."""
+    global _forward_active, _vpn_ip, _forward_pool, _forward_used, _forward_port
+    _vpn_ip = vpn_ip
+    _forward_pool = list(ports)
+    _forward_used = 0
+    _forward_active = bool(_forward_pool)
+    _forward_port = _forward_pool[0] if _forward_pool else 0   # keep single-port field meaningful
+
+
+def set_forwarded_port(vpn_ip: str, port: int) -> None:
+    """Back-compat shim: a one-element pool."""
+    set_forwarded_ports(vpn_ip, [int(port)])
+
+
+def clear_forwarded_port() -> None:
+    """Disable forwarded-port binding; new gathers fall back to normal ports."""
+    global _forward_active, _vpn_ip, _forward_port, _forward_pool, _forward_used
+    _forward_active, _vpn_ip, _forward_port = False, None, 0
+    _forward_pool, _forward_used = [], 0
+
+
+def _make_bind_wrapper(orig):
+    async def wrapped(protocol_factory, *args, local_addr=None, **kwargs):
+        global _forward_used
+        if _forward_active and local_addr == (_vpn_ip, 0) and _forward_used < len(_forward_pool):
+            local_addr = (_vpn_ip, _forward_pool[_forward_used])
+            _forward_used += 1
+        return await orig(protocol_factory, *args, local_addr=local_addr, **kwargs)
+    return wrapped
+
+
+def install_forward_patch(loop) -> None:
+    """Wrap the loop's create_datagram_endpoint once (idempotent)."""
+    if getattr(loop, "_helu_forward_patched", False):
+        return
+    loop.create_datagram_endpoint = _make_bind_wrapper(loop.create_datagram_endpoint)
+    loop._helu_forward_patched = True
+
+
+# ---------------------------------------------------------------------------
+# Hub-election helpers (pure, deterministic — no I/O)
+# ---------------------------------------------------------------------------
+
+def reachability_tier(settings, current_port=None) -> int:
+    """0=behind NAT, 1=TURN reachable, 2=directly reachable (forwarded port)."""
+    if (current_port and current_port > 0) or (
+            getattr(settings, "port_forward_enabled", False)
+            and getattr(settings, "forwarded_port", 0)):
+        return 2
+    if getattr(settings, "turn_url", ""):
+        return 1
+    return 0
+
+
+def elect_hub(member_tiers: dict, creator: str) -> str:
+    """Deterministic hub election. Same inputs -> same hub on every client."""
+    if not member_tiers:
+        return creator
+    best = max(member_tiers.values())
+    if best == 0:
+        return creator
+    top = sorted(u for u, t in member_tiers.items() if t == best)
+    if creator in top:
+        return creator
+    return top[0]
 
 
 async def test_turn(turn_url: str, username: str = "", password: str = "") -> tuple[bool, str]:
@@ -75,6 +172,53 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
     finally:
         try:
             await pc.close()
+        except Exception:
+            pass
+
+
+def test_forwarded_port(vpn_ip: str, port: int,
+                        stun_host: str = "stun.l.google.com",
+                        stun_port: int = 19302) -> tuple[bool, str]:
+    """Bind the forwarded port and confirm STUN sees the same public port.
+
+    Verifies the forward actually works: that we can bind ``vpn_ip:port`` and
+    that the VPN/router preserves the port (so the public srflx candidate will
+    be ``ExitIP:port`` and reachable). A mismatch means split-tunnel or a NAT
+    that doesn't preserve the port.
+    """
+    import secrets as _secrets
+    import socket as _socket
+
+    from aioice import stun
+
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.settimeout(3.0)
+    except OSError as ex:
+        return (False, f"Socket error: {type(ex).__name__}")
+    try:
+        try:
+            s.bind((vpn_ip, port))
+        except OSError as ex:
+            return (False, f"Can't bind {vpn_ip}:{port} ({type(ex).__name__})")
+        req = stun.Message(
+            message_method=stun.Method.BINDING,
+            message_class=stun.Class.REQUEST,
+            transaction_id=_secrets.token_bytes(12),
+        )
+        s.sendto(bytes(req), (stun_host, stun_port))
+        data, _ = s.recvfrom(1024)
+        resp = stun.parse_message(data)
+        ext_ip, ext_port = resp.attributes["XOR-MAPPED-ADDRESS"]
+        if ext_port == port:
+            return (True, f"Reachable: {ext_ip}:{ext_port}")
+        return (False, f"Public port {ext_port} ≠ forwarded {port} "
+                       "(split-tunnel or NAT not preserving port)")
+    except Exception as ex:
+        return (False, f"Error: {type(ex).__name__}")
+    finally:
+        try:
+            s.close()
         except Exception:
             pass
 
@@ -221,9 +365,15 @@ class WebRTCEngine:
         self.session_keys:         dict[str, bytes]             = {}
         self._hello_sent:          dict[str, bool]              = {}
         self._peer_hello_verified: dict[str, bool]              = {}
+        self._eph_priv:            dict[str, str]               = {}  # peer -> our per-session ephemeral X25519 priv (b64)
         self._pre_hello_buffers:   dict[str, deque]             = {}
+        self._pre_hello_bytes:     dict[str, int]               = {}
         self._is_negotiating:      dict[str, bool]              = {}
+        self._neg_dirty:           dict[str, bool]              = {}
         self._file_buffers:        dict[str, dict]              = {}
+        self._forwarded:           dict[str, list]              = {}  # source_peer -> [(dest, sub, sub_id)]
+        self._origin_map:          dict[str, str]               = {}  # track_id -> origin username
+        self._origin_waiters:      dict[str, asyncio.Future]    = {}  # track_id -> Future waiting for origin
 
         # Shared media sources fanned out to every peer via a relay so the mic
         # is only captured once and the screen is only grabbed once, regardless
@@ -241,6 +391,12 @@ class WebRTCEngine:
         self.room_id:               Optional[str]   = None
         self._pre_group_key_buffer: deque           = deque()
         self._send_ws:              Optional[Callable] = None
+
+        # Hub-election state
+        self._cap_tier:          dict[str, int] = {}
+        self._cap_epoch:         dict[str, int] = {}
+        self._my_epoch:          int            = 0   # bumped in client before each hub_capability broadcast
+        self._room_creator_name: Optional[str]  = None
 
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
@@ -329,17 +485,86 @@ class WebRTCEngine:
         self.is_room_creator = is_creator
         if is_creator:
             self.group_key = os.urandom(32)
+        self._room_creator_name = self.my_username if is_creator else None
+
+    def set_room_creator(self, name: str) -> None:
+        """Called on non-creator peers once the creator's username is known."""
+        self._room_creator_name = name
+
+    def record_capability(self, peer: str, tier: int, epoch: int) -> None:
+        """Store a peer's reachability tier for hub election; stale epochs are ignored."""
+        if epoch <= self._cap_epoch.get(peer, 0):
+            return
+        self._cap_epoch[peer] = epoch
+        self._cap_tier[peer] = tier
+
+    def _my_tier(self) -> int:
+        """Return this engine's own reachability tier using current module-global state."""
+        cur = _forward_port if _forward_active else None
+        return reachability_tier(self.settings, current_port=cur)
+
+    def capability_payload(self) -> dict:
+        """Build this peer's hub-election capability announcement (bumps epoch)."""
+        self._my_epoch += 1
+        return {"tier": self._my_tier(), "epoch": self._my_epoch,
+                "creator": self.is_room_creator}
+
+    def current_hub(self) -> str:
+        """Return the elected hub username given current capability records."""
+        members = dict(self._cap_tier)
+        members[self.my_username] = self._my_tier()   # always include self
+        creator = self._room_creator_name or min([self.my_username, *members.keys()])
+        return elect_hub(members, creator)
+
+    # ------------------------------------------------------------------
+    # Track-origin helpers (receiver-side SFU origin keying)
+    # ------------------------------------------------------------------
+
+    def _origin_of(self, track_id: str):
+        return self._origin_map.get(track_id)
+
+    async def _handle_track_origin(self, frame: dict, peer: str) -> None:
+        tid = frame["track_id"]
+        self._origin_map[tid] = frame["origin"]
+        fut = self._origin_waiters.pop(tid, None)
+        if fut is not None and not fut.done():
+            fut.set_result(frame["origin"])
+
+    async def _resolve_origin(self, track_id: str, fallback: str) -> str:
+        # 1-to-1, or the hub receiving ORIGINAL (non-forwarded) member tracks:
+        # there is no origin label, so key by the signaling peer immediately
+        # (no waiting -> no audio latency).
+        if not self.room_id or self.current_hub() == self.my_username:
+            return fallback
+        if track_id in self._origin_map:
+            return self._origin_map[track_id]
+        fut = self._origin_waiters.get(track_id)
+        if fut is None:
+            fut = asyncio.get_running_loop().create_future()
+            self._origin_waiters[track_id] = fut
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=3.0)
+        except asyncio.TimeoutError:
+            return fallback
 
     # ------------------------------------------------------------------
     # Per-peer PC init
     # ------------------------------------------------------------------
 
     def _init_pc(self, peer: str) -> None:
+        # Ensure the forwarded-port bind wrapper is installed on this loop
+        # before aiortc gathers ICE (idempotent, no-op when feature is off).
+        try:
+            install_forward_patch(asyncio.get_event_loop())
+        except Exception:
+            pass
         pc = RTCPeerConnection(configuration=self._ice_config())
         self.pcs[peer]                  = pc
         self._hello_sent[peer]          = False
         self._peer_hello_verified[peer] = False
+        self._eph_priv.pop(peer, None)   # fresh ephemeral per connection
         self._pre_hello_buffers[peer]   = deque()
+        self._pre_hello_bytes[peer]     = 0
         self._is_negotiating[peer]      = False
 
         # NOTE: aiortc gathers ICE non-trickle — all candidates are embedded in
@@ -378,6 +603,8 @@ class WebRTCEngine:
                 asyncio.ensure_future(self._render_video(track, peer))
             elif track.kind == "audio":
                 asyncio.ensure_future(self._handle_incoming_audio(track, peer))
+            if self.room_id and self.current_hub() == self.my_username:
+                asyncio.ensure_future(self._relay_track_to_others(peer, track))
 
     # ------------------------------------------------------------------
     # DataChannel binding
@@ -413,60 +640,118 @@ class WebRTCEngine:
     # Hello handshake
     # ------------------------------------------------------------------
 
+    def _ephemeral_pub(self, peer: str) -> str:
+        """Return our per-session ephemeral X25519 public key for `peer`,
+        generating (and storing the private half) on first use. Stable for the
+        life of the connection so both _send_hello and _handle_hello agree."""
+        priv_b64 = self._eph_priv.get(peer)
+        if priv_b64 is None:
+            priv_b64, pub_b64 = generate_ephemeral_x25519()
+            self._eph_priv[peer] = priv_b64
+            return pub_b64
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        priv = X25519PrivateKey.from_private_bytes(_b64.b64decode(priv_b64))
+        return _b64.b64encode(
+            priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).decode()
+
     async def _send_hello(self, peer: str) -> None:
         from datetime import datetime, timezone
         payload = {
             "username":    self.my_username,
             "x25519_pub":  self.keys["x25519_public"],
             "ed25519_pub": self.keys["ed25519_public"],
+            "eph_x25519_pub": self._ephemeral_pub(peer),
             "iat":         datetime.now(timezone.utc).isoformat(),
         }
         token = paseto_sign(payload, self.keys["ed25519_private"], self.keys["ed25519_public"])
         self.data_channels[peer].send(json.dumps({"__type": "hello", "token": token}))
         self._hello_sent[peer] = True
 
+    def _hello_iat_fresh(self, iat: str) -> bool:
+        """Defence-in-depth: reject a signed hello with an implausible timestamp."""
+        if not iat:
+            return False
+        from datetime import datetime, timezone
+        try:
+            ts = datetime.fromisoformat(iat)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return False
+        skew = abs((datetime.now(timezone.utc) - ts).total_seconds())
+        return skew <= MAX_HELLO_SKEW_SECONDS
+
     async def _handle_hello(self, frame: dict, peer: str) -> None:
         if self._peer_hello_verified.get(peer):
             return
         if self.settings.security_mode == "e2ee":
             prior = get_contact(peer)
-            try:
-                # Unverified peek only to recover the claimed signing key, then
-                # verify against it. Use the VERIFIED payload (not the peek) for
-                # everything afterwards.
-                parts        = frame["token"].split(".")
-                raw          = _b64.urlsafe_b64decode(parts[2] + "==")
-                claimed_pub  = json.loads(raw[:-64])["ed25519_pub"]
-            except Exception:
-                # For a previously-known contact, fall back to the stored
-                # signing key. This also lets us detect a changed X25519 key
-                # when the Ed25519 identity key is still the same.
-                if not (prior and prior.ed25519_pub):
+            # SEC-01: Verify against the pre-stored public key if we already know this contact.
+            # Only use the self-claimed public key for new contacts (TOFU).
+            if prior and prior.ed25519_pub:
+                verify_pub = prior.ed25519_pub
+            else:
+                try:
+                    parts = frame["token"].split(".")
+                    raw = _b64.urlsafe_b64decode(parts[2] + "==")
+                    verify_pub = json.loads(raw[:-64])["ed25519_pub"]
+                except Exception:
                     return
-                claimed_pub = prior.ed25519_pub
+
             try:
-                payload = paseto_verify(frame["token"], claimed_pub)
+                payload = paseto_verify(frame["token"], verify_pub)
             except Exception:
+                # Signature mismatch: either the key doesn't match the signature,
+                # or the signature is invalid for the stored key.
+                print(f"[crypto] Signature verification failed for peer {peer}.", flush=True)
                 return
+
             # Bind the claimed identity to the signaling peer name. A peer
             # connected to signaling as `peer` must not be able to assert a
             # different username (which would poison another contact's entry).
             if payload.get("username") != peer:
                 return
-            # Detect a changed key on a previously-verified contact so the UI can
-            # warn (possible MITM). upsert_contact also drops the verified flag.
-            key_changed = bool(
-                prior and prior.verified and prior.x25519_pub
-                and prior.x25519_pub != payload["x25519_pub"]
-            )
-            self.session_keys[peer] = derive_session_key(
-                self.keys["x25519_private"], payload["x25519_pub"]
+
+            # SEC-02: If the contact is verified and their key has changed, abort
+            # the connection. Checked first so the user is always alerted to a
+            # possible MITM, regardless of timestamp/ephemeral structural checks.
+            if prior and prior.verified:
+                key_changed = bool(
+                    (prior.x25519_pub and prior.x25519_pub != payload["x25519_pub"]) or
+                    (prior.ed25519_pub and prior.ed25519_pub != payload["ed25519_pub"])
+                )
+                if key_changed:
+                    print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
+                    if self.on_key_change:
+                        self.on_key_change(peer)
+                    # Tear down the peer connection immediately
+                    asyncio.create_task(self.remove_peer(peer))
+                    return
+
+            # SEC-03: Reject a hello whose signed timestamp is wildly stale/future.
+            if not self._hello_iat_fresh(payload.get("iat", "")):
+                print(f"[crypto] Stale/implausible hello timestamp from {peer}; rejecting.", flush=True)
+                return
+
+            # SEC-04 (forward secrecy): the hello carries a signed ephemeral
+            # X25519 public key. Without one the peer is an old client; refuse
+            # rather than silently fall back to non-PFS static-key derivation.
+            peer_eph_pub = payload.get("eph_x25519_pub")
+            if not peer_eph_pub:
+                print(f"[crypto] Hello from {peer} lacks an ephemeral key; rejecting.", flush=True)
+                return
+
+            # Ensure our own ephemeral exists even if the peer's hello beat ours.
+            self._ephemeral_pub(peer)
+            self.session_keys[peer] = derive_session_key_v2(
+                self.keys["x25519_private"], self._eph_priv[peer],
+                payload["x25519_pub"], peer_eph_pub,
             )
             upsert_contact(peer,
                            x25519_pub=payload["x25519_pub"],
                            ed25519_pub=payload["ed25519_pub"])
-            if key_changed and self.on_key_change:
-                self.on_key_change(peer)
             # Creator sends group key to this peer
             if self.is_room_creator and self.group_key:
                 await self._send_group_key_to(peer)
@@ -482,6 +767,38 @@ class WebRTCEngine:
                 await self._handle_text(data, peer)
             else:
                 await self._handle_binary(data, peer)
+        self._pre_hello_bytes[peer] = 0
+
+    def _buffer_pre_hello(self, peer: str, kind: str, data) -> None:
+        buf = self._pre_hello_buffers.setdefault(peer, deque())
+        size = len(data.encode("utf-8") if isinstance(data, str) else data)
+        total = self._pre_hello_bytes.get(peer, 0) + size
+        if len(buf) >= MAX_PRE_HELLO_FRAMES or total > MAX_PRE_HELLO_BYTES:
+            buf.clear()
+            self._pre_hello_bytes[peer] = 0
+            return
+        buf.append((kind, data))
+        self._pre_hello_bytes[peer] = total
+
+    def _close_file_state(self, state: dict, delete: bool = False) -> None:
+        try:
+            state["file"].flush()
+            os.fsync(state["file"].fileno())
+        except Exception:
+            pass
+        try:
+            state["file"].close()
+        except Exception:
+            pass
+        if delete:
+            self._delete_tmp_file(state.get("path", ""))
+
+    def _delete_tmp_file(self, path: str) -> None:
+        try:
+            if path:
+                os.unlink(path)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Message handling
@@ -496,59 +813,110 @@ class WebRTCEngine:
             await self._handle_hello(frame, peer)
             return
         if not (self._hello_sent.get(peer) and self._peer_hello_verified.get(peer)):
-            self._pre_hello_buffers.setdefault(peer, deque()).append(("text", raw))
+            self._buffer_pre_hello(peer, "text", raw)
             return
         await self._dispatch_frame(frame, peer)
+        if (self.room_id and self.current_hub() == self.my_username
+                and frame.get("__type") in ("chat", "file_meta", "file_end")):
+            await self._relay_frame_to_others(raw, source=peer)
 
     async def _handle_binary(self, data: bytes, peer: str) -> None:
         if not (self._hello_sent.get(peer) and self._peer_hello_verified.get(peer)):
-            self._pre_hello_buffers.setdefault(peer, deque()).append(("binary", data))
+            self._buffer_pre_hello(peer, "binary", data)
             return
-        fname = self._file_buffers.get(peer, {}).get("_current")
-        if fname:
-            self._file_buffers[peer][fname].extend(data)
-            received = len(self._file_buffers[peer][fname])
+        state = self._file_buffers.get(peer, {}).get("_current")
+        if state:
+            remaining = state["size"] - state["received"]
+            block = data[:max(0, remaining)]
+            if block:
+                state["file"].write(block)
+                state["sha"].update(block)
+                state["received"] += len(block)
+            received = state["received"]
             if self.on_file_chunk:
-                self.on_file_chunk(fname, received, None)
+                self.on_file_chunk(state["filename"], received, state["size"])
+        if (self.room_id and self.current_hub() == self.my_username
+                and self._file_buffers.get(peer, {}).get("_current")):
+            await self._relay_frame_to_others(data, source=peer)
 
     async def _dispatch_frame(self, frame: dict, peer: str) -> None:
         t = frame.get("__type")
+
+        if t == "track_origin":
+            await self._handle_track_origin(frame, peer)
+            return
 
         if t == "group_key":
             await self._handle_group_key(frame, peer)
             return
 
         if t == "chat":
+            sender = peer
             if self.settings.security_mode == "e2ee":
                 key = self.group_key if self.room_id else self.session_keys.get(peer)
                 if not key:
                     return
                 try:
-                    text = paseto_decrypt(frame["token"], key).get("text", "")
+                    payload = paseto_decrypt(frame["token"], key)
+                    text = payload.get("text", "")
+                    sender = payload.get("from") or peer
                 except Exception:
                     text = "[decryption failed]"
             else:
                 text = frame.get("text", "")
+                sender = frame.get("from") or peer
             if self.on_message:
-                self.on_message(peer, text, frame.get("verified", False))
+                self.on_message(sender, text, frame.get("verified", False))
 
         elif t == "file_meta":
             meta  = self._decrypt_dict(frame, peer)
-            fname = meta["filename"]
+            fname = os.path.basename(str(meta.get("filename", "file"))) or "file"
+            try:
+                size = int(meta.get("size", 0))
+            except (TypeError, ValueError):
+                return
+            sha_hex = str(meta.get("sha256", ""))
+            if size < 0 or size > MAX_INCOMING_FILE_SIZE or len(sha_hex) != 64:
+                return
+            old = self._file_buffers.get(peer, {}).get("_current")
+            if old:
+                self._close_file_state(old, delete=True)
+            fd, tmp_name = tempfile.mkstemp(prefix="helucryptic-recv-", suffix=".part")
+            tmp_file = os.fdopen(fd, "wb")
+            state = {
+                "filename": fname,
+                "size": size,
+                "sha256": sha_hex,
+                "received": 0,
+                "path": tmp_name,
+                "file": tmp_file,
+                "sha": hashlib.sha256(),
+            }
             self._file_buffers.setdefault(peer, {})
-            self._file_buffers[peer][fname]      = bytearray()
-            self._file_buffers[peer]["_current"] = fname
+            self._file_buffers[peer][fname]      = state
+            self._file_buffers[peer]["_current"] = state
             if self.on_file_chunk:
-                self.on_file_chunk(fname, 0, meta["size"])
+                self.on_file_chunk(fname, 0, size)
 
         elif t == "file_end":
             meta  = self._decrypt_dict(frame, peer)
-            fname = meta["filename"]
-            data  = bytes(self._file_buffers.get(peer, {}).pop(fname, b""))
-            self._file_buffers.get(peer, {}).pop("_current", None)
-            ok = hashlib.sha256(data).hexdigest() == meta.get("sha256", "")
+            fname = os.path.basename(str(meta.get("filename", "file"))) or "file"
+            state = self._file_buffers.get(peer, {}).pop(fname, None)
+            current = self._file_buffers.get(peer, {}).get("_current")
+            if current is state:
+                self._file_buffers.get(peer, {}).pop("_current", None)
+            if not state:
+                return
+            self._close_file_state(state, delete=False)
+            expected = str(meta.get("sha256", state.get("sha256", "")))
+            ok = (
+                state["received"] == state["size"]
+                and state["sha"].hexdigest() == expected == state["sha256"]
+            )
             if self.on_file_complete:
-                self.on_file_complete(fname, data, ok)
+                self.on_file_complete(fname, state["path"], ok)
+            elif not ok:
+                self._delete_tmp_file(state["path"])
 
         elif t == "call_start":
             if self.on_call_incoming:
@@ -567,12 +935,25 @@ class WebRTCEngine:
                 self.on_hangup(peer)
 
     # ------------------------------------------------------------------
+    # Hub relay primitive
+    # ------------------------------------------------------------------
+
+    async def _relay_frame_to_others(self, payload, source: str) -> None:
+        """Hub relay: forward a chat/file frame (str) or binary chunk (bytes) to
+        every member except the source. Ciphertext is forwarded untouched."""
+        for dest, ch in list(self.data_channels.items()):
+            if dest in (source, self.my_username):
+                continue  # never echo to the source or loop back to self
+            if getattr(ch, "readyState", None) == "open":
+                ch.send(payload)
+
+    # ------------------------------------------------------------------
     # Encrypt / decrypt helpers
     # ------------------------------------------------------------------
 
     def _decrypt_dict(self, frame: dict, peer: str) -> dict:
         if self.settings.security_mode == "e2ee" and "token" in frame:
-            key = self.session_keys.get(peer)
+            key = self.group_key if self.room_id else self.session_keys.get(peer)
             if key:
                 try:
                     return paseto_decrypt(frame["token"], key)
@@ -616,6 +997,13 @@ class WebRTCEngine:
         import base64 as b64mod
         if self.group_key:
             return
+        # SEC-05: only accept the group key from the room creator once we know
+        # who that is. A non-creator member must not be able to race a key of
+        # their choosing onto the room. When the creator is not yet known
+        # (bootstrap/failover), fall back to first-trusted-peer behaviour.
+        if self._room_creator_name and peer != self._room_creator_name:
+            print(f"[crypto] Ignoring group_key from non-creator {peer}.", flush=True)
+            return
         session_key = self.session_keys.get(peer)
         if not session_key:
             return
@@ -639,7 +1027,7 @@ class WebRTCEngine:
             await self._send_group_chat(text)
 
     async def _send_group_chat(self, text: str) -> None:
-        frame = self._encrypt_group_frame({"__type": "chat", "text": text})
+        frame = self._encrypt_group_frame({"__type": "chat", "text": text, "from": self.my_username})
         for ch in self.data_channels.values():
             if ch.readyState == "open":
                 ch.send(json.dumps(frame))
@@ -670,6 +1058,8 @@ class WebRTCEngine:
         ch      = self.data_channels[peer]
         fname   = os.path.basename(path)
         size    = os.path.getsize(path)
+        if self.room_id and self.settings.security_mode == "e2ee" and not self.group_key:
+            raise RuntimeError("Cannot send a room file before the group key is ready")
 
         # First pass: hash on disk so the receiver gets the checksum up front.
         sha = hashlib.sha256()
@@ -678,9 +1068,8 @@ class WebRTCEngine:
                 sha.update(block)
         sha_hex = sha.hexdigest()
 
-        meta = self._encrypt_frame_for(
-            {"__type": "file_meta", "filename": fname, "size": size, "sha256": sha_hex}, peer
-        )
+        payload = {"__type": "file_meta", "filename": fname, "size": size, "sha256": sha_hex}
+        meta = self._encrypt_group_frame(payload) if self.room_id else self._encrypt_frame_for(payload, peer)
         ch.send(json.dumps(meta))
 
         # Second pass: send the bytes with backpressure.
@@ -691,44 +1080,51 @@ class WebRTCEngine:
                 ch.send(block)
                 await asyncio.sleep(0)
 
-        end = self._encrypt_frame_for(
-            {"__type": "file_end", "filename": fname, "sha256": sha_hex}, peer
-        )
+        payload = {"__type": "file_end", "filename": fname, "sha256": sha_hex}
+        end = self._encrypt_group_frame(payload) if self.room_id else self._encrypt_frame_for(payload, peer)
         ch.send(json.dumps(end))
 
     # ------------------------------------------------------------------
     # Renegotiation
     # ------------------------------------------------------------------
 
-    async def _execute_negotiation(self, peer: str) -> None:
-        if self._is_negotiating.get(peer) or peer not in self.pcs:
-            print(f"[rtc] {self.my_username}: skip negotiation for {peer} (busy/no-pc)", flush=True)
+    async def _do_negotiation(self, peer: str) -> None:
+        if peer not in self.pcs:
+            print(f"[rtc] {self.my_username}: skip negotiation for {peer} (no-pc)", flush=True)
+            return
+        print(f"[rtc] {self.my_username}: creating OFFER for {peer} (gathering ICE…)", flush=True)
+        offer = await self.pcs[peer].createOffer()
+        await self.pcs[peer].setLocalDescription(offer)
+
+        # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
+        pc = self.pcs[peer]
+        if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
+            try:
+                for _ in range(100):
+                    if pc.iceGatheringState == "complete":
+                        break
+                    await asyncio.sleep(0.05)
+            except Exception as ex:
+                print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
+
+        await self._send_ws({
+            "target": peer,
+            "type":   "offer",
+            "data":   {"sdp": self.pcs[peer].localDescription.sdp, "type": "offer"},
+        })
+        print(f"[rtc] {self.my_username}: SENT offer to {peer}", flush=True)
+
+    async def request_negotiation(self, peer: str) -> None:
+        if self._is_negotiating.get(peer):
+            self._neg_dirty[peer] = True
             return
         self._is_negotiating[peer] = True
         try:
-            print(f"[rtc] {self.my_username}: creating OFFER for {peer} (gathering ICE…)", flush=True)
-            offer = await self.pcs[peer].createOffer()
-            await self.pcs[peer].setLocalDescription(offer)
-            
-            # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
-            pc = self.pcs[peer]
-            if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
-                try:
-                    for _ in range(100):
-                        if pc.iceGatheringState == "complete":
-                            break
-                        await asyncio.sleep(0.05)
-                except Exception as ex:
-                    print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
-
-            await self._send_ws({
-                "target": peer,
-                "type":   "offer",
-                "data":   {"sdp": self.pcs[peer].localDescription.sdp, "type": "offer"},
-            })
-            print(f"[rtc] {self.my_username}: SENT offer to {peer}", flush=True)
+            await self._do_negotiation(peer)
         finally:
             self._is_negotiating[peer] = False
+            if self._neg_dirty.pop(peer, False):
+                await self.request_negotiation(peer)
 
     # ------------------------------------------------------------------
     # Public API — signaling events
@@ -741,7 +1137,7 @@ class WebRTCEngine:
         dc = self.pcs[target].createDataChannel("chat", ordered=True)
         self.data_channels[target] = dc
         self._bind_channel(dc, target)
-        await self._execute_negotiation(target)
+        await self.request_negotiation(target)
 
     async def handle_offer(self, sender: str, data: dict, ws_send: Callable) -> None:
         print(f"[rtc] {self.my_username}: RECEIVED offer from {sender}", flush=True)
@@ -823,8 +1219,26 @@ class WebRTCEngine:
             dc = self.pcs[username].createDataChannel("chat", ordered=True)
             self.data_channels[username] = dc
             self._bind_channel(dc, username)
-            await self._execute_negotiation(username)
+            await self.request_negotiation(username)
         # else: wait for incoming offer from the other peer
+
+    async def _relay_track_to_others(self, source_peer: str, track) -> None:
+        """Hub SFU fan-out: re-publish source_peer's track to every other member,
+        labeling each forwarded track with its true origin over the data channel."""
+        for dest, pc in list(self.pcs.items()):
+            if dest == source_peer:
+                continue
+            sub = self._relay.subscribe(track)
+            pc.addTrack(sub)
+            # Broadcast sub.id (what the receiver sees), NOT the source track.id —
+            # relay.subscribe() assigns a new id (confirmed by spike).
+            self._forwarded.setdefault(source_peer, []).append((dest, sub, sub.id))
+            ch = self.data_channels.get(dest)
+            if ch and getattr(ch, "readyState", None) == "open":
+                ch.send(json.dumps({"__type": "track_origin",
+                                    "track_id": sub.id, "origin": source_peer,
+                                    "kind": sub.kind}))
+            await self.request_negotiation(dest)
 
     async def remove_peer(self, username: str) -> None:
         pc = self.pcs.pop(username, None)
@@ -837,12 +1251,26 @@ class WebRTCEngine:
         self.session_keys.pop(username, None)
         self._hello_sent.pop(username, None)
         self._peer_hello_verified.pop(username, None)
+        self._eph_priv.pop(username, None)
         self._pre_hello_buffers.pop(username, None)
+        self._pre_hello_bytes.pop(username, None)
         self._is_negotiating.pop(username, None)
-        self._file_buffers.pop(username, None)
+        self._neg_dirty.pop(username, None)
+        file_states = self._file_buffers.pop(username, {})
+        for state in list(file_states.values()):
+            if isinstance(state, dict):
+                self._close_file_state(state, delete=True)
         self._ice_states.pop(username, None)
         self._voice_peers.discard(username)
         self._screen_peers.discard(username)
+        # Drop SFU forwarding bookkeeping for/to this peer: entries where it was
+        # the source, and entries in other sources' lists where it was the dest.
+        self._forwarded.pop(username, None)
+        for source in list(self._forwarded.keys()):
+            self._forwarded[source] = [
+                entry for entry in self._forwarded[source]
+                if entry[0] != username
+            ]
         # Release shared capture devices / mixer if no peers need them anymore
         self._teardown_media_if_idle()
 
@@ -860,6 +1288,19 @@ class WebRTCEngine:
                         if p in self.session_keys:
                             await self._send_group_key_to(p)
                 await self._flush_group_buffer()
+
+    async def reconcile_room_connections(self, members: list, ws_send) -> None:
+        """Star topology: non-hub connects only to the hub; the hub waits for offers."""
+        self._send_ws = ws_send
+        hub = self.current_hub()
+        if hub == self.my_username:
+            return  # hub is a pure responder; it answers incoming offers
+        # Non-hub: ensure exactly one live PC -> hub, drop any others.
+        for peer in list(self.pcs.keys()):
+            if peer != hub:
+                await self.remove_peer(peer)
+        if hub and hub != self.my_username and hub not in self.pcs:
+            await self.create_offer(hub, ws_send)
 
     # ------------------------------------------------------------------
     # Voice / screen
@@ -895,7 +1336,7 @@ class WebRTCEngine:
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"__type": "call_start"}))
         # aiortc won't auto-negotiate the added track — re-offer explicitly.
-        await self._execute_negotiation(p)
+        await self.request_negotiation(p)
 
     async def start_screen_share(self, peer: Optional[str] = None) -> None:
         p = peer or self.target_peer
@@ -914,7 +1355,7 @@ class WebRTCEngine:
             self._voice_peers.add(p)
             added = True
         if added:
-            await self._execute_negotiation(p)
+            await self.request_negotiation(p)
 
     def accept_call(self, peer: Optional[str] = None) -> None:
         p  = peer or self.target_peer
@@ -1017,17 +1458,18 @@ class WebRTCEngine:
 
     async def _handle_incoming_audio(self, track, peer: str) -> None:
         MAX_BUFFERED = 48000   # ~1 s @ 48 kHz; drop oldest beyond this
-        self._incoming_audio_active.add(peer)
+        key = await self._resolve_origin(track.id, peer)
+        self._incoming_audio_active.add(key)
         with self._play_lock:
-            self._play_chunks[peer] = deque()
+            self._play_chunks[key] = deque()
         self._ensure_output_stream()
-        while peer in self._incoming_audio_active:
+        while key in self._incoming_audio_active:
             try:
                 frame = await track.recv()
                 # Flatten decoded frame to a 1-D int16 sample vector (mono 48k).
                 samples = frame.to_ndarray().reshape(-1).astype(np.int16)
                 with self._play_lock:
-                    dq = self._play_chunks.get(peer)
+                    dq = self._play_chunks.get(key)
                     if dq is None:
                         break
                     dq.append(samples)
@@ -1038,9 +1480,9 @@ class WebRTCEngine:
                         total -= len(dq.popleft())
             except Exception:
                 break
-        self._incoming_audio_active.discard(peer)
+        self._incoming_audio_active.discard(key)
         with self._play_lock:
-            self._play_chunks.pop(peer, None)
+            self._play_chunks.pop(key, None)
         self._teardown_media_if_idle()
 
     # ------------------------------------------------------------------
@@ -1049,6 +1491,7 @@ class WebRTCEngine:
 
     async def _render_video(self, track, peer: str) -> None:
         print(f"[screen] {self.my_username}: receiving video track from {peer}", flush=True)
+        origin = await self._resolve_origin(track.id, peer)
         q: asyncio.Queue = asyncio.Queue(maxsize=2)
         self._got_frame = False
 
@@ -1058,7 +1501,7 @@ class WebRTCEngine:
                     frame = await track.recv()
                     img   = frame.to_ndarray(format="bgr24")
                     if not self._got_frame:
-                        print(f"[screen] {self.my_username}: first frame from {peer} {img.shape[1]}x{img.shape[0]}", flush=True)
+                        print(f"[screen] {self.my_username}: first frame from {peer} (origin={origin}) {img.shape[1]}x{img.shape[0]}", flush=True)
                         self._got_frame = True
                     if q.full():
                         try:
@@ -1074,7 +1517,7 @@ class WebRTCEngine:
             try:
                 img = await asyncio.wait_for(q.get(), timeout=5.0)
                 if self.on_video_frame:
-                    self.on_video_frame(peer, img)
+                    self.on_video_frame(origin, img)
             except asyncio.TimeoutError:
                 continue
             except Exception:

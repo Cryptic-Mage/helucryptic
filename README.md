@@ -1,48 +1,54 @@
 # helucryptic
 
-A peer-to-peer **end-to-end encrypted desktop messenger**. Once two people
-connect, all messages, files, voice, and screen-share travel **directly between
-their computers** — a tiny signaling server only helps them find each other
-during the first few seconds of a connection. Nothing else passes through any
-server.
+> **Your conversations. Nobody else's hardware.**
+> A peer-to-peer, end-to-end encrypted desktop messenger where the server forgets you the moment you've shaken hands.
+
+Most "encrypted" chat apps still funnel every word through someone else's cloud. helucryptic doesn't. A tiny signaling server plays matchmaker for the first few seconds — just long enough for two computers to find each other — and then **bows out completely**. From that point on, every message, file, voice packet, and pixel of your screen flows **straight from your machine to theirs**, encrypted end to end.
 
 ```
-Alice's PC ──── signaling server ──── Bob's PC
-                (handshake only)
+   Alice's PC ─────  signaling server  ───── Bob's PC
+                     (introductions only)
 
-After handshake:
-Alice's PC ══════════════════════════ Bob's PC
-              (direct, encrypted P2P)
+   …handshake done, server steps away…
+
+   Alice's PC ═══════════════════════════════ Bob's PC
+                  direct · encrypted · private
 ```
 
-## Features
+No message ever touches a server. No file is ever parked in a bucket. There's nothing to subpoena, leak, or mine — because it was never there.
 
-- **1-to-1 and group (up to 4) chat** over an encrypted WebRTC DataChannel
-- **Voice calls** and **screen sharing** (peer-to-peer, software-encoded)
-- **File transfer** with SHA-256 integrity check and backpressure flow control
-- **E2EE + signing** — X25519 ECDH → HKDF-SHA256 session key, Ed25519-signed
-  identity, PASETO v4 (XChaCha20-Poly1305) message tokens
-- **Contact fingerprint verification** with automatic warning/un-verification if keys change
-- **Encrypted local history** (SQLite in WAL mode) with a configurable retention policy
-- **Optimised for low-end PCs** (see below)
+---
 
-## Crypto stack
+## ✨ What it does
+
+- **💬 Chat — 1-to-1 or in a group of up to 4** over an encrypted WebRTC data channel.
+- **🎙️ Voice calls & 🖥️ screen sharing**, peer-to-peer and software-encoded. In a group, media is relayed through whichever participant is most reachable, so the call still connects even when everyone else is stuck behind tough NATs.
+- **📎 File transfer** with SHA-256 integrity checks and disk-streaming backpressure — send a 4 GB file without your RAM noticing.
+- **🔐 Real cryptography, not vibes** — **forward-secret** X25519 ECDH with a fresh ephemeral key every session → HKDF-SHA256 session keys, Ed25519-signed identities, and PASETO v4 (XChaCha20-Poly1305) message tokens.
+- **🧬 Fingerprint verification** that *watches its own back* — if a verified contact's key ever changes, helucryptic un-verifies them and warns you of a possible impostor.
+- **🗄️ Encrypted local history** (SQLite in WAL mode) with a retention policy you control.
+- **🌍 Punches through NATs** with STUN, optional TURN relays, and automatic NAT-PMP port forwarding (great with VPN P2P port forwarding).
+- **🪶 Runs on a potato** — purpose-built to stay smooth on old, weak hardware (details below).
+
+## 🔒 The crypto stack
 
 | Purpose | Primitive |
 |---|---|
-| Key agreement | X25519 ECDH → HKDF-SHA256 |
+| Key agreement | Ephemeral X25519 ECDH (fresh per session, signed by your identity) → HKDF-SHA256 |
 | Identity / signing | Ed25519 via PASETO v4.public |
 | Message encryption | PASETO v4.local (XChaCha20-Poly1305) |
-| History at rest | PASETO v4.local with a key derived from your Ed25519 key |
+| History at rest | PASETO v4.local, keyed from your Ed25519 identity |
+| Identity keys at rest | Wrapped with the OS keystore (Windows DPAPI) |
 
-## Project layout
+## 🗺️ Project layout
 
 | File / Folder | Role |
 |---|---|
 | `main.py` | Entry point (`flet` app) |
 | `client.py` | Flet UI + signaling client + app wiring |
-| `webrtc_engine.py` | WebRTC mesh: peers, media tracks, encryption, file transfer |
+| `webrtc_engine.py` | WebRTC engine: peers, media tracks, encryption, file transfer, group relay |
 | `server.py` | FastAPI signaling server (relays SDP/ICE only) |
+| `natpmp.py` | NAT-PMP port-forward discovery & renewal (VPN/router reachability) |
 | `crypto.py` | Keys, HKDF, PASETO, fingerprints |
 | `contacts.py` / `history.py` / `settings.py` | Local persistence |
 | `sounds.py` | Notification/call sound cues (av + sounddevice) |
@@ -50,25 +56,21 @@ Alice's PC ═══════════════════════
 | `build.py` | One-command executable build (PyInstaller) |
 | `tests/` | Unit and integration test suite |
 
-## Configuration
+## ⚙️ Configuration
 
-All deployment settings come from the environment (or a `.env` file) — nothing is hardcoded. Copy the template and edit it:
+Everything deployment-specific lives in the environment (or a `.env` file) — nothing is baked into the source. Copy the template and make it yours:
 
 ```bash
 cp .env.example .env
 ```
 
-Key variables:
+The knobs that matter most:
 - `HELUCRYPTIC_SIGNALING_URL` — WebSocket URL of the signaling server
 - `HELUCRYPTIC_SERVER_PASSWORD` — Shared access token (validated **server-side**)
 - `HELUCRYPTIC_LOW_PERF_MODE` — `true` lowers screen-share resolution/FPS defaults
-- `HELUCRYPTIC_TURN_URL` / `_USERNAME` / `_PASSWORD` — TURN relay configurations
+- `HELUCRYPTIC_TURN_URL` / `_USERNAME` / `_PASSWORD` — TURN relay configuration
 
----
-
-## Example `.env` configuration
-
-Here is an example of a fully configured `.env` file:
+### A fully-loaded `.env`
 
 ```ini
 # --- Signaling server ---
@@ -82,7 +84,7 @@ HELUCRYPTIC_SCREEN_MAX_WIDTH=960
 HELUCRYPTIC_SCREEN_MAX_HEIGHT=540
 HELUCRYPTIC_SCREEN_FPS=10
 
-# --- TURN relay (fixes connection failures behind strict/cellular NATs) ---
+# --- TURN relay (rescues connections behind strict/cellular NATs) ---
 HELUCRYPTIC_TURN_URL=turn:your-turn-server-domain.com:3478?transport=udp
 HELUCRYPTIC_TURN_USERNAME=my-turn-username
 HELUCRYPTIC_TURN_PASSWORD=my-turn-password-456
@@ -90,32 +92,30 @@ HELUCRYPTIC_TURN_PASSWORD=my-turn-password-456
 
 ---
 
-## How to Set Up a TURN Relay Server
+## 📡 When direct P2P won't connect: setting up a TURN relay
 
-A TURN (Traversal Using Relays around NAT) server is a fallback relay. If direct P2P connections fail because one or both users are behind a **Symmetric NAT** (common on cellular data, public hotspots, or strict office firewalls), WebRTC routes the encrypted media traffic through this server.
+Sometimes two peers simply can't reach each other directly — typically when one or both sit behind a **symmetric NAT** (the norm on cellular data, public hotspots, and strict office firewalls). A TURN (Traversal Using Relays around NAT) server is the safety net: WebRTC reroutes the **still-encrypted** media through it so the call survives. The relay sees ciphertext, never your content.
 
-### Option A: Use a Managed Cloud TURN Service (Easiest)
-For testing or quick deployment, you can register for a managed TURN service that provides high-bandwidth, global relays out-of-the-box:
-* **Metered.ca**: Offers a free tier with 50GB/month of TURN bandwidth.
-* **Twilio Network Traversal**: Pay-as-you-go TURN/STUN services.
-* **Xirsys**: Free tiers for developers.
+### Option A — Managed cloud TURN (easiest)
+Grab credentials from a hosted service and paste them into your `.env`:
+* **Metered.ca** — free tier with 50 GB/month of TURN bandwidth.
+* **Twilio Network Traversal** — pay-as-you-go TURN/STUN.
+* **Xirsys** — developer-friendly free tiers.
 
-Simply paste the credentials they provide into your `.env` file.
+### Option B — Self-host `coturn` on a VPS (Linux)
+`coturn` is the de-facto open-source TURN/STUN server.
 
-### Option B: Self-Host using `coturn` on a VPS (Linux)
-`coturn` is the standard open-source TURN/STUN server software.
-
-1. **Install `coturn`** on your Ubuntu/Debian VPS:
+1. **Install it** on your Ubuntu/Debian VPS:
    ```bash
    sudo apt update
    sudo apt install coturn -y
    ```
 
-2. **Configure coturn** by editing `/etc/turnserver.conf`:
+2. **Configure** `/etc/turnserver.conf`:
    ```bash
    sudo nano /etc/turnserver.conf
    ```
-   Uncomment and configure the following key lines:
+   Uncomment and set:
    ```ini
    # Listen port for STUN/TURN requests
    listening-port=3478
@@ -133,14 +133,14 @@ Simply paste the credentials they provide into your `.env` file.
    realm=your-turn-server-domain.com
    ```
 
-3. **Open firewall ports** (TCP/UDP) on your VPS:
+3. **Open the firewall** (TCP/UDP):
    ```bash
    sudo ufw allow 3478/tcp
    sudo ufw allow 3478/udp
    sudo ufw allow 49152:65535/udp
    ```
 
-4. **Enable and restart the service**:
+4. **Enable and start it**:
    ```bash
    sudo systemctl enable coturn
    sudo systemctl restart coturn
@@ -148,7 +148,7 @@ Simply paste the credentials they provide into your `.env` file.
 
 ---
 
-## Quick start (local / LAN)
+## 🚀 Quick start (local / LAN)
 
 ```bash
 pip install -r requirements.txt
@@ -160,32 +160,37 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 python main.py
 ```
 
+Want a friend on the call? Spin up a second client, point it at the same signaling URL, create a room, and share the code.
+
 For VPS/HTTPS deployment and a full feature walkthrough, see **`GUIDE.md`**.
 For WebSocket hosting troubleshooting, see **`DEPLOY-WEBSOCKETS.md`**.
 
-## Building a standalone executable
+## 📦 Building a standalone executable
 
 ```bash
 python build.py
 ```
 
-This bundles `tracks/`, `icon.ico`, and (if present) your `.env`, producing `dist/Helucryptic`. Note: bundling `.env` embeds its contents in the binary — the server password is a real gate only because the server validates it.
+This bundles `tracks/`, `icon.ico`, and (if present) your `.env` into `dist/Helucryptic`. Heads-up: bundling `.env` embeds its contents in the binary — the server password is a real gate only because the **server** validates it.
 
-## Low-end PC optimisations
+## 🪶 Built for the underdog (low-end PC optimisations)
 
-helucryptic is built to stay smooth on old hardware:
+helucryptic is engineered to stay buttery on hardware everyone else gave up on:
 
-- Outbound screen capture is **downscaled** (default ≤720p) before the software encoder sees it, and runs at a capped frame rate.
-- Incoming video updates **only the affected image control**, not the whole UI, and is rate-limited per sender.
-- File transfers **stream from disk** with send-buffer backpressure (no loading whole files into RAM).
-- Audio playback uses a chunk queue to avoid per-frame buffer reallocation.
-- SQLite runs in **WAL mode with indices** so history reads don't stall on slow disks.
+- Outbound screen capture is **downscaled** (default ≤720p) before the software encoder ever sees it, and runs at a capped frame rate.
+- Incoming video repaints **only the affected image control**, not the whole UI — and is rate-limited per sender.
+- File transfers **stream from disk** with send-buffer backpressure (no slurping whole files into RAM).
+- Audio playback uses a chunk queue that sidesteps per-frame buffer reallocation.
+- SQLite runs in **WAL mode with indices**, so history scrollback doesn't stall on slow disks.
 
-Set `HELUCRYPTIC_LOW_PERF_MODE=true` to bias the defaults even lower.
+Flip `HELUCRYPTIC_LOW_PERF_MODE=true` to bias every default even lower.
 
-## Security model & limitations
+## 🛡️ Security model & honest limitations
 
-- The signaling server only ever sees usernames and SDP/ICE handshake data — never message content, files, keys, or media.
-- **Verify fingerprints out-of-band.** If a contact's key changes after you have verified it, the app removes verification and warns you.
-- No forward secrecy yet (a static ECDH session key per peer) — on the roadmap.
-- All identity keys live in `~/.helucryptic/keys.json`. Keep that file private; back it up with **Export Keys**.
+We'd rather tell you the sharp edges than hide them:
+
+- The signaling server only ever sees **usernames and SDP/ICE handshake data** — never message content, files, keys, or media.
+- **Verify fingerprints out-of-band.** If a contact's key changes after you've verified them, helucryptic strips the verification and warns you.
+- In a group call, media is decrypted at the **relay peer** so it can forward it — chat and files stay end-to-end encrypted, but treat the relay host as trusted for media (the app tells you who it is).
+- **Forward secrecy** — every session derives its key from fresh **ephemeral** X25519 keys, signed by your long-term identity. A stolen identity key can't decrypt sessions you've already had, and the signed handshake stops a tampered server from swapping keys mid-introduction.
+- Your identity keys live in `~/.helucryptic/keys.json`, **wrapped with the OS keystore (Windows DPAPI)** so a raw copy of the file is useless on another account or machine. Back them up with **Export Keys** — backups carry the plaintext identity (protected by your backup passphrase) and are re-wrapped on restore, so they stay portable across machines.

@@ -20,11 +20,18 @@ from cryptography.hazmat.primitives.serialization import (
 import pyseto
 from pyseto import Key
 
-from paths import DATA_DIR
+import secure_store
+from paths import DATA_DIR, write_private_bytes, harden_dir
+
+
+def _keys_path():
+    # Resolved per-call (not cached) so tests can monkeypatch DATA_DIR.
+    return DATA_DIR / "keys.json"
 
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(exist_ok=True)
+    harden_dir(DATA_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -50,19 +57,37 @@ def generate_and_save_keys() -> dict:
         ).decode(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    (DATA_DIR / "keys.json").write_text(json.dumps(keys, indent=2))
+    _save_keys(keys)
     return keys
 
 
 _REQUIRED_KEY_FIELDS = {"x25519_private", "x25519_public", "ed25519_private", "ed25519_public"}
 
 
+def _save_keys(keys: dict) -> None:
+    """Persist the identity keys, wrapped with the OS keystore where available."""
+    ensure_data_dir()
+    plaintext = json.dumps(keys, indent=2).encode("utf-8")
+    write_private_bytes(_keys_path(), secure_store.protect(plaintext))
+
+
+def export_keys_plaintext(path=None) -> bytes:
+    """Return the identity keys as plaintext JSON bytes (DPAPI-unwrapped).
+
+    Used by the backup system so a backup stays portable across machines — the
+    backup is itself passphrase-encrypted, and DPAPI blobs are machine-bound.
+    """
+    raw = (path or _keys_path()).read_bytes()
+    return secure_store.unprotect(raw)
+
+
 def load_or_create_keys() -> dict:
-    path = DATA_DIR / "keys.json"
+    path = _keys_path()
     if path.exists():
         try:
-            keys = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError) as ex:
+            raw = path.read_bytes()
+            keys = json.loads(secure_store.unprotect(raw))
+        except (json.JSONDecodeError, OSError, ValueError) as ex:
             raise RuntimeError(
                 f"Your key file at {path} is corrupted and could not be read ({ex}). "
                 f"Restore it from a backup/export, or delete it to generate a new "
@@ -73,6 +98,12 @@ def load_or_create_keys() -> dict:
                 f"Your key file at {path} is missing required fields. "
                 f"Restore it from a backup/export, or delete it to generate a new identity."
             )
+        # Migrate a legacy plaintext key file to the OS-wrapped format in place.
+        if secure_store.available() and not secure_store.is_protected(raw):
+            try:
+                _save_keys(keys)
+            except Exception:
+                pass
         return keys
     return generate_and_save_keys()
 
@@ -93,6 +124,62 @@ def derive_session_key(my_x25519_priv_b64: str, peer_x25519_pub_b64: str) -> byt
         salt=None,
         info=b"helucryptic-session-v1",
     ).derive(shared)
+
+
+def generate_ephemeral_x25519() -> tuple[str, str]:
+    """Fresh per-session X25519 keypair → (private_b64, public_b64)."""
+    priv = X25519PrivateKey.generate()
+    priv_b64 = base64.b64encode(
+        priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    ).decode()
+    pub_b64 = base64.b64encode(
+        priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
+    return priv_b64, pub_b64
+
+
+def derive_session_key_v2(
+    my_x25519_priv_b64: str,
+    my_eph_priv_b64: str,
+    peer_x25519_pub_b64: str,
+    peer_eph_pub_b64: str,
+) -> bytes:
+    """Forward-secret, authenticated session key (helucryptic-session-v2).
+
+    Combines three X25519 exchanges — ephemeral×ephemeral (forward secrecy) plus
+    the two static×ephemeral cross terms (binds the session to both long-term
+    identities). The two peers order the cross terms by static public key so they
+    derive an identical key regardless of who initiated. Knowledge of the static
+    private keys alone cannot recover the key: every term but the cross-binding
+    requires an ephemeral private, and the ephemerals are discarded after use.
+    """
+    if not all((my_x25519_priv_b64, my_eph_priv_b64, peer_x25519_pub_b64, peer_eph_pub_b64)):
+        raise ValueError("derive_session_key_v2 called before ephemeral hello complete")
+
+    my_x_priv   = X25519PrivateKey.from_private_bytes(base64.b64decode(my_x25519_priv_b64))
+    my_eph_priv = X25519PrivateKey.from_private_bytes(base64.b64decode(my_eph_priv_b64))
+    peer_x_pub_raw   = base64.b64decode(peer_x25519_pub_b64)
+    peer_eph_pub_raw = base64.b64decode(peer_eph_pub_b64)
+    peer_x_pub   = X25519PublicKey.from_public_bytes(peer_x_pub_raw)
+    peer_eph_pub = X25519PublicKey.from_public_bytes(peer_eph_pub_raw)
+
+    my_x_pub_raw = my_x_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+    dh_ee = my_eph_priv.exchange(peer_eph_pub)
+    # Canonical ordering: "low" is the peer with the smaller static public key.
+    if my_x_pub_raw < peer_x_pub_raw:          # I am low
+        dh_a = my_x_priv.exchange(peer_eph_pub)    # low_static × high_eph
+        dh_b = my_eph_priv.exchange(peer_x_pub)    # low_eph × high_static
+    else:                                       # I am high
+        dh_a = my_eph_priv.exchange(peer_x_pub)    # low_static × high_eph
+        dh_b = my_x_priv.exchange(peer_eph_pub)    # low_eph × high_static
+
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"helucryptic-session-v2",
+    ).derive(dh_ee + dh_a + dh_b)
 
 
 def derive_history_key(ed25519_priv_b64: str) -> bytes:

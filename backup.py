@@ -15,8 +15,11 @@ import tempfile
 
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from crypto import paseto_decrypt, paseto_encrypt
+import secure_store
+from crypto import export_keys_plaintext, paseto_decrypt, paseto_encrypt
 from paths import DATA_DIR
+
+_KEYS_FILE = "keys.json"
 
 _MAGIC = "HELUBAK1"
 _PROFILE_FILES = ["keys.json", "contacts.json", "settings.json"]
@@ -43,7 +46,11 @@ def export_backup(passphrase: str, include_history: bool = False) -> bytes:
     for name in names:
         p = DATA_DIR / name
         if p.exists():
-            files[name] = base64.b64encode(p.read_bytes()).decode()
+            # keys.json may be OS-keystore (DPAPI) wrapped on disk, which is
+            # machine-bound. Store the plaintext identity instead so the backup
+            # (itself passphrase-encrypted) restores on any machine.
+            raw = export_keys_plaintext(p) if name == _KEYS_FILE else p.read_bytes()
+            files[name] = base64.b64encode(raw).decode()
 
     salt = os.urandom(16)
     token = paseto_encrypt({"files": files}, _derive_key(passphrase, salt))
@@ -86,6 +93,13 @@ def import_backup(data: bytes, passphrase: str) -> list:
             decoded[name] = base64.b64decode(b64)
         except Exception:
             raise ValueError(f"Backup entry {name} is invalid")
+
+    # Re-wrap the identity keys with this machine's OS keystore before writing
+    # (normalise: unwrap if a legacy backup carried a wrapped blob, then wrap).
+    if _KEYS_FILE in decoded:
+        decoded[_KEYS_FILE] = secure_store.protect(
+            secure_store.unprotect(decoded[_KEYS_FILE])
+        )
 
     temps = {}
     backups = {}
@@ -161,6 +175,21 @@ def import_backup(data: bytes, passphrase: str) -> list:
     return restored
 
 
+def _secure_overwrite(p) -> None:
+    """Best-effort: overwrite a file's bytes with random data before unlink so a
+    casual undelete/free-page scrape doesn't recover the plaintext. Not a
+    guarantee on SSDs/journaled or copy-on-write filesystems (wear-levelling may
+    leave old blocks), but raises the bar over a bare unlink."""
+    try:
+        size = p.stat().st_size
+        with open(p, "r+b", buffering=0) as f:
+            f.write(os.urandom(size))
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        pass
+
+
 def emergency_wipe() -> list:
     """Delete the known profile files (and history sidecars). Touches nothing else."""
     removed = []
@@ -168,6 +197,7 @@ def emergency_wipe() -> list:
         p = DATA_DIR / name
         try:
             if p.exists():
+                _secure_overwrite(p)
                 p.unlink()
                 removed.append(name)
         except Exception:

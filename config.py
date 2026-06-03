@@ -85,3 +85,10 @@ TILE_RENDER_FPS   = _int_range("HELUCRYPTIC_TILE_RENDER_FPS",   5 if LOW_PERF_MO
 TURN_URL      = os.getenv("HELUCRYPTIC_TURN_URL", "")
 TURN_USERNAME = os.getenv("HELUCRYPTIC_TURN_USERNAME", "")
 TURN_PASSWORD = os.getenv("HELUCRYPTIC_TURN_PASSWORD", "")
+
+# --- Port forwarding (optional) ---------------------------------------------
+# When a user has a genuinely reachable forwarded port (Proton VPN P2P port
+# forwarding or a manual router forward on a real public IP), bind ICE to it so
+# a symmetric-NAT peer can connect directly. First-run seeds only.
+PORT_FORWARD_ENABLED = _bool(os.getenv("HELUCRYPTIC_PORT_FORWARD_ENABLED"), False)
+FORWARDED_PORT       = _int_range("HELUCRYPTIC_FORWARDED_PORT", 0, 0, 65535)

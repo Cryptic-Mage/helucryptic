@@ -1,7 +1,7 @@
 import hmac
 import json
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from typing import Optional
 
 try:
@@ -39,17 +39,13 @@ async def websocket_endpoint(
     room: Optional[str] = Query(default=None),
     password: Optional[str] = Query(default=None),
 ):
-    await websocket.accept()
-
-    # --- Access control ---
+    # --- Access control (Pre-upgrade) ---
     if not _password_ok(password):
-        await websocket.send_text(json.dumps({
-            "sender": "system",
-            "type": "error",
-            "data": "Invalid server access password.",
-        }))
-        await websocket.close()
+        from fastapi import Response
+        await websocket.send_denial_response(Response(status_code=403, content="Invalid server access password."))
         return
+
+    await websocket.accept()
 
     # --- Username uniqueness ---
     # Reject a second live connection for an already-connected username so a

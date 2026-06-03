@@ -1,6 +1,5 @@
 docs/*
 !docs/FEATURE_SPEC.md
-tests
 dist
 build
 cloudflare/.wrangler
@@ -11,4 +10,7 @@ __pycache__
 *.spec.bak
 Helucryptic.spec
 
-
+# OneDrive/Explorer folder-metadata droppings (corrupt .git refs if synced)
+desktop.ini
+*.txt
+*.spec

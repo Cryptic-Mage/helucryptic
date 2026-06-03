@@ -37,7 +37,19 @@ import paths
 from history import init_db, read_messages, read_room_messages, run_retention_policy, write_message
 from settings import PROFILES, apply_profile, load_settings, save_settings
 from sounds import manager as sounds
-from webrtc_engine import WebRTCEngine
+from natpmp import (
+    PROTON_GATEWAY,
+    PortForwardManager,
+    discover_gateway,
+    local_ip_for,
+    request_mapping_over_socket,
+)
+from webrtc_engine import (
+    WebRTCEngine,
+    clear_forwarded_port,
+    set_forwarded_port,
+    set_forwarded_ports,
+)
 
 # ---------------------------------------------------------------------------
 # Deployment config comes from the environment / .env (see config.py), never
@@ -96,6 +108,9 @@ class HelucrypticApp:
         self._tile_row:        ft.Row | None   = None
         self._pending_invites: set[str]        = set()
         self._muted:           bool            = False
+        self._in_voice_call:   bool            = False
+        self._in_screen_share: bool            = False
+        self._room_call_active: bool           = False
         self._ringing:         bool            = False
         self._ring_timeout_task = None
         self._diag_open:       bool            = False
@@ -108,11 +123,60 @@ class HelucrypticApp:
         self._last_tile_render: dict[str, float] = {}
         self._update_perf_parameters()
 
+        self._pf_manager = None  # PortForwardManager when port-forwarding is on
+
         init_db()
         run_retention_policy(self.settings.retention_days)
         self._build_ui()
         self._wire_engine_callbacks()
         asyncio.ensure_future(self._retention_background_loop())
+        self._apply_port_forward()
+
+    def _apply_port_forward(self) -> None:
+        """(Re)start or stop the forwarded-port manager from current settings."""
+        if self._pf_manager is not None:
+            asyncio.ensure_future(self._pf_manager.stop())
+            self._pf_manager = None
+        clear_forwarded_port()
+        if self.settings.port_forward_enabled:
+            asyncio.ensure_future(self._start_port_forward())
+
+    async def _start_port_forward(self) -> None:
+        gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+        ip = await asyncio.to_thread(local_ip_for, gw)
+
+        async def request_fn(gateway: str):
+            # Prefer a live NAT-PMP mapping; fall back to the manually typed
+            # port (e.g. a router forward with no NAT-PMP).
+            port = await asyncio.to_thread(request_mapping_over_socket, gateway)
+            if port is None:
+                port = self.settings.forwarded_port or None
+            return port
+
+        self._pf_manager = PortForwardManager(
+            gateway=gw, local_ip=ip,
+            request_fn=request_fn,
+            publish_fn=self._publish_forwarded_port,
+            clear_fn=clear_forwarded_port,
+            pool_size=3,
+        )
+        self._pf_manager.start()
+
+    def _publish_forwarded_port(self, ip: str, ports) -> None:
+        # PortForwardManager now publishes a LIST of mapped ports (one per peer
+        # for a relay hub). Bind the whole pool; persist the first for the UI.
+        port_list = list(ports) if isinstance(ports, (list, tuple)) else [ports]
+        set_forwarded_ports(ip, port_list)
+        first = port_list[0] if port_list else 0
+        if first and self.settings.forwarded_port != first:
+            self.settings.forwarded_port = first
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+        # Caveat #2: our reachability tier may have changed — re-announce + re-elect.
+        if self._room_id and self.ws:
+            asyncio.ensure_future(self._on_topology_changed())
 
     def _update_perf_parameters(self) -> None:
         # Drive the incoming-video render throttle + JPEG quality from the active
@@ -156,6 +220,7 @@ class HelucrypticApp:
                 self._log(f"Room code {self._room_id} copied.")
 
         self.room_code_label  = ft.Text("", size=12, color="#b9bbbe", selectable=True)
+        self.hub_banner       = ft.Text("", size=11, color="#faa61a", visible=False)
         self.btn_copy_room    = ft.IconButton(
             ft.Icons.COPY_ALL, on_click=_copy_room_code,
             tooltip="Copy room code", visible=False, icon_size=16,
@@ -176,6 +241,7 @@ class HelucrypticApp:
                 ft.Divider(color="#40444b"),
                 ft.Row([self.btn_create_room, self.btn_join_room], spacing=6),
                 ft.Row([self.room_code_label, self.btn_copy_room, self.btn_invite], spacing=4),
+                self.hub_banner,
                 self.participant_list,
                 ft.Divider(color="#40444b"),
                 self.contact_list,
@@ -199,6 +265,10 @@ class HelucrypticApp:
         self.btn_file     = ft.IconButton(ft.Icons.ATTACH_FILE,  on_click=self._send_file,    disabled=True, tooltip="Send file")
         self.btn_mute     = ft.IconButton(ft.Icons.MIC,          on_click=self._toggle_mute,  disabled=True, tooltip="Mute mic")
         self.btn_hangup   = ft.IconButton(ft.Icons.CALL_END,     on_click=self._hangup,       disabled=True, icon_color="#ed4245", tooltip="Hang up")
+        self.btn_join_call = ft.FilledButton(
+            "Join call", icon=ft.Icons.CALL, on_click=self._start_call,
+            visible=False, bgcolor="#57f287", color="#1e1f22",
+        )
         self.btn_diag     = ft.IconButton(ft.Icons.INFO_OUTLINE, on_click=self._show_diagnostics, tooltip="Connection diagnostics")
         self.btn_settings = ft.IconButton(ft.Icons.SETTINGS,     on_click=self._show_settings, tooltip="Settings")
 
@@ -224,7 +294,8 @@ class HelucrypticApp:
                 self.file_progress,
                 ft.Row([self.msg_input]),
                 ft.Row([self.btn_call, self.btn_screen, self.btn_file, self.btn_mute,
-                        self.btn_hangup, ft.Container(expand=True), self.btn_diag, self.btn_settings]),
+                        self.btn_hangup, self.btn_join_call, ft.Container(expand=True),
+                        self.btn_diag, self.btn_settings]),
             ]),
         )
 
@@ -271,7 +342,7 @@ class HelucrypticApp:
             # The per-message `verified` flag from the wire is not trustworthy;
             # derive it from whether we've verified this contact's key fingerprint.
             c = get_contact(sender)
-            verified = bool(c and c.verified)
+            verified = bool(c and c.verified) if self.settings.security_mode == "e2ee" else False
             contact = self._room_id if self._room_id else sender
             write_message(
                 contact, "received", "chat", text,
@@ -286,6 +357,11 @@ class HelucrypticApp:
             sounds.play("message")
 
         def on_call_incoming(sender: str):
+            if self._room_id:
+                # Group room: no per-peer ringing. Show Join-call button instead.
+                self._room_call_active = True
+                self._refresh_call_controls()
+                return
             sounds.play_loop("incoming")
             self._ringing = True
 
@@ -352,20 +428,23 @@ class HelucrypticApp:
                 self.file_progress.visible = True
                 self.page.update()
 
-        def on_file_complete(fname: str, data: bytes, ok: bool):
+        def on_file_complete(fname: str, tmp_path: str, ok: bool):
             self.file_progress.visible = False
             self._log(f"[File received] {fname} {'✓' if ok else '⚠ integrity failed'}")
             self.page.update()
-            asyncio.ensure_future(self._save_received_file(fname, data))
+            asyncio.ensure_future(self._save_received_file(fname, tmp_path, ok))
 
         def on_hangup(peer=None):
             sounds.stop_loop()
             sounds.play("call_end")
+            self._in_voice_call   = False
+            self._in_screen_share = False
             self.btn_hangup.disabled = True
             self.btn_mute.disabled   = True
             self._set_mute_banner(False)
             self._remove_video_tile(peer) if peer else None
             self._log("[Call ended]")
+            self._refresh_call_controls()
             self.page.update()
 
         def on_video_frame(sender: str, img):
@@ -386,7 +465,7 @@ class HelucrypticApp:
                 if sender not in self._video_tiles:
                     self._add_video_tile(sender)
                 tile = self._video_tiles[sender]
-                tile.src_base64 = b64
+                tile.src = "data:image/jpeg;base64," + b64
                 tile.update()
             except Exception:
                 pass
@@ -488,56 +567,83 @@ class HelucrypticApp:
                 sender = msg.get("sender", "")
                 data   = msg.get("data") or {}
 
-                if t == "offer":
-                    await self.engine.handle_offer(sender, data, ws_send)
+                try:
+                    if t == "offer":
+                        await self.engine.handle_offer(sender, data, ws_send)
 
-                elif t == "answer":
-                    await self.engine.handle_answer(data, sender=sender)
+                    elif t == "answer":
+                        await self.engine.handle_answer(data, sender=sender)
 
-                elif t == "ice-candidate":
-                    await self.engine.handle_ice(data, sender=sender)
+                    elif t == "ice-candidate":
+                        await self.engine.handle_ice(data, sender=sender)
 
-                elif t == "connect_request":
-                    # A contact wants to start a 1-to-1 conversation with us.
-                    upsert_contact(sender)
-                    self._refresh_contact_list()
-                    if not self._active_contact:
-                        self.engine.target_peer = sender
-                    await self.engine.add_peer(sender, ws_send)
+                    elif t == "connect_request":
+                        # A contact wants to start a 1-to-1 conversation with us.
+                        upsert_contact(sender)
+                        self._refresh_contact_list()
+                        if not self._active_contact:
+                            self.engine.target_peer = sender
+                        await self.engine.add_peer(sender, ws_send)
 
-                elif t == "peer_joined":
-                    self._room_peers[sender] = "connecting"
-                    self._refresh_participant_list()
-                    await self.engine.add_peer(sender, ws_send)
+                    elif t == "peer_joined":
+                        self._room_peers[sender] = "connecting"
+                        self._refresh_participant_list()
+                        await self._broadcast_capability(ws_send)
+                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+                        await self._apply_active_call_to_hub()
+                        self._refresh_hub_indicator()
+                        if self._in_voice_call or self._in_screen_share:
+                            await self._broadcast_call_active(ws_send)
 
-                elif t == "peer_left":
-                    self._room_peers.pop(sender, None)
-                    self._refresh_participant_list()
-                    asyncio.ensure_future(self.engine.remove_peer(sender))
-                    self._remove_video_tile(sender)
+                    elif t == "peer_left":
+                        self._room_peers.pop(sender, None)
+                        self._refresh_participant_list()
+                        await self.engine.remove_peer(sender)
+                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+                        self._remove_video_tile(sender)
+                        await self._apply_active_call_to_hub()
+                        self._refresh_hub_indicator()
 
-                elif t == "room_state":
-                    # Server sends `peers` at the top level of the message
-                    # (like `sender` for peer_joined), NOT nested under `data`.
-                    for peer in msg.get("peers", []):
-                        self._room_peers[peer] = "connecting"
-                        await self.engine.add_peer(peer, ws_send)
-                    self._refresh_participant_list()
+                    elif t == "room_state":
+                        # Server sends `peers` at the top level of the message
+                        # (like `sender` for peer_joined), NOT nested under `data`.
+                        for peer in msg.get("peers", []):
+                            self._room_peers[peer] = "connecting"
+                        self._refresh_participant_list()
+                        await self._broadcast_capability(ws_send)
+                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+                        await self._apply_active_call_to_hub()
+                        self._refresh_hub_indicator()
 
-                elif t == "room_invite":
-                    room_id = data.get("room_id", "")
-                    inviter = data.get("inviter", sender)
-                    self._show_room_invite_dialog(inviter, room_id)
+                    elif t == "hub_capability":
+                        self.engine.record_capability(sender, data.get("tier", 0), data.get("epoch", 0))
+                        if data.get("creator"):
+                            self.engine.set_room_creator(sender)
+                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+                        await self._apply_active_call_to_hub()
+                        self._refresh_hub_indicator()
 
-                elif t == "error":
-                    msg_text = data if isinstance(data, str) else msg.get("error", str(data))
-                    match = _re.search(r"User '(.+?)' is offline", msg_text)
-                    if match and match.group(1) in self._pending_invites:
-                        username = match.group(1)
-                        self._pending_invites.discard(username)
-                        self._log(f"Could not invite {username} — they are offline")
-                    else:
-                        self._log(f"[Server] {msg_text}")
+                    elif t == "call_active":
+                        self._room_call_active = True
+                        self._log("📞 A call is active in the room — click 'Join call' to join.")
+                        self._refresh_call_controls()
+
+                    elif t == "room_invite":
+                        room_id = data.get("room_id", "")
+                        inviter = data.get("inviter", sender)
+                        self._show_room_invite_dialog(inviter, room_id)
+
+                    elif t == "error":
+                        msg_text = data if isinstance(data, str) else msg.get("error", str(data))
+                        match = _re.search(r"User '(.+?)' is offline", msg_text)
+                        if match and match.group(1) in self._pending_invites:
+                            username = match.group(1)
+                            self._pending_invites.discard(username)
+                            self._log(f"Could not invite {username} — they are offline")
+                        else:
+                            self._log(f"[Server] {msg_text}")
+                except Exception as inner_ex:
+                    print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
 
         except Exception as ex:
             self._log(f"[Disconnected] {ex}")
@@ -588,11 +694,17 @@ class HelucrypticApp:
         if not uname:
             return
         self._room_id = code
+        # Fresh room session: clear any stale call state from a prior room so the
+        # "Join call" button doesn't appear for a call that isn't happening here.
+        self._room_call_active = False
+        self._in_voice_call = False
+        self._in_screen_share = False
         self.engine.set_room(code, is_creator=is_creator)
         self.room_code_label.value    = f"Room: {code}"
         self.btn_invite.visible       = True
         self.btn_copy_room.visible    = True
         self.page.update()
+        self._refresh_hub_indicator()
         await self._connect_signaling(None, room=code)
 
     def _show_room_invite_dialog(self, inviter: str, room_id: str) -> None:
@@ -647,6 +759,80 @@ class HelucrypticApp:
         self._show_dialog(dlg)
 
     # ------------------------------------------------------------------
+    # Hub-election helpers
+    # ------------------------------------------------------------------
+
+    async def _ws_send(self, payload: dict) -> None:
+        if self.ws:
+            await self.ws.send(json.dumps(payload))
+
+    async def _on_topology_changed(self) -> None:
+        """Re-announce capability, re-elect/reconnect to the hub, and (Caveat #3)
+        re-apply any active call to the (possibly new) hub."""
+        if not self._room_id:
+            return
+        await self._broadcast_capability(self._ws_send)
+        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), self._ws_send)
+        await self._apply_active_call_to_hub()
+        self._refresh_hub_indicator()
+
+    async def _apply_active_call_to_hub(self) -> None:
+        if not self._room_id or not (self._in_voice_call or self._in_screen_share):
+            return
+        hub = self.engine.current_hub()
+        if hub == self.engine.my_username:
+            targets = [p for p in self.engine.pcs if self.engine.pcs[p].connectionState == "connected"]
+        elif hub and self.engine.pcs.get(hub):
+            targets = [hub]
+        else:
+            targets = []
+        for peer in targets:
+            if self._in_voice_call:
+                await self.engine.start_voice_call(peer)
+            if self._in_screen_share:
+                await self.engine.start_screen_share(peer)
+
+    async def _broadcast_capability(self, ws_send) -> None:
+        """Send our hub-election capability to every known room peer."""
+        if not self._room_id:
+            return
+        payload = self.engine.capability_payload()
+        for peer in list(self._room_peers.keys()):
+            await ws_send({"target": peer, "type": "hub_capability", "data": payload})
+
+    async def _broadcast_call_active(self, ws_send) -> None:
+        """Tell every room peer that a call is currently active in this room."""
+        if not self._room_id:
+            return
+        for peer in list(self._room_peers.keys()):
+            await ws_send({"target": peer, "type": "call_active", "data": {}})
+
+    def _refresh_call_controls(self) -> None:
+        """Show/hide the Join-call button based on room + call state."""
+        in_call = self._in_voice_call or self._in_screen_share
+        self.btn_join_call.visible = bool(self._room_id and self._room_call_active and not in_call)
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _refresh_hub_indicator(self) -> None:
+        if not self._room_id or not self._room_peers:
+            self.hub_banner.value = ""
+            self.hub_banner.visible = False
+        else:
+            hub = self.engine.current_hub()
+            if hub == self.engine.my_username:
+                self.hub_banner.value = "🛰 You are the relay — others' audio/video pass through you"
+            else:
+                self.hub_banner.value = f"🛰 Relayed by {hub} — media passes through them"
+            self.hub_banner.visible = True
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # Participant list
     # ------------------------------------------------------------------
 
@@ -656,9 +842,7 @@ class HelucrypticApp:
             dot_color = "#57f287" if state == "connected" else "#fee75c"
             c         = get_contact(username)
             display   = (c.nickname if c and c.nickname else username)
-            badge     = " ✓" if (c and c.verified) else (
-                " ⚠" if self.settings.security_mode == "e2ee" else ""
-            )
+            badge     = (" ✓" if c and c.verified else " ⚠") if self.settings.security_mode == "e2ee" else ""
             self.participant_list.controls.append(
                 ft.ListTile(
                     leading=ft.Container(width=10, height=10, border_radius=5, bgcolor=dot_color),
@@ -678,7 +862,7 @@ class HelucrypticApp:
         for c in load_contacts():
             display   = c.nickname or c.username
             dot_color = "#57f287" if c.username == self._connected_peer() else "#72767d"
-            badge     = " ✓" if c.verified else (" ⚠" if self.settings.security_mode == "e2ee" else "")
+            badge     = (" ✓" if c.verified else " ⚠") if self.settings.security_mode == "e2ee" else ""
             tile = ft.ListTile(
                 leading=ft.Container(width=10, height=10, border_radius=5, bgcolor=dot_color),
                 title=ft.Text(f"{display}{badge}", size=13, color="#dcddde"),
@@ -896,12 +1080,23 @@ class HelucrypticApp:
         self._show_dialog(dlg)
         return await fut
 
-    async def _save_received_file(self, fname: str, data: bytes) -> None:
-        # Flet 0.85: save_file() is async, returns the chosen path, and can write src_bytes directly.
+    async def _save_received_file(self, fname: str, tmp_path: str, ok: bool = True) -> None:
+        if not ok:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
+            return
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        await picker.save_file(file_name=fname, src_bytes=data)
+        dest = await picker.save_file(file_name=fname)
+        if dest:
+            shutil.copyfile(tmp_path, dest)
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Calls & screen share
@@ -915,9 +1110,15 @@ class HelucrypticApp:
             await self.ws.send(json.dumps(payload))
 
         if self._room_id:
-            for peer in list(self.engine.pcs.keys()):
-                if self.engine.pcs[peer].connectionState == "connected":
-                    await self.engine.start_voice_call(peer)
+            hub = self.engine.current_hub()
+            if hub == self.engine.my_username:
+                # We are the hub: send our mic to every connected member.
+                for peer in list(self.engine.pcs.keys()):
+                    if self.engine.pcs[peer].connectionState == "connected":
+                        await self.engine.start_voice_call(peer)
+            elif hub and self.engine.pcs.get(hub):
+                # Non-hub: send our mic only to the hub; it fans out to the others.
+                await self.engine.start_voice_call(hub)
         else:
             if not self._active_contact:
                 return
@@ -928,6 +1129,11 @@ class HelucrypticApp:
                 await self.engine.create_offer(self._active_contact, ws_send)
             await self.engine.start_voice_call(self._active_contact)
 
+        self._in_voice_call = True
+        if self._room_id:
+            self._room_call_active = True
+            await self._broadcast_call_active(ws_send)
+        self._refresh_call_controls()
         self.btn_hangup.disabled = False
         self.btn_mute.disabled   = False
         self.page.update()
@@ -940,9 +1146,13 @@ class HelucrypticApp:
             await self.ws.send(json.dumps(payload))
 
         if self._room_id:
-            for peer in list(self.engine.pcs.keys()):
-                if self.engine.pcs[peer].connectionState == "connected":
-                    await self.engine.start_screen_share(peer)
+            hub = self.engine.current_hub()
+            if hub == self.engine.my_username:
+                for peer in list(self.engine.pcs.keys()):
+                    if self.engine.pcs[peer].connectionState == "connected":
+                        await self.engine.start_screen_share(peer)
+            elif hub and self.engine.pcs.get(hub):
+                await self.engine.start_screen_share(hub)
         else:
             if not self._active_contact:
                 return
@@ -953,6 +1163,11 @@ class HelucrypticApp:
                 await self.engine.create_offer(self._active_contact, ws_send)
             await self.engine.start_screen_share(self._active_contact)
 
+        self._in_screen_share = True
+        if self._room_id:
+            self._room_call_active = True
+            await self._broadcast_call_active(ws_send)
+        self._refresh_call_controls()
         self.btn_hangup.disabled = False
         self.btn_mute.disabled   = False
         self._log("[Screen sharing started]")
@@ -976,6 +1191,8 @@ class HelucrypticApp:
         sounds.stop_loop()
         sounds.play("call_end")
         self._muted = False
+        self._in_voice_call   = False
+        self._in_screen_share = False
         self.btn_mute.icon       = ft.Icons.MIC
         self.btn_mute.icon_color = None
         self._set_mute_banner(False)
@@ -984,6 +1201,7 @@ class HelucrypticApp:
         self.btn_call.disabled   = True
         self.btn_screen.disabled = True
         self._log("[Hung up]")
+        self._refresh_call_controls()
         self.page.update()
 
     # ------------------------------------------------------------------
@@ -992,7 +1210,7 @@ class HelucrypticApp:
 
     def _add_video_tile(self, sender: str) -> ft.Image:
         img  = ft.Image(
-            src_base64="", width=240, height=135,
+            src="", width=240, height=135,
             fit=ft.ImageFit.CONTAIN, gapless_playback=True,
             border_radius=ft.border_radius.all(6),
         )
@@ -1037,14 +1255,26 @@ class HelucrypticApp:
     def _show_my_identity(self, e=None) -> None:
         uname = (self.engine.my_username or self.username_input.value or "").strip()
         if not uname:
-            self._log("Enter your username first to show your identity code.")
+            # A bare _log() here is invisible when this is triggered from the
+            # Settings dialog (the chat log is painted behind it), so surface a
+            # real dialog instead — the username is part of the identity code.
+            warn = ft.AlertDialog(
+                title=ft.Text("Set a username first"),
+                content=ft.Text("Enter your username in the sidebar before showing "
+                                "your identity code — it's part of the code you share."),
+                actions=[ft.TextButton("OK", on_click=lambda ev: self._close_dialog(warn))],
+            )
+            self._show_dialog(warn)
             return
         code = identity.encode_identity(
             uname, self.keys["x25519_public"], self.keys["ed25519_public"])
         controls = []
         try:
-            controls.append(ft.Image(src_base64=identity.qr_png_base64(code),
-                                     width=220, height=220))
+            # Flet 0.85 dropped Image.src_base64 — base64 must go through src as
+            # a data URI.
+            controls.append(ft.Image(
+                src="data:image/png;base64," + identity.qr_png_base64(code),
+                width=220, height=220))
         except Exception:
             pass  # QR optional; the text code below is the source of truth
         controls += [
@@ -1415,6 +1645,56 @@ class HelucrypticApp:
             turn_result.value = msg; turn_result.color = "#57f287" if ok else "#ed4245"; self.page.update()
         btn_test_turn = ft.TextButton("Test TURN", on_click=do_test_turn)
 
+        # --- Port forwarding (advanced) ---
+        pf_enabled_cb = ft.Checkbox(
+            label="I'm port-forwarding (VPN/router)",
+            value=self.settings.port_forward_enabled,
+        )
+        pf_port_f = ft.TextField(
+            label="Forwarded port", value=str(self.settings.forwarded_port or ""),
+            width=280, dense=True,
+        )
+        pf_result = ft.Text("", size=11)
+
+        async def do_pf_autodetect(ev):
+            pf_result.value = "Detecting…"; pf_result.color = "#b9bbbe"; self.page.update()
+            gw   = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+            ip   = await asyncio.to_thread(local_ip_for, gw)
+            port = await asyncio.to_thread(request_mapping_over_socket, gw)
+            if port and ip:
+                pf_port_f.value = str(port)
+                pf_result.value = f"Got port {port} on {ip}"; pf_result.color = "#57f287"
+            else:
+                pf_result.value = "No NAT-PMP mapping — enter the port manually"
+                pf_result.color = "#ed4245"
+            self.page.update()
+        btn_pf_detect = ft.TextButton("Auto-detect (NAT-PMP)", on_click=do_pf_autodetect)
+
+        async def do_pf_test(ev):
+            from webrtc_engine import test_forwarded_port
+            try:
+                port = int(pf_port_f.value or 0)
+            except ValueError:
+                port = 0
+            if not (1024 <= port <= 65535):
+                pf_result.value = "Enter a valid port (1024–65535)"; pf_result.color = "#ed4245"
+                self.page.update(); return
+            pf_result.value = "Testing…"; pf_result.color = "#b9bbbe"; self.page.update()
+            gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+            ip = await asyncio.to_thread(local_ip_for, gw)
+            if not ip:
+                pf_result.value = "Could not determine local IP"; pf_result.color = "#ed4245"
+                self.page.update(); return
+            ok, msg = await asyncio.to_thread(test_forwarded_port, ip, port)
+            pf_result.value = msg; pf_result.color = "#57f287" if ok else "#ed4245"
+            self.page.update()
+        btn_pf_test = ft.TextButton("Test", on_click=do_pf_test)
+
+        pf_caption = ft.Text(
+            "Needs full-tunnel VPN; applies to one peer at a time.",
+            size=11, color="#72767d",
+        )
+
         async def export_keys(ev):
             data   = (paths.DATA_DIR / "keys.json").read_bytes()
             picker = ft.FilePicker()
@@ -1429,7 +1709,10 @@ class HelucrypticApp:
             files = await picker.pick_files(allowed_extensions=["json"])
             if files:
                 paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-                shutil.copy(files[0].path, paths.DATA_DIR / "keys.json")
+                paths.write_private_text(
+                    paths.DATA_DIR / "keys.json",
+                    Path(files[0].path).read_text(encoding="utf-8"),
+                )
                 self.keys        = load_or_create_keys()
                 self.history_key = derive_history_key(self.keys["ed25519_private"])
                 self.engine.keys = self.keys
@@ -1481,8 +1764,14 @@ class HelucrypticApp:
             self.settings.turn_username = turn_user_f.value.strip()
             self.settings.turn_password = turn_pass_f.value
             self.settings.verified_only = verified_only_cb.value
+            self.settings.port_forward_enabled = pf_enabled_cb.value
+            try:
+                self.settings.forwarded_port = int(pf_port_f.value or 0)
+            except ValueError:
+                self.settings.forwarded_port = 0
             save_settings(self.settings)
             self._update_perf_parameters()  # apply jpeg/tile knobs live
+            self._apply_port_forward()      # (re)start/stop the forward manager
             self._close_dialog(dlg)
 
         dlg = ft.AlertDialog(
@@ -1504,6 +1793,14 @@ class HelucrypticApp:
                 turn_user_f,
                 turn_pass_f,
                 ft.Row([btn_test_turn, turn_result]),
+                ft.Divider(color="#40444b"),
+                ft.Text("Port forwarding (advanced — direct connect via a forwarded port)",
+                        size=12, color="#72767d"),
+                pf_enabled_cb,
+                pf_port_f,
+                ft.Row([btn_pf_detect, btn_pf_test]),
+                pf_result,
+                pf_caption,
                 ft.Divider(color="#40444b"),
                 ft.Text("Trust & verification", size=12, color="#72767d"),
                 verified_only_cb,

@@ -6,7 +6,7 @@ from typing import Optional
 
 from crypto import compute_fingerprint
 
-from paths import DATA_DIR
+from paths import DATA_DIR, write_private_text
 _CONTACTS_PATH = DATA_DIR / "contacts.json"
 
 
@@ -34,7 +34,7 @@ def _load_raw() -> list[dict]:
 
 def _save_raw(contacts: list[dict]) -> None:
     DATA_DIR.mkdir(exist_ok=True)
-    _CONTACTS_PATH.write_text(json.dumps(contacts, indent=2))
+    write_private_text(_CONTACTS_PATH, json.dumps(contacts, indent=2))
 
 
 def load_contacts() -> list[Contact]:
