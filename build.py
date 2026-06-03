@@ -65,7 +65,36 @@ def _make_fresh_venv() -> Path:
     return py
 
 
+def _clean_build_dir() -> None:
+    build_dir = ROOT / "build"
+    if not build_dir.exists():
+        return
+    print(f"[INFO] Cleaning existing build directory: {build_dir}")
+    import shutil
+    import stat
+    import time
+    for root, dirs, files in os.walk(build_dir):
+        for d in dirs:
+            try:
+                os.chmod(os.path.join(root, d), stat.S_IWRITE)
+            except Exception:
+                pass
+        for f in files:
+            try:
+                os.chmod(os.path.join(root, f), stat.S_IWRITE)
+            except Exception:
+                pass
+    for attempt in range(5):
+        try:
+            shutil.rmtree(build_dir)
+            return
+        except Exception:
+            time.sleep(0.5)
+    print("[WARN] Could not clean build directory completely. Continuing anyway...")
+
+
 def main(argv: list[str]) -> int:
+    _clean_build_dir()
     fresh = "--fresh" in argv
     py = _make_fresh_venv() if fresh else Path(sys.executable)
 
