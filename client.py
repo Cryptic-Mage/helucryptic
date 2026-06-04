@@ -38,6 +38,12 @@ except ImportError:
     cv2 = None
 
 import config
+from theme import flet_theme
+from theme.tokens import PALETTE as _P
+from theme.tokens import RADIUS as _t_RADIUS
+from theme.tokens import MOTION as _t_MOTION
+from theme.tokens import FONTS as _t_FONTS
+from ui_state import summarize_peer_states
 from contacts import (
     delete_contact,
     get_contact,
@@ -143,52 +149,61 @@ def _redact_url(u: str) -> str:
 # ===========================================================================
 
 class C:
-    """Neon-cyber palette."""
-    BG       = "#07070d"   # page backdrop (deep space)
-    BG2      = "#0c0e1a"   # gradient companion
-    PANEL    = "#11121d"   # primary panel
-    ELEV     = "#181a2a"   # elevated surface (inputs, tiles)
-    ELEV2    = "#1f2238"   # hover surface
-    BORDER   = "#23263b"   # hairline border
-    BORDER2  = "#2e3354"   # stronger border
+    """Legacy palette names, now sourced from the unified design tokens
+    (theme.tokens.PALETTE) — the "Refined dark console" rebrand. Attribute
+    names are preserved so every existing call site re-skins unchanged.
 
-    CYAN     = "#00e5ff"   # primary accent (you / sent / connect)
-    CYAN_DIM = "#0e3a44"
-    MAGENTA  = "#ff2d9b"   # secondary accent (peers / received)
-    VIOLET   = "#9b5cff"   # tertiary accent
+    Note: the rebrand collapses the old multi-accent scheme (cyan/magenta/
+    violet) onto a SINGLE cool accent; semantic state colours map to
+    success/warning/danger. Differentiation that previously relied on hue
+    (e.g. sent vs received bubbles) now leans on alignment, shape and labels.
+    """
+    BG       = _P.bg               # page backdrop (static)
+    BG2      = _P.surface
+    PANEL    = _P.surface          # primary panel
+    ELEV     = _P.surface_raised   # elevated surface (inputs, tiles)
+    ELEV2    = _P.surface_overlay  # hover / overlay surface
+    BORDER   = _P.border_subtle    # hairline border
+    BORDER2  = _P.border           # stronger border
 
-    GREEN    = "#2bff88"   # online / connected
-    YELLOW   = "#ffd23f"   # connecting / warning
-    RED      = "#ff3b5c"   # failed / danger
+    CYAN     = _P.accent           # the single accent (you / sent / connect)
+    CYAN_DIM = _P.accent_subtle
+    MAGENTA  = _P.accent           # collapsed onto the single accent
+    VIOLET   = _P.accent           # collapsed onto the single accent
 
-    TEXT     = "#e8eaf6"   # primary text
-    SUBTLE   = "#aab0d4"   # secondary text
-    MUTED    = "#6b7099"   # tertiary text
-    FAINT    = "#3a3f5e"   # idle dot / faint lines
+    GREEN    = _P.success          # online / connected / verified
+    YELLOW   = _P.warning          # connecting / warning
+    RED      = _P.danger           # failed / danger
+
+    TEXT     = _P.text_primary     # primary text
+    SUBTLE   = _P.text_secondary   # secondary text
+    MUTED    = _P.text_muted       # tertiary text
+    FAINT    = _P.text_faint       # idle dot / faint lines
     WHITE    = "#ffffff"
 
-    # Button foreground tokens — dark-tinted complementary to each bg color.
-    BTN_CYAN  = "#04121a"
-    BTN_GREEN = "#04140b"
-    BTN_RED   = "#1a0408"
+    # Button foreground tokens — on-colour for each filled surface.
+    BTN_CYAN  = _P.on_accent
+    BTN_GREEN = _P.on_success
+    BTN_RED   = _P.on_danger
 
 
 class R:
-    """Corner radii."""
-    SM = 8
-    MD = 12
-    LG = 16
-    XL = 22
-    PILL = 999
+    """Corner radii — tightened for a precise, console-grade feel (from
+    theme.tokens.RADIUS). Names preserved for drop-in compatibility."""
+    SM = _t_RADIUS["sm"]    # 6
+    MD = _t_RADIUS["md"]    # 8
+    LG = _t_RADIUS["lg"]    # 12
+    XL = _t_RADIUS["lg"]    # collapsed to lg — no oversized corners
+    PILL = _t_RADIUS["pill"]
 
 
 class D:
-    """Animation durations (ms)."""
-    FAST  = 140
-    PULSE = 180
-    MED   = 240
-    SLOW  = 420
-    BG    = 5200
+    """Animation durations (ms) — functional, short (from theme.tokens.MOTION)."""
+    FAST  = _t_MOTION["fast"]   # 120
+    PULSE = _t_MOTION["base"]   # 180
+    MED   = _t_MOTION["base"]   # 180
+    SLOW  = _t_MOTION["slow"]   # 260
+    BG    = _t_MOTION["slow"]   # background is static now; kept for compatibility
 
 
 _EASE     = ft.AnimationCurve.EASE_OUT
@@ -199,9 +214,16 @@ def _anim(ms: int, curve=_EASE) -> ft.Animation:
     return ft.Animation(ms, curve)
 
 
-def _glow(color: str, blur: int = 18, spread: float = 1.0) -> ft.BoxShadow:
-    """Neon halo behind a control."""
-    return ft.BoxShadow(blur_radius=blur, spread_radius=spread, color=color)
+def _glow(color: str = "", blur: int = 18, spread: float = 1.0) -> ft.BoxShadow:
+    """Rebrand: depth now comes from a neutral elevation shadow, not coloured
+    neon halos. Signature is kept for drop-in compatibility — the ``color`` and
+    ``spread`` arguments are intentionally ignored so every existing call site
+    works unchanged while the look becomes calm and console-grade."""
+    b = max(2, min(int(blur), 24))
+    return ft.BoxShadow(
+        blur_radius=b, spread_radius=-2,
+        offset=ft.Offset(0, max(1, b // 6)), color="#00000066",
+    )
 
 
 def _dot(color: str, size: int = 11, glow: bool = True) -> ft.Container:
@@ -400,59 +422,20 @@ class HelucrypticApp:
         asyncio.ensure_future(run())
 
     def _build_background(self) -> ft.Control:
-        """Two cross-fading gradient layers + a faint vignette. The drift loop
-        is started in _build_ui only when motion is enabled."""
-        grad_a = ft.LinearGradient(
-            begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
-            colors=[C.BG, "#0a1020", "#0a0a14"],
-        )
-        grad_b = ft.LinearGradient(
-            begin=ft.Alignment.TOP_RIGHT, end=ft.Alignment.BOTTOM_LEFT,
-            colors=["#0a0a14", "#140a1e", C.BG],
-        )
-        l1 = ft.Container(expand=True, gradient=grad_a, opacity=1.0,
-                          animate_opacity=_anim(D.BG, _EASE_IO))
-        l2 = ft.Container(expand=True, gradient=grad_b, opacity=0.0,
-                          animate_opacity=_anim(D.BG, _EASE_IO))
-        # Soft neon glow blooms in the corners for depth.
-        bloom = ft.Container(
+        """Static backdrop (rebrand): a single, calm vertical gradient from the
+        backdrop colour to the panel surface — no animation, no neon blooms, and
+        no perf-gated fork. Everyone gets the same consistent surface."""
+        self._bg_layers = []   # disables the (now no-op) drift loop
+        return ft.Container(
             expand=True,
-            gradient=ft.RadialGradient(
-                center=ft.Alignment.TOP_RIGHT, radius=1.4,
-                colors=[C.CYAN + "16", "#00000000"],
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER,
+                colors=[C.BG, C.PANEL],
             ),
         )
-        self._bg_layers = [l1, l2]
-        return ft.Stack([l1, l2, bloom], expand=True)
 
-    async def _bg_drift_loop(self) -> None:
-        if not self._bg_layers:
-            return
-        l1, l2 = self._bg_layers
-        top = True
-        while True:
-            try:
-                await asyncio.sleep(D.BG / 1000)
-                l1.opacity = 0.0 if top else 1.0
-                l2.opacity = 1.0 if top else 0.0
-                l1.update(); l2.update()
-                top = not top
-            except Exception:
-                break
-
-    async def _status_pulse_loop(self) -> None:
-        """Gently breathe the status dot's neon halo, recolouring to whatever
-        _update_status last set as its bgcolor."""
-        on = True
-        while True:
-            try:
-                await asyncio.sleep(1.15)
-                col = self.status_dot.bgcolor or C.FAINT
-                self.status_dot.shadow = _glow(col, blur=16 if on else 5, spread=2 if on else 0)
-                self.status_dot.update()
-                on = not on
-            except Exception:
-                break
+    # (Removed _bg_drift_loop and _status_pulse_loop — the rebrand uses a static
+    # background and drops the ambient pulsing status halo.)
 
     @staticmethod
     def _attach_hover(container: ft.Container, base: str, hover: str,
@@ -647,17 +630,14 @@ class HelucrypticApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        sidebar = ft.Container(
+        # Sidebar is now pure NAVIGATION (rooms + contacts). Identity/connection
+        # setup lives in the top presence bar instead (see presence_bar below).
+        # Collapsible via the menu button / Ctrl+B.
+        self._sidebar = ft.Container(
             width=256, bgcolor=C.PANEL,
             padding=ft.Padding.all(16),
             border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
             content=ft.Column([
-                brand,
-                ft.Container(height=4),
-                self.username_input,
-                self.btn_connect,
-                self.status_pill,
-                ft.Container(height=4),
                 room_card,
                 ft.Container(height=4),
                 contacts_header,
@@ -665,6 +645,29 @@ class HelucrypticApp:
                 ft.Row([self.btn_add_contact], spacing=0),
                 ft.Row([self.btn_import_id], spacing=0),
             ], spacing=12, expand=True),
+        )
+        sidebar = self._sidebar
+        self._sidebar_collapsed = False
+        self.btn_sidebar_toggle = ft.IconButton(
+            ft.Icons.MENU_OPEN, on_click=lambda e: self._toggle_sidebar(),
+            tooltip="Toggle sidebar (Ctrl+B)", icon_color=C.SUBTLE,
+        )
+
+        # Top presence bar: brand on the left; identity + Connect + live status
+        # on the right. Connection setup is transient context, not permanent
+        # sidebar furniture.
+        presence_bar = ft.Container(
+            bgcolor=C.PANEL,
+            padding=ft.Padding.only(left=16, right=16, top=10, bottom=10),
+            border=ft.Border.only(bottom=ft.BorderSide(1, C.BORDER)),
+            content=ft.Row([
+                self.btn_sidebar_toggle,
+                brand,
+                ft.Container(expand=True),
+                self.username_input,
+                self.btn_connect,
+                self.status_pill,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=12),
         )
 
         # --- Chat panel ---
@@ -683,7 +686,7 @@ class HelucrypticApp:
         self.btn_send     = ft.IconButton(ft.Icons.SEND_ROUNDED, on_click=self._send_chat,
                                           icon_color=C.CYAN, tooltip="Send",
                                           disabled=True)
-        self.btn_call     = ft.IconButton(ft.Icons.CALL,         on_click=self._start_call,   disabled=True, icon_color=C.GREEN,   tooltip="Voice call")
+        self.btn_call     = ft.IconButton(ft.Icons.CALL,         on_click=self._start_call,   disabled=True, icon_color=C.SUBTLE,  tooltip="Voice call")
         self.btn_screen   = ft.IconButton(ft.Icons.SCREEN_SHARE, on_click=self._toggle_screen, disabled=True, icon_color=C.SUBTLE,  tooltip="Share screen")
         self.btn_file     = ft.IconButton(ft.Icons.ATTACH_FILE,  on_click=self._send_file,    disabled=True, icon_color=C.SUBTLE,  tooltip="Send file")
         self.btn_mute     = ft.IconButton(ft.Icons.MIC,          on_click=self._toggle_mute,  disabled=True, icon_color=C.SUBTLE,  tooltip="Mute mic")
@@ -800,7 +803,8 @@ class HelucrypticApp:
             content=ft.Column([chat_header, chat_body], spacing=0, expand=True),
         )
 
-        # Glass app frame floating over the animated backdrop.
+        # App frame floating over the static backdrop: presence bar across the
+        # top, then the nav sidebar + chat panel below it.
         app_frame = ft.Container(
             expand=True,
             margin=ft.Margin.all(10),
@@ -809,7 +813,10 @@ class HelucrypticApp:
             border=ft.Border.all(1, C.BORDER2),
             shadow=ft.BoxShadow(blur_radius=40, spread_radius=-6, color="#000000aa"),
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            content=ft.Row([sidebar, chat_panel], expand=True, spacing=0),
+            content=ft.Column([
+                presence_bar,
+                ft.Row([sidebar, chat_panel], expand=True, spacing=0),
+            ], spacing=0, expand=True),
             opacity=0, scale=0.985,
             animate_opacity=_anim(280, _EASE_IO),
             animate_scale=_anim(280, _EASE_IO),
@@ -881,15 +888,147 @@ class HelucrypticApp:
             )
         )
 
-        root = ft.Stack([self._build_background(), app_frame, self.screen_overlay, self.pip_overlay],
+        self._build_command_palette()
+
+        root = ft.Stack([self._build_background(), app_frame, self.screen_overlay,
+                         self.pip_overlay, self.palette_overlay],
                         expand=True)
         self.page.add(root)
+        # Global keyboard shortcuts (Ctrl/Cmd+K command palette, Esc to close).
+        self.page.on_keyboard_event = self._on_key
 
-        # Kick off entrance + ambient motion.
+        # Entrance reveal only. The rebrand drops ambient motion (drifting
+        # background + pulsing status halo) in favour of a calm, static surface.
         self._reveal(app_frame, delay=0.05)
-        if self._motion_ok:
-            self._bg_tasks.append(asyncio.ensure_future(self._bg_drift_loop()))
-            self._bg_tasks.append(asyncio.ensure_future(self._status_pulse_loop()))
+
+    # ---- command palette (Ctrl/Cmd+K) ---------------------------------
+
+    def _command_registry(self) -> list:
+        """The list of palette commands: title, search keywords, and a bound
+        action. Actions reuse existing handlers (most accept an unused event)."""
+        return [
+            {"id": "connect",   "title": "Connect to signaling", "icon": ft.Icons.BOLT,
+             "keywords": "online join server", "action": lambda: self._connect_signaling(None)},
+            {"id": "create",    "title": "Create room", "icon": ft.Icons.ADD,
+             "keywords": "group new", "action": lambda: self._create_room(None)},
+            {"id": "join",      "title": "Join room", "icon": ft.Icons.LOGIN,
+             "keywords": "group enter", "action": lambda: self._show_join_room(None)},
+            {"id": "call",      "title": "Start voice call", "icon": ft.Icons.CALL,
+             "keywords": "audio mic talk", "action": lambda: self._start_call(None)},
+            {"id": "share",     "title": "Share screen", "icon": ft.Icons.SCREEN_SHARE,
+             "keywords": "present screen", "action": lambda: self._toggle_screen(None)},
+            {"id": "mute",      "title": "Toggle mute", "icon": ft.Icons.MIC_OFF,
+             "keywords": "microphone silence", "action": lambda: self._toggle_mute(None)},
+            {"id": "hangup",    "title": "Hang up", "icon": ft.Icons.CALL_END,
+             "keywords": "end call stop", "action": lambda: self._hangup(None)},
+            {"id": "file",      "title": "Send file", "icon": ft.Icons.ATTACH_FILE,
+             "keywords": "attach upload", "action": lambda: self._send_file(None)},
+            {"id": "add",       "title": "Add contact", "icon": ft.Icons.PERSON_ADD,
+             "keywords": "new friend", "action": lambda: self._show_add_contact(None)},
+            {"id": "settings",  "title": "Open settings", "icon": ft.Icons.SETTINGS,
+             "keywords": "preferences config", "action": lambda: self._show_settings(None)},
+            {"id": "diag",      "title": "Connection diagnostics", "icon": ft.Icons.INSIGHTS,
+             "keywords": "debug ice turn logs", "action": lambda: self._show_diagnostics(None)},
+            {"id": "sidebar",   "title": "Toggle sidebar", "icon": ft.Icons.MENU_OPEN,
+             "keywords": "collapse hide nav", "action": lambda: self._toggle_sidebar()},
+        ]
+
+    def _build_command_palette(self) -> None:
+        self._palette_open = False
+        self.palette_search = _neon_field(
+            hint_text="Type a command…", autofocus=True, border_radius=R.MD,
+            on_change=lambda e: self._refilter_palette(),
+            prefix_icon=ft.Icons.SEARCH,
+        )
+        self.palette_results = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=320)
+        card = ft.Container(
+            width=560, bgcolor=C.ELEV2, border_radius=R.LG,
+            border=ft.Border.all(1, C.BORDER2),
+            shadow=_glow(blur=24),
+            padding=ft.Padding.all(10),
+            content=ft.Column([self.palette_search, ft.Container(height=4),
+                               self.palette_results], spacing=6, tight=True),
+        )
+        self.palette_overlay = ft.Container(
+            visible=False, expand=True, bgcolor="#000000cc",
+            alignment=ft.Alignment.TOP_CENTER,
+            padding=ft.Padding.only(top=90),
+            on_click=lambda e: self._close_palette(),   # click scrim to dismiss
+            content=ft.Container(content=card, on_click=lambda e: None),
+        )
+
+    def _palette_row(self, cmd: dict) -> ft.Control:
+        row = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            border_radius=R.SM, bgcolor=C.ELEV + "00", animate=_anim(D.FAST),
+            on_click=lambda e, c=cmd: self._run_command(c),
+            content=ft.Row([
+                ft.Icon(cmd.get("icon", ft.Icons.CHEVRON_RIGHT), color=C.SUBTLE, size=18),
+                ft.Text(cmd["title"], size=13, color=C.TEXT),
+            ], spacing=12),
+        )
+        self._attach_hover(row, C.ELEV + "00", C.ELEV2)
+        return row
+
+    def _refilter_palette(self) -> None:
+        from commands import filter_commands
+        matches = filter_commands(self._command_registry(), self.palette_search.value or "")
+        self.palette_results.controls = [self._palette_row(c) for c in matches] or [
+            self._empty_state(ft.Icons.SEARCH_OFF, "No matching command")
+        ]
+        try:
+            self.palette_results.update()
+        except Exception:
+            pass
+
+    def _open_palette(self) -> None:
+        self._palette_open = True
+        self.palette_search.value = ""
+        self._refilter_palette()
+        self.palette_overlay.visible = True
+        self.palette_overlay.update()
+        try:
+            self.palette_search.focus()
+        except Exception:
+            pass
+
+    def _close_palette(self) -> None:
+        self._palette_open = False
+        self.palette_overlay.visible = False
+        self.palette_overlay.update()
+
+    def _run_command(self, cmd: dict) -> None:
+        self._close_palette()
+        try:
+            cmd["action"]()
+        except Exception as ex:
+            self._toast(f"Couldn't run “{cmd['title']}”: {ex}", "error")
+
+    def _toggle_sidebar(self) -> None:
+        """Collapse / expand the navigation sidebar (Ctrl+B)."""
+        self._sidebar_collapsed = not getattr(self, "_sidebar_collapsed", False)
+        self._sidebar.visible = not self._sidebar_collapsed
+        self.btn_sidebar_toggle.icon = (
+            ft.Icons.MENU if self._sidebar_collapsed else ft.Icons.MENU_OPEN)
+        try:
+            self._sidebar.update()
+            self.btn_sidebar_toggle.update()
+        except Exception:
+            pass
+
+    def _on_key(self, e) -> None:
+        # Global shortcuts: Ctrl/Cmd+K palette, Esc closes it, Ctrl+B sidebar,
+        # Ctrl+, settings.
+        key = (getattr(e, "key", "") or "")
+        mod = getattr(e, "ctrl", False) or getattr(e, "meta", False)
+        if mod and key.lower() == "k":
+            self._close_palette() if getattr(self, "_palette_open", False) else self._open_palette()
+        elif key == "Escape" and getattr(self, "_palette_open", False):
+            self._close_palette()
+        elif mod and key.lower() == "b":
+            self._toggle_sidebar()
+        elif mod and key == ",":
+            self._show_settings(None)
 
     # ---- small builders ------------------------------------------------
 
@@ -984,15 +1123,6 @@ class HelucrypticApp:
 
     def _wire_engine_callbacks(self) -> None:
         def on_state(peer: str, state: str):
-            colors = {
-                "connected":    (C.GREEN,  "CONNECTED"),
-                "connecting":   (C.YELLOW, "CONNECTING"),
-                "failed":       (C.RED,    "FAILED"),
-                "disconnected": (C.RED,    "DISCONNECTED"),
-                "closed":       (C.FAINT,  "CLOSED"),
-            }
-            color, label = colors.get(state, (C.FAINT, state.upper()))
-            self._update_status(label, color)
             if peer in self._room_peers:
                 # Dynamic hub failover (feature F): if the peer we just lost was
                 # the relay hub, forget it and re-elect so the group call keeps
@@ -1008,12 +1138,15 @@ class HelucrypticApp:
                 else:
                     self._room_peers[peer] = state
                     self._refresh_participant_list()
+                # Honest aggregate status across the WHOLE room (not last-wins).
+                self._apply_aggregate_status(self._room_peers, group=True)
             else:
                 # 1-to-1 peer state changed — flip its presence dot/wifi promptly
                 # and refresh the header if it's the open conversation.
                 self._refresh_contact_list()
                 if peer == self._active_contact and not self._room_id:
                     self._update_chat_header_contact(peer)
+                self._apply_aggregate_status({peer: state}, group=False)
             if state == "connected":
                 self.msg_input.disabled  = False
                 self.btn_send.disabled   = False
@@ -1278,14 +1411,14 @@ class HelucrypticApp:
         try:
             self.ws = await websockets.connect(url)
             self._update_status("SIGNALING", C.YELLOW)
-            self._log(f"Connected as '{uname}'" + (f" in {room}" if room else "") + ".")
+            self._toast(f"Connected as “{uname}”" + (f" in {room}" if room else ""), "success")
             print(f"[connect] websocket OPEN to {safe_url}", flush=True)
             sounds.play("reactivated")
             asyncio.ensure_future(self._signaling_listener())
             asyncio.ensure_future(self._query_presence())   # immediate presence refresh
         except Exception as ex:
             self.engine.last_error = f"signaling: {type(ex).__name__}"
-            self._log(f"[Error] Cannot reach server: {ex}")
+            self._toast(f"Cannot reach server: {ex}", "error")
             print(f"[connect] FAILED: {type(ex).__name__}: {ex}", flush=True)
 
     async def _signaling_listener(self) -> None:
@@ -1378,14 +1511,14 @@ class HelucrypticApp:
                         if match and match.group(1) in self._pending_invites:
                             username = match.group(1)
                             self._pending_invites.discard(username)
-                            self._log(f"Could not invite {username} — they are offline")
+                            self._toast(f"Could not invite {username} — they are offline", "warn")
                         else:
-                            self._log(f"[Server] {msg_text}")
+                            self._toast(msg_text, "error")
                 except Exception as inner_ex:
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
 
         except Exception as ex:
-            self._log(f"[Disconnected] {ex}")
+            self._toast(f"Disconnected from signaling: {ex}", "error")
             self._update_status("IDLE", C.FAINT)
             self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
 
@@ -1446,7 +1579,7 @@ class HelucrypticApp:
             self._show_invite_contacts()
 
     def _show_join_room(self, e) -> None:
-        field = ft.TextField(label="Room code (e.g. ROOM-AB12)", autofocus=True, dense=True)
+        field = _neon_field(label="Room code (e.g. ROOM-AB12)", autofocus=True, dense=True)
 
         async def do_join(ev):
             code = field.value.strip().upper()
@@ -1509,7 +1642,7 @@ class HelucrypticApp:
             label="Include server password in the link",
             value=bool(self._server_password),
         )
-        out = ft.TextField(value="", read_only=True, multiline=True, min_lines=2,
+        out = _neon_field(value="", read_only=True, multiline=True, min_lines=2,
                            max_lines=4, width=380, text_size=11, visible=False)
 
         def generate(ev):
@@ -1547,7 +1680,7 @@ class HelucrypticApp:
         self._show_dialog(dlg)
 
     def _show_join_invite(self, e=None) -> None:
-        field = ft.TextField(label="Paste invite link (HELU-INV1:…)", autofocus=True,
+        field = _neon_field(label="Paste invite link (HELU-INV1:…)", autofocus=True,
                              multiline=True, min_lines=2, max_lines=4, width=380)
         error = ft.Text("", color=C.RED, size=11, visible=False)
 
@@ -1798,13 +1931,45 @@ class HelucrypticApp:
 
     def _refresh_contact_list(self) -> None:
         self.contact_list.controls.clear()
-        for c in load_contacts():
-            self.contact_list.controls.append(self._contact_card(c))
+        contacts = load_contacts()
+        if not contacts:
+            self.contact_list.controls.append(self._empty_state(
+                ft.Icons.PERSON_ADD_ALT_1,
+                "No contacts yet",
+                "Add a contact or share your identity code to start a private conversation.",
+            ))
+        else:
+            for c in contacts:
+                self.contact_list.controls.append(self._contact_card(c))
         self.page.update()
 
+    def _empty_state(self, icon, title: str, subtitle: str = "") -> ft.Container:
+        """A calm, centered placeholder for an empty list/area — replaces blank
+        voids with quiet guidance (icon + title + optional one-liner)."""
+        children = [
+            ft.Container(
+                content=ft.Icon(icon, color=C.MUTED, size=22),
+                padding=ft.Padding.all(12), border_radius=R.MD,
+                bgcolor=C.ELEV + "80", border=ft.Border.all(1, C.BORDER),
+            ),
+            ft.Text(title, size=13, weight=ft.FontWeight.W_600, color=C.SUBTLE,
+                    text_align=ft.TextAlign.CENTER),
+        ]
+        if subtitle:
+            children.append(ft.Text(subtitle, size=11, color=C.MUTED,
+                                    text_align=ft.TextAlign.CENTER))
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=28),
+            alignment=ft.Alignment.CENTER,
+            content=ft.Column(children, spacing=10, tight=True,
+                              horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+        )
+
     def _avatar_gradient(self, verified: bool) -> ft.LinearGradient:
+        # Verified gets the accent; unverified stays a neutral slate.
         return ft.LinearGradient(
-            colors=[C.VIOLET, C.CYAN] if verified else ["#2a2e45", "#161826"],
+            begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
+            colors=[C.CYAN, C.CYAN_DIM] if verified else [C.ELEV2, C.ELEV],
         )
 
     def _verify_badge(self, verified: bool, size: int = 13):
@@ -2014,7 +2179,7 @@ class HelucrypticApp:
 
         def do_rename(e):
             self._close_dialog(menu)
-            field = ft.TextField(label="Nickname", value=c.nickname, autofocus=True)
+            field = _neon_field(label="Nickname", value=c.nickname, autofocus=True)
             def save_rename(ev):
                 rename_contact(username, field.value.strip())
                 self._refresh_contact_list()
@@ -2364,7 +2529,7 @@ class HelucrypticApp:
         self._refresh_call_controls()
         self.btn_hangup.disabled = False
         self.btn_mute.disabled   = False
-        self.btn_screen.icon_color = C.MAGENTA      # active = sharing
+        self.btn_screen.icon_color = C.CYAN         # active = sharing (accent)
         self.btn_screen.tooltip    = "Stop sharing"
         self._update_call_status(True)
         self._log("[Screen sharing started] — tip: start a call too if you also want to talk.")
@@ -2639,7 +2804,7 @@ class HelucrypticApp:
         controls += [
             ft.Text("Your verification code (share with a contact):",
                     size=12, color=C.MUTED),
-            ft.TextField(value=code, read_only=True, multiline=True, min_lines=2,
+            _neon_field(value=code, read_only=True, multiline=True, min_lines=2,
                          max_lines=4, width=360, text_size=11),
             ft.Text("They paste this into 'Import from code'.", size=11, color=C.MUTED),
             ft.Divider(color=C.BORDER),
@@ -2665,7 +2830,7 @@ class HelucrypticApp:
         self._show_dialog(dlg)
 
     def _show_import_identity(self, e=None) -> None:
-        field = ft.TextField(label="Paste verification code (HELU1:…)",
+        field = _neon_field(label="Paste verification code (HELU1:…)",
                              autofocus=True, multiline=True, min_lines=2, max_lines=4, width=360)
         error = ft.Text("", color=C.RED, size=11, visible=False)
 
@@ -2719,9 +2884,9 @@ class HelucrypticApp:
     # ------------------------------------------------------------------
 
     def _show_backup(self, e=None) -> None:
-        pw1 = ft.TextField(label="Backup passphrase", password=True,
+        pw1 = _neon_field(label="Backup passphrase", password=True,
                            can_reveal_password=True, width=280, dense=True)
-        pw2 = ft.TextField(label="Confirm passphrase", password=True,
+        pw2 = _neon_field(label="Confirm passphrase", password=True,
                            width=280, dense=True)
         incl = ft.Checkbox(label="Include message history", value=False)
         err = ft.Text("", color=C.RED, size=11, visible=False)
@@ -2754,7 +2919,7 @@ class HelucrypticApp:
         self._show_dialog(dlg)
 
     def _show_restore(self, e=None) -> None:
-        pw = ft.TextField(label="Backup passphrase", password=True,
+        pw = _neon_field(label="Backup passphrase", password=True,
                           can_reveal_password=True, width=280, dense=True)
         err = ft.Text("", color=C.RED, size=11, visible=False)
 
@@ -2798,7 +2963,7 @@ class HelucrypticApp:
         self._show_dialog(dlg)
 
     def _show_wipe(self, e=None) -> None:
-        phrase = ft.TextField(label='Type WIPE to confirm', width=280, dense=True, autofocus=True)
+        phrase = _neon_field(label='Type WIPE to confirm', width=280, dense=True, autofocus=True)
         err = ft.Text("", color=C.RED, size=11, visible=False)
 
         async def do_wipe(ev):
@@ -3058,7 +3223,7 @@ class HelucrypticApp:
             if self.settings.retention_days in (0, 7, 30, 90)
             else "custom"
         )
-        custom_days   = ft.TextField(
+        custom_days   = _neon_field(
             label="Days", width=100, dense=True,
             visible=(preset_value == "custom"),
             value=str(self.settings.retention_days) if preset_value == "custom" else "1",
@@ -3080,7 +3245,7 @@ class HelucrypticApp:
             self.page.update()
         retention_dd.on_change = on_retention_change
 
-        url_field = ft.TextField(
+        url_field = _neon_field(
             value=self.settings.signaling_url, label="Signaling URL", width=280, dense=True,
         )
         # --- Trust ---
@@ -3112,11 +3277,11 @@ class HelucrypticApp:
         profile_dd.on_change = on_profile_change
 
         # --- TURN relay ---
-        turn_url_f  = ft.TextField(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
+        turn_url_f  = _neon_field(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
                                    width=280, dense=True)
-        turn_user_f = ft.TextField(label="TURN username", value=self.settings.turn_username,
+        turn_user_f = _neon_field(label="TURN username", value=self.settings.turn_username,
                                    width=280, dense=True)
-        turn_pass_f = ft.TextField(label="TURN password", value=self.settings.turn_password,
+        turn_pass_f = _neon_field(label="TURN password", value=self.settings.turn_password,
                                    width=280, dense=True, password=True, can_reveal_password=True)
         turn_result = ft.Text("", size=11)
         async def do_test_turn(ev):
@@ -3131,7 +3296,7 @@ class HelucrypticApp:
             label="I'm port-forwarding (VPN/router)",
             value=self.settings.port_forward_enabled,
         )
-        pf_port_f = ft.TextField(
+        pf_port_f = _neon_field(
             label="Forwarded port", value=str(self.settings.forwarded_port or ""),
             width=280, dense=True,
         )
@@ -3363,7 +3528,7 @@ class HelucrypticApp:
     # ------------------------------------------------------------------
 
     def _show_add_contact(self, e) -> None:
-        field = ft.TextField(label="Username", autofocus=True, dense=True)
+        field = _neon_field(label="Username", autofocus=True, dense=True)
         def add(ev):
             name = field.value.strip()
             if name:
@@ -3404,6 +3569,22 @@ class HelucrypticApp:
             return self.engine.target_peer
         return ""
 
+    # Semantic status level -> palette colour for the status pill.
+    _STATUS_COLORS = {
+        "idle":         "FAINT",
+        "connecting":   "YELLOW",
+        "connected":    "GREEN",
+        "partial":      "YELLOW",
+        "disconnected": "RED",
+    }
+
+    def _apply_aggregate_status(self, states: dict, group: bool) -> None:
+        """Set the status pill from an HONEST summary of the given peer states
+        (mesh-aware: e.g. '2/3 connected'), replacing last-peer-wins."""
+        s = summarize_peer_states(states, group=group)
+        color = getattr(C, self._STATUS_COLORS.get(s["level"], "FAINT"))
+        self._update_status(s["label"], color)
+
     def _update_status(self, label: str, color: str) -> None:
         self.status_dot.bgcolor      = color
         self.engine.signaling_status = label.lower()
@@ -3412,7 +3593,7 @@ class HelucrypticApp:
                 self._status_label_task.cancel()
             self._status_label_task = asyncio.ensure_future(
                 self._crossfade_status_label(label, color))
-            if label == "CONNECTED":
+            if color == C.GREEN:
                 asyncio.ensure_future(self._status_connect_bloom())
         else:
             self.status_label.value = label
@@ -3425,13 +3606,19 @@ class HelucrypticApp:
         self.chat_log.controls.append(self._make_bubble(prefix, text, verified, is_sent))
 
     def _make_bubble(self, name: str, text: str, verified: bool, is_sent: bool) -> ft.Control:
-        """A chat bubble: cyan/right for you, magenta/left for peers, with a
-        glowing edge, sender label and an optional verified tick. Slides+fades
-        in on arrival (suppressed during bulk history loads)."""
-        accent = C.CYAN if is_sent else C.MAGENTA
+        """A chat bubble. With the single-accent rebrand, sent vs received are
+        distinguished WITHOUT a colour pair: sent = accent-tinted fill + accent
+        label on the right; received = neutral surface + muted label on the
+        left. Asymmetric corners reinforce direction. Slides+fades in on arrival
+        (suppressed during bulk history loads)."""
+        # Sent leans on the accent; received stays neutral so a busy room of
+        # peers doesn't turn into a wall of accent colour.
+        name_color   = C.CYAN if is_sent else C.SUBTLE
+        fill         = C.CYAN_DIM if is_sent else C.ELEV
+        border_color = (C.CYAN + "55") if is_sent else C.BORDER2
         header = ft.Row(
             [
-                ft.Text(name, size=10, color=accent, weight=ft.FontWeight.W_800),
+                ft.Text(name, size=10, color=name_color, weight=ft.FontWeight.W_700),
                 *([ft.Icon(ft.Icons.VERIFIED, size=11, color=C.GREEN)] if verified else []),
             ],
             spacing=4, tight=True,
@@ -3444,14 +3631,14 @@ class HelucrypticApp:
                 horizontal_alignment=ft.CrossAxisAlignment.END if is_sent
                 else ft.CrossAxisAlignment.START),
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
-            bgcolor=(C.CYAN_DIM if is_sent else C.ELEV),
-            border=ft.Border.all(1, accent + "66"),
+            bgcolor=fill,
+            border=ft.Border.all(1, border_color),
             border_radius=ft.BorderRadius(
                 top_left=R.LG, top_right=R.LG,
-                bottom_left=4 if is_sent else R.LG,
-                bottom_right=R.LG if is_sent else 4,
+                bottom_left=R.SM if is_sent else R.LG,
+                bottom_right=R.LG if is_sent else R.SM,
             ),
-            shadow=_glow(accent + "22", blur=14, spread=-3),
+            shadow=_glow(blur=10),
         )
         bubble = ft.Container(
             content=inner,
@@ -3467,18 +3654,48 @@ class HelucrypticApp:
         return bubble
 
     def _log(self, text: str) -> None:
-        pill = ft.Container(
-            content=ft.Container(
-                content=ft.Text(text, color=C.MUTED, size=11, italic=True,
-                                text_align=ft.TextAlign.CENTER),
-                padding=ft.Padding.symmetric(horizontal=12, vertical=5),
-                border_radius=R.PILL, bgcolor=C.ELEV + "80",
-                border=ft.Border.all(1, C.BORDER),
-            ),
-            alignment=ft.Alignment.CENTER,
+        # Clean, console-style system line: a centered hairline divider with the
+        # message in muted monospace — no italics, reads as intentional system
+        # output rather than a stray chat bubble.
+        line = ft.Container(height=1, bgcolor=C.BORDER, expand=True)
+        chip = ft.Row(
+            [
+                line,
+                ft.Text(text, color=C.MUTED, size=10.5, font_family=_t_FONTS["mono"],
+                        weight=ft.FontWeight.W_500, no_wrap=False),
+                ft.Container(height=1, bgcolor=C.BORDER, expand=True),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10,
         )
-        self.chat_log.controls.append(pill)
+        self.chat_log.controls.append(
+            ft.Container(content=chip, padding=ft.Padding.symmetric(horizontal=8, vertical=6)))
         self.page.update()
+
+    def _toast(self, text: str, level: str = "info") -> None:
+        """Surface a transient system/connection message as a toast OVERLAY
+        (not inside the conversation transcript). Defensive: if the SnackBar
+        API isn't available, it degrades to a chat-log pill so the user still
+        sees the message."""
+        accent = {"error": C.RED, "warn": C.YELLOW, "success": C.GREEN}.get(level, C.CYAN)
+        try:
+            self.page.open(ft.SnackBar(
+                content=ft.Row(
+                    [ft.Icon(ft.Icons.INFO_OUTLINE if level == "info"
+                             else ft.Icons.ERROR_OUTLINE if level == "error"
+                             else ft.Icons.CHECK_CIRCLE_OUTLINE if level == "success"
+                             else ft.Icons.WARNING_AMBER_ROUNDED,
+                             color=accent, size=18),
+                     ft.Text(text, color=C.TEXT, size=12)],
+                    spacing=10, tight=True,
+                ),
+                bgcolor=C.ELEV,
+                duration=4000,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                shape=ft.RoundedRectangleBorder(radius=R.MD),
+            ))
+        except Exception:
+            # Fallback: never silently drop a message the user needs to see.
+            self._log(text)
 
 
 def generate_room_code() -> str:
@@ -3712,14 +3929,15 @@ class StartupScreen:
 async def main(page: ft.Page) -> None:
     _install_log_capture()   # mirror stdout/stderr into the in-app diagnostics log
     page.title         = "helucryptic"
-    page.theme_mode    = ft.ThemeMode.DARK
-    page.theme         = ft.Theme(color_scheme_seed=C.CYAN)
+    # Apply the unified "Refined dark console" theme: dark Material ColorScheme
+    # (so built-in dialogs/dropdowns/checkboxes inherit the palette instead of
+    # stock Material), bundled fonts (if present), and the static backdrop.
+    flet_theme.apply(page)
     page.window.width  = 1180
     page.window.height = 760
     page.window.min_width  = 940
     page.window.min_height = 600
     page.padding       = 0
-    page.bgcolor       = C.BG
 
     import sys
     from pathlib import Path
