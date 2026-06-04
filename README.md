@@ -108,6 +108,7 @@ Sometimes two peers simply can't reach each other directly — typically when on
 ### Option A — Managed cloud TURN (easiest)
 
 Grab credentials from a hosted service and paste them into your `.env`:
+
 - **Metered.ca** — free tier with 50 GB/month of TURN bandwidth.
 - **Twilio Network Traversal** — pay-as-you-go TURN/STUN.
 - **Xirsys** — developer-friendly free tiers.
@@ -210,3 +211,5 @@ We'd rather tell you the sharp edges than hide them:
 - In a group call, media is decrypted at the **relay peer** so it can forward it — chat and files stay end-to-end encrypted, but treat the relay host as trusted for media (the app tells you who it is).
 - **Forward secrecy** — every session derives its key from fresh **ephemeral** X25519 keys, signed by your long-term identity. A stolen identity key can't decrypt sessions you've already had, and the signed handshake stops a tampered server from swapping keys mid-introduction.
 - Your identity keys live in `~/.helucryptic/keys.json`, **wrapped with the OS keystore (Windows DPAPI)** so a raw copy of the file is useless on another account or machine. Back them up with **Export Keys** — backups carry the plaintext identity (protected by your backup passphrase) and are re-wrapped on restore, so they stay portable across machines.
+
+Please feel free to contact me at <crypticmage00@gmail.com> for any queries.
