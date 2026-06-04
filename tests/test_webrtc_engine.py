@@ -170,7 +170,7 @@ def test_play_callback_mixing(engine):
     # Frame 2: bob[2] (3000) + charlie[2] (300) = 3300
     # Frame 3: bob's next chunk[0] (4000) + charlie[3] (400) = 4400
     
-    expected = np.array([[1100], [2200], [3300], [4400]], dtype=np.int16)
+    expected = np.array([[3300], [6600], [9900], [13200]], dtype=np.int16)
     assert np.array_equal(outdata, expected)
     
     # Check remaining chunks:

@@ -345,6 +345,8 @@ class HelucrypticApp:
         self._wire_engine_callbacks()
         self._bg_tasks.append(asyncio.ensure_future(self._retention_background_loop()))
         self._bg_tasks.append(asyncio.ensure_future(self._presence_loop()))
+        if self._motion_ok:
+            self._bg_tasks.append(asyncio.ensure_future(self._status_pulse_loop()))
         self._apply_port_forward()
 
     def _apply_port_forward(self) -> None:
@@ -434,8 +436,27 @@ class HelucrypticApp:
             ),
         )
 
-    # (Removed _bg_drift_loop and _status_pulse_loop — the rebrand uses a static
-    # background and drops the ambient pulsing status halo.)
+    async def _status_pulse_loop(self) -> None:
+        """Gently breathe the status dot's scale and colored glow to create a pulsating effect."""
+        on = True
+        while True:
+            try:
+                await asyncio.sleep(0.8)
+                col = self.status_dot.bgcolor or C.FAINT
+                if col == C.FAINT:
+                    self.status_dot.scale = 1.0
+                    self.status_dot.shadow = ft.BoxShadow(blur_radius=6, spread_radius=-2, color="#00000066")
+                else:
+                    self.status_dot.scale = 1.25 if on else 1.0
+                    self.status_dot.shadow = ft.BoxShadow(
+                        blur_radius=16 if on else 6,
+                        spread_radius=1 if on else -1,
+                        color=col + "aa" if on else col + "44"
+                    )
+                self.status_dot.update()
+                on = not on
+            except Exception:
+                break
 
     @staticmethod
     def _attach_hover(container: ft.Container, base: str, hover: str,
@@ -541,6 +562,7 @@ class HelucrypticApp:
                                                 style=_filled_style(C.CYAN))
         self.status_dot       = ft.Container(width=11, height=11, border_radius=R.PILL,
                                              bgcolor=C.FAINT, animate=_anim(D.MED),
+                                             scale=1.0, animate_scale=ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT),
                                              shadow=_glow(C.FAINT, blur=6, spread=0))
         self.status_label     = ft.Text("IDLE", size=11, color=C.MUTED,
                                         weight=ft.FontWeight.W_700,

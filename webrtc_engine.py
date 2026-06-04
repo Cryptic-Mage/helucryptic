@@ -347,7 +347,9 @@ class MicrophoneTrack(AudioStreamTrack):
             raise MediaStreamError
 
         data  = await self._queue.get()
-        frame = AudioFrame.from_ndarray(data.T, format="s16", layout="mono")
+        # Apply digital volume boost (factor of 3.0) to mic input
+        boosted_data = np.clip(data.astype(np.int32) * 3, -32768, 32767).astype(np.int16)
+        frame = AudioFrame.from_ndarray(boosted_data.T, format="s16", layout="mono")
         frame.pts         = self._timestamp
         frame.time_base   = self._time_base
         frame.sample_rate = self._sample_rate
@@ -1878,6 +1880,8 @@ class WebRTCEngine:
                         dq[0]  = chunk[need:]
                         taken += need
                         need   = 0
+        # Boost playback volume by a factor of 3.0
+        mix = mix * 3
         np.clip(mix, -32768, 32767, out=mix)
         outdata[:, 0] = mix.astype(np.int16)
 
