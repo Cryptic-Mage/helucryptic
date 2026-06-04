@@ -1008,8 +1008,12 @@ class WebRTCEngine:
             upsert_contact(peer,
                            x25519_pub=payload["x25519_pub"],
                            ed25519_pub=payload["ed25519_pub"])
-            # Creator sends group key to this peer
-            if self.is_room_creator and self.group_key:
+            # Send the group key to this peer.  The creator always does this.
+            # The hub also does it when the creator is a non-hub member — the
+            # hub has a direct channel to every peer, so it can distribute the
+            # key even when the creator can only reach the hub (star topology).
+            am_hub = self.room_id and self.current_hub() == self.my_username
+            if (self.is_room_creator or am_hub) and self.group_key:
                 await self._send_group_key_to(peer)
 
         self._peer_hello_verified[peer] = True
@@ -1509,8 +1513,10 @@ class WebRTCEngine:
         offer = await self.pcs[peer].createOffer()
         await self.pcs[peer].setLocalDescription(offer)
 
-        # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
-        pc = self.pcs[peer]
+        # Re-fetch after every await — remove_peer can run during any yield.
+        pc = self.pcs.get(peer)
+        if pc is None:
+            return
         if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
             try:
                 for _ in range(100):
@@ -1520,10 +1526,14 @@ class WebRTCEngine:
             except Exception as ex:
                 print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
 
+        # Re-check again after the ICE-gathering loop (more yields inside).
+        pc = self.pcs.get(peer)
+        if pc is None or pc.localDescription is None:
+            return
         await self._send_ws({
             "target": peer,
             "type":   "offer",
-            "data":   {"sdp": self.pcs[peer].localDescription.sdp, "type": "offer"},
+            "data":   {"sdp": pc.localDescription.sdp, "type": "offer"},
         })
         print(f"[rtc] {self.my_username}: SENT offer to {peer}", flush=True)
 
@@ -1669,6 +1679,9 @@ class WebRTCEngine:
         for dest, pc in list(self.pcs.items()):
             if dest == source_peer:
                 continue
+            # Peer may have been removed while we awaited in a previous iteration.
+            if dest not in self.pcs:
+                continue
             sub = self._relay.subscribe(track)
             pc.addTrack(sub)
             # Broadcast sub.id (what the receiver sees), NOT the source track.id —
@@ -1679,7 +1692,11 @@ class WebRTCEngine:
                 ch.send(json.dumps({"__type": "track_origin",
                                     "track_id": sub.id, "origin": source_peer,
                                     "kind": sub.kind}))
-            await self.request_negotiation(dest)
+            # Guard again: request_negotiation yields internally; peer could
+            # be removed during those yields (the old pcs[peer] access was the
+            # crash site in the traceback).
+            if dest in self.pcs:
+                await self.request_negotiation(dest)
 
     async def remove_peer(self, username: str) -> None:
         pc = self.pcs.pop(username, None)
