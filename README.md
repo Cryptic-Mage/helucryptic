@@ -45,10 +45,9 @@ No message ever touches a server. No file is ever parked in a bucket. There's no
 | File / Folder | Role |
 |---|---|
 | `main.py` | Entry point (`flet` app) |
-| `client.py` | Original Flet UI + signaling client + app wiring |
-| `client_gem.py` | Premium reskinned Flet UI: featuring custom Google Fonts (Outfit, Inter, Fira Code), dynamic animated card transitions, speech bubble styling, and visual online status indicator badges/WiFi icons |
+| `client.py` | Flet UI + signaling client + app wiring: chat bubbles, **real online/offline presence** (server-backed), active-conversation highlight, ✓/⚠ verification badges, an incoming-call banner, an animated settings dialog, and an in-app diagnostics view that **captures console logs** (so they're readable in a windowed `.exe`) |
 | `webrtc_engine.py` | WebRTC engine: peers, media tracks, encryption, file transfer, group relay |
-| `server.py` | FastAPI signaling server (relays SDP/ICE only) |
+| `server.py` | FastAPI signaling server (relays SDP/ICE + a privacy-preserving presence query; never sees content) |
 | `natpmp.py` | NAT-PMP port-forward discovery & renewal (VPN/router reachability) |
 | `crypto.py` | Keys, HKDF, PASETO, fingerprints |
 | `contacts.py` / `history.py` / `settings.py` | Local persistence |
@@ -70,6 +69,13 @@ The knobs that matter most:
 - `HELUCRYPTIC_SERVER_PASSWORD` — Shared access token (validated **server-side**)
 - `HELUCRYPTIC_LOW_PERF_MODE` — `true` lowers screen-share resolution/FPS defaults
 - `HELUCRYPTIC_TURN_URL` / `_USERNAME` / `_PASSWORD` — TURN relay configuration
+- `HELUCRYPTIC_DATA_DIR` — overrides where identity/keys/contacts/history live (default `~/.helucryptic`)
+
+> **Running two clients on one machine (testing):** each client needs its **own** data directory, otherwise both load the same `keys.json` — i.e. the *same* identity — and E2EE session-key agreement fails (every message shows `[decryption failed]`). Give each its own dir:
+> ```powershell
+> $env:HELUCRYPTIC_DATA_DIR="C:\hc\alice"; python client.py   # window 1
+> $env:HELUCRYPTIC_DATA_DIR="C:\hc\bob";   python client.py   # window 2
+> ```
 
 ### A fully-loaded `.env`
 
@@ -161,7 +167,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 python main.py
 ```
 
-Want a friend on the call? Spin up a second client, point it at the same signaling URL, create a room, and share the code.
+Want a friend on the call? Spin up a second client, create a room, copy the secure **base64-encoded invite link** (which packages the room ID, signaling URL, and server password), and share it. The receiver can paste this link directly in the Join dialog to connect and join automatically.
 
 For VPS/HTTPS deployment and a full feature walkthrough, see [GUIDE.md](GUIDE.md).
 For WebSocket hosting troubleshooting, see **`DEPLOY-WEBSOCKETS.md`**.

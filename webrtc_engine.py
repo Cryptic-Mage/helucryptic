@@ -1,6 +1,7 @@
 import asyncio
 import base64 as _b64
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -32,10 +33,12 @@ import config
 from crypto import (
     derive_session_key_v2,
     generate_ephemeral_x25519,
+    issue_membership_cert,
     paseto_decrypt,
     paseto_encrypt,
     paseto_sign,
     paseto_verify,
+    verify_membership_cert,
 )
 from contacts import get_contact, upsert_contact
 
@@ -370,6 +373,22 @@ class WebRTCEngine:
         self._pre_hello_bytes:     dict[str, int]               = {}
         self._is_negotiating:      dict[str, bool]              = {}
         self._neg_dirty:           dict[str, bool]              = {}
+        # Peers we tried to call before their data channel was open — the
+        # "call_start" ping is (re)sent from _bind_channel once it opens so the
+        # callee actually rings instead of silently missing the call.
+        self._pending_call_start:  set[str]                     = set()
+        # PSK channel authentication (feature C). When room_psk is set, peers must
+        # prove knowledge of the pre-shared key (HMAC challenge) BEFORE the hello
+        # — a room becomes invisible to anyone without the PSK from the invite.
+        self.room_psk:             Optional[str]                = None   # base64 32-byte
+        self._psk_authed:          dict[str, bool]              = {}
+        self._psk_my_nonce:        dict[str, str]               = {}
+        # Membership PKI (feature D, advisory). The creator vouches for members by
+        # signing a cert; peers verify it against the creator's key but never drop
+        # the connection (PSK already gates access) — they just flag membership.
+        self.room_creator_pubkey:  Optional[str]                = None   # creator ed25519 pub
+        self.my_membership_cert:   Optional[str]                = None   # our creator-signed cert
+        self._peer_is_member:      dict[str, bool]              = {}
         self._file_buffers:        dict[str, dict]              = {}
         self._forwarded:           dict[str, list]              = {}  # source_peer -> [(dest, sub, sub_id)]
         self._origin_map:          dict[str, str]               = {}  # track_id -> origin username
@@ -383,6 +402,10 @@ class WebRTCEngine:
         self._screen_source = None   # single ScreenShareTrack grabbing the screen
         self._voice_peers:  set[str] = set()   # peers we've added a mic track to
         self._screen_peers: set[str] = set()   # peers we've added a screen track to
+        # RTP senders kept so a track can be REMOVED (stop sharing/voice) without
+        # tearing down the whole call — screen and voice are independent streams.
+        self._screen_senders: dict[str, object] = {}
+        self._voice_senders:  dict[str, object] = {}
         self._incoming_audio_active: set[str] = set()  # peers whose audio we play
 
         # Group call state
@@ -412,6 +435,10 @@ class WebRTCEngine:
         self.on_hangup:        Optional[Callable] = None
         self.on_video_frame:   Optional[Callable] = None  # (sender: str, img: np.ndarray)
         self.on_key_change:    Optional[Callable] = None  # (peer: str) — verified key changed
+        self.on_session_ready: Optional[Callable] = None  # (peer: str) — hello verified, channel usable
+        self.on_history_request:  Optional[Callable] = None  # (peer, room_id, since)
+        self.on_history_response: Optional[Callable] = None  # (peer, room_id, messages)
+        self.on_membership_change: Optional[Callable] = None  # (peer, is_member)
 
         # Audio playback: a single callback-driven output stream. Incoming
         # decoded frames are appended to per-peer numpy buffers; sounddevice's
@@ -516,6 +543,12 @@ class WebRTCEngine:
         self._cap_epoch[peer] = epoch
         self._cap_tier[peer] = tier
 
+    def forget_peer_capability(self, peer: str) -> None:
+        """Drop a peer from hub election (used on hub failover so a dead relay
+        isn't re-elected before the topology is rebuilt)."""
+        self._cap_tier.pop(peer, None)
+        self._cap_epoch.pop(peer, None)
+
     def _my_tier(self) -> int:
         """Return this engine's own reachability tier using current module-global state."""
         cur = _forward_port if _forward_active else None
@@ -580,6 +613,8 @@ class WebRTCEngine:
         self.pcs[peer]                  = pc
         self._hello_sent[peer]          = False
         self._peer_hello_verified[peer] = False
+        self._psk_authed[peer]          = False   # fresh PSK auth per connection
+        self._psk_my_nonce.pop(peer, None)
         self._eph_priv.pop(peer, None)   # fresh ephemeral per connection
         self._pre_hello_buffers[peer]   = deque()
         self._pre_hello_bytes[peer]     = 0
@@ -593,9 +628,15 @@ class WebRTCEngine:
 
         @pc.on("connectionstatechange")
         def on_state():
-            print(f"[rtc] {self.my_username}: pc[{peer}] connection -> {pc.connectionState}", flush=True)
+            state = pc.connectionState
+            print(f"[rtc] {self.my_username}: pc[{peer}] connection -> {state}", flush=True)
             if self.on_state_change:
-                self.on_state_change(peer, pc.connectionState)
+                self.on_state_change(peer, state)
+            
+            # Clean up automatically when the connection fails or closes
+            if state in ("closed", "failed"):
+                # Asynchronously clean up the dead peer connection
+                asyncio.ensure_future(self.remove_peer(peer))
 
         @pc.on("iceconnectionstatechange")
         def on_ice_state():
@@ -630,12 +671,28 @@ class WebRTCEngine:
 
     def _bind_channel(self, channel, peer: str) -> None:
         async def _on_open():
-            if self.settings.security_mode == "e2ee":
-                await self._send_hello(peer)
+            if self.room_psk:
+                # PSK-protected room: prove knowledge of the pre-shared key FIRST.
+                # The hello (and everything after) is gated until the peer answers
+                # our challenge correctly (see _handle_psk → _start_session).
+                self._psk_authed[peer] = False
+                nonce = _b64.b64encode(os.urandom(16)).decode()
+                self._psk_my_nonce[peer] = nonce
+                try:
+                    channel.send(json.dumps({"__type": "psk_challenge", "nonce": nonce}))
+                    print(f"[psk] {self.my_username}: sent PSK challenge to {peer}", flush=True)
+                except Exception:
+                    pass
             else:
-                self._hello_sent[peer]          = True
-                self._peer_hello_verified[peer] = True
-                await self._flush_pre_hello_buffer(peer)
+                await self._start_session(peer)
+            # If a call was requested before this channel opened, ring now.
+            if peer in self._pending_call_start:
+                self._pending_call_start.discard(peer)
+                try:
+                    channel.send(json.dumps({"__type": "call_start"}))
+                    print(f"[rtc] {self.my_username}: sent deferred call_start to {peer}", flush=True)
+                except Exception as ex:
+                    print(f"[rtc] {self.my_username}: deferred call_start to {peer} failed: {ex}", flush=True)
 
         @channel.on("open")
         async def on_open():
@@ -655,8 +712,98 @@ class WebRTCEngine:
             asyncio.ensure_future(_on_open())
 
     # ------------------------------------------------------------------
+    # PSK channel authentication (feature C)
+    # ------------------------------------------------------------------
+
+    def set_room_psk(self, psk: Optional[str]) -> None:
+        """Set (or clear with None) the room's pre-shared key. When set, every
+        peer must prove knowledge of it before any identity/media is exchanged."""
+        self.room_psk = psk or None
+        if not self.room_psk:
+            self._psk_authed.clear()
+            self._psk_my_nonce.clear()
+
+    def adopt_creator_identity(self) -> None:
+        """Creator becomes the membership root: it is its own first member and
+        the trust anchor every other member's cert is verified against."""
+        self.room_creator_pubkey = self.keys["ed25519_public"]
+        self.my_membership_cert = issue_membership_cert(
+            self.keys["ed25519_private"], self.keys["ed25519_public"],
+            self.room_id, self.my_username, self.keys["ed25519_public"])
+
+    def set_room_creator_pubkey(self, pub: Optional[str]) -> None:
+        """Member side: trust anchor (creator's key) from the invite. Our own
+        cert is unknown until the creator issues one."""
+        self.room_creator_pubkey = pub or None
+        self.my_membership_cert = None
+
+    def is_member(self, peer: str) -> bool:
+        return self._peer_is_member.get(peer, False)
+
+    def purge_secrets(self) -> None:
+        """Wipe all session/room cryptographic material from RAM (feature H —
+        ephemeral rooms purge on leave so nothing survives the session)."""
+        self.session_keys.clear()
+        self.group_key = None
+        self._eph_priv.clear()
+        try:
+            self._pre_group_key_buffer.clear()
+        except Exception:
+            pass
+        self._psk_authed.clear()
+        self._psk_my_nonce.clear()
+        self.room_psk = None
+        self.my_membership_cert = None
+        self.room_creator_pubkey = None
+        self._peer_is_member.clear()
+
+    def _psk_proof(self, nonce: str) -> str:
+        """HMAC-SHA256 over (nonce | room_id) keyed by the PSK — proves the
+        sender holds the PSK without revealing it. Both sides bind to room_id so
+        a proof from one room can't be replayed into another."""
+        key = _b64.b64decode(self.room_psk)
+        msg = (nonce + "|" + (self.room_id or "")).encode()
+        return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+    async def _handle_psk(self, kind: str, frame: dict, peer: str) -> None:
+        if not self.room_psk:
+            return  # not a PSK room — ignore stray PSK frames
+        ch = self.data_channels.get(peer)
+        if kind == "psk_challenge":
+            # Answer the peer's challenge with a proof over THEIR nonce.
+            proof = self._psk_proof(frame.get("nonce", ""))
+            if ch and ch.readyState == "open":
+                try:
+                    ch.send(json.dumps({"__type": "psk_response", "proof": proof}))
+                except Exception:
+                    pass
+        elif kind == "psk_response":
+            # Verify the peer's proof over OUR nonce (constant-time).
+            expected = self._psk_proof(self._psk_my_nonce.get(peer, ""))
+            if hmac.compare_digest(expected, str(frame.get("proof", ""))):
+                if not self._psk_authed.get(peer):
+                    self._psk_authed[peer] = True
+                    print(f"[psk] {self.my_username}: {peer} passed PSK auth", flush=True)
+                    await self._start_session(peer)
+            else:
+                print(f"[psk] {self.my_username}: {peer} FAILED PSK auth — aborting", flush=True)
+                await self.remove_peer(peer)
+
+    # ------------------------------------------------------------------
     # Hello handshake
     # ------------------------------------------------------------------
+
+    async def _start_session(self, peer: str) -> None:
+        """Begin the identity/session phase once any PSK gate has passed: send the
+        signed hello (E2EE) or mark the peer ready (DTLS-only)."""
+        if self.settings.security_mode == "e2ee":
+            await self._send_hello(peer)
+        else:
+            self._hello_sent[peer]          = True
+            self._peer_hello_verified[peer] = True
+            await self._flush_pre_hello_buffer(peer)
+            if self.on_session_ready:
+                self.on_session_ready(peer)
 
     def _ephemeral_pub(self, peer: str) -> str:
         """Return our per-session ephemeral X25519 public key for `peer`,
@@ -684,7 +831,10 @@ class WebRTCEngine:
             "iat":         datetime.now(timezone.utc).isoformat(),
         }
         token = paseto_sign(payload, self.keys["ed25519_private"], self.keys["ed25519_public"])
-        self.data_channels[peer].send(json.dumps({"__type": "hello", "token": token}))
+        hello = {"__type": "hello", "token": token}
+        if self.my_membership_cert:            # feature D: present our membership cert
+            hello["cert"] = self.my_membership_cert
+        self.data_channels[peer].send(json.dumps(hello))
         self._hello_sent[peer] = True
 
     def _hello_iat_fresh(self, iat: str) -> bool:
@@ -813,6 +963,72 @@ class WebRTCEngine:
 
         self._peer_hello_verified[peer] = True
         await self._flush_pre_hello_buffer(peer)
+        if self.on_session_ready:
+            self.on_session_ready(peer)
+        # Feature D (advisory membership): flag whether the peer holds a valid
+        # creator-signed cert; if I'm the creator and they don't, issue one.
+        if self.room_id:
+            is_member = self._evaluate_membership(peer, frame.get("cert"))
+            if not is_member and self.is_room_creator:
+                await self._send_cert_grant(peer, payload["username"], payload["ed25519_pub"])
+                self._set_member(peer, True)
+
+    # ------------------------------------------------------------------
+    # Membership PKI (feature D, advisory — never drops connections)
+    # ------------------------------------------------------------------
+
+    def _set_member(self, peer: str, ok: bool) -> None:
+        self._peer_is_member[peer] = ok
+        if self.on_membership_change:
+            self.on_membership_change(peer, ok)
+
+    def _evaluate_membership(self, peer: str, cert: Optional[str]) -> bool:
+        c = get_contact(peer)
+        peer_pub = c.ed25519_pub if c else None
+        ok = bool(
+            cert and self.room_creator_pubkey and self.room_id and peer_pub
+            and verify_membership_cert(cert, self.room_creator_pubkey,
+                                       self.room_id, peer, peer_pub)
+        )
+        self._set_member(peer, ok)
+        return ok
+
+    async def _send_cert_grant(self, peer: str, member_username: str,
+                               member_ed25519_pub: str) -> None:
+        if not self.is_room_creator:
+            return
+        cert = issue_membership_cert(
+            self.keys["ed25519_private"], self.keys["ed25519_public"],
+            self.room_id, member_username, member_ed25519_pub)
+        frame = self._encrypt_frame_for({"__type": "cert_grant", "cert": cert}, peer)
+        ch = self.data_channels.get(peer)
+        if ch and ch.readyState == "open":
+            try:
+                ch.send(json.dumps(frame))
+                print(f"[membership] {self.my_username}: issued cert to {member_username}", flush=True)
+            except Exception:
+                pass
+
+    async def _handle_cert_grant(self, frame: dict, peer: str) -> None:
+        d = self._decrypt_with_session(frame, peer)
+        cert = d.get("cert")
+        if not cert:
+            return
+        self.my_membership_cert = cert
+        print(f"[membership] {self.my_username}: received membership cert from {peer}", flush=True)
+        # Tell everyone we're now a vouched member so they upgrade our badge.
+        for p in list(self.data_channels.keys()):
+            ch = self.data_channels.get(p)
+            if ch and ch.readyState == "open":
+                mf = self._encrypt_frame_for({"__type": "membership", "cert": cert}, p)
+                try:
+                    ch.send(json.dumps(mf))
+                except Exception:
+                    pass
+
+    async def _handle_membership(self, frame: dict, peer: str) -> None:
+        d = self._decrypt_with_session(frame, peer)
+        self._evaluate_membership(peer, d.get("cert"))
 
     async def _flush_pre_hello_buffer(self, peer: str) -> None:
         buf = self._pre_hello_buffers.get(peer, deque())
@@ -864,7 +1080,16 @@ class WebRTCEngine:
             frame = json.loads(raw)
         except Exception:
             return
-        if frame.get("__type") == "hello":
+        t = frame.get("__type")
+        if t in ("psk_challenge", "psk_response"):
+            await self._handle_psk(t, frame, peer)
+            return
+        if t == "hello":
+            # In a PSK-protected room, ignore a hello until the peer has proven
+            # the pre-shared key — no identity is exchanged with an unauthorised peer.
+            if self.room_psk and not self._psk_authed.get(peer):
+                print(f"[psk] {self.my_username}: dropping hello from {peer} (PSK not yet proven)", flush=True)
+                return
             await self._handle_hello(frame, peer)
             return
         if not (self._hello_sent.get(peer) and self._peer_hello_verified.get(peer)):
@@ -903,6 +1128,26 @@ class WebRTCEngine:
 
         if t == "group_key":
             await self._handle_group_key(frame, peer)
+            return
+
+        if t == "history_request":
+            d = self._decrypt_with_session(frame, peer)
+            if self.on_history_request:
+                self.on_history_request(peer, d.get("room_id", ""), d.get("since", ""))
+            return
+
+        if t == "history_response":
+            d = self._decrypt_with_session(frame, peer)
+            if self.on_history_response:
+                self.on_history_response(peer, d.get("room_id", ""), d.get("messages") or [])
+            return
+
+        if t == "cert_grant":
+            await self._handle_cert_grant(frame, peer)
+            return
+
+        if t == "membership":
+            await self._handle_membership(frame, peer)
             return
 
         if t == "chat":
@@ -1016,6 +1261,19 @@ class WebRTCEngine:
                     return {}
         return frame
 
+    def _decrypt_with_session(self, frame: dict, peer: str) -> dict:
+        """Decrypt a per-peer frame with the 1-to-1 session key (NOT the group
+        key). Used for point-to-point control like history sync, which is sent
+        with _encrypt_frame_for (per-peer) even inside a room."""
+        if self.settings.security_mode == "e2ee" and "token" in frame:
+            key = self.session_keys.get(peer)
+            if key:
+                try:
+                    return paseto_decrypt(frame["token"], key)
+                except Exception:
+                    return {}
+        return frame
+
     def _encrypt_frame_for(self, payload: dict, peer: str) -> dict:
         frame = {"__type": payload["__type"]}
         if self.settings.security_mode == "e2ee":
@@ -1102,6 +1360,35 @@ class WebRTCEngine:
                 {"__type": "chat", "text": text}, self.target_peer
             )
             self.data_channels[self.target_peer].send(json.dumps(frame))
+
+    # ------------------------------------------------------------------
+    # Peer-assisted history sync (feature E) — encrypted over the session channel
+    # ------------------------------------------------------------------
+
+    HISTORY_SYNC_MAX = 200
+
+    async def send_history_request(self, peer: str, room_id: str, since: str) -> None:
+        ch = self.data_channels.get(peer)
+        if not (ch and ch.readyState == "open"):
+            return
+        frame = self._encrypt_frame_for(
+            {"__type": "history_request", "room_id": room_id, "since": since or ""}, peer)
+        try:
+            ch.send(json.dumps(frame))
+        except Exception:
+            pass
+
+    async def send_history_response(self, peer: str, room_id: str, messages: list) -> None:
+        ch = self.data_channels.get(peer)
+        if not (ch and ch.readyState == "open"):
+            return
+        frame = self._encrypt_frame_for(
+            {"__type": "history_response", "room_id": room_id,
+             "messages": list(messages)[: self.HISTORY_SYNC_MAX]}, peer)
+        try:
+            ch.send(json.dumps(frame))
+        except Exception:
+            pass
 
     async def send_file(self, path: str, target: Optional[str] = None) -> None:
         # Stream from disk in chunks (never load the whole file into RAM) and
@@ -1198,6 +1485,10 @@ class WebRTCEngine:
         print(f"[rtc] {self.my_username}: RECEIVED offer from {sender}", flush=True)
         self.target_peer = sender
         self._send_ws    = ws_send
+        if sender in self.pcs:
+            if self.pcs[sender].connectionState in ("closed", "failed"):
+                await self.remove_peer(sender)
+
         if sender not in self.pcs:
             self._init_pc(sender)
         pc = self.pcs[sender]
@@ -1212,13 +1503,15 @@ class WebRTCEngine:
         if pc.signalingState != "stable":
             polite = self.my_username > sender
             print(f"[rtc] {self.my_username}: offer GLARE with {sender} "
-                  f"(state={pc.signalingState}, polite={polite})", flush=True)
+                  f"(state={pc.signalingState}, polite={polite})",
+                  flush=True)
             if not polite:
-                print(f"[rtc] {self.my_username}: ignoring colliding offer from {sender} "
-                      f"(we are the designated offerer)", flush=True)
+                # Impolite peer keeps its own offer; ignore their offer.
+                print(f"[rtc] {self.my_username}: ignoring colliding offer from {sender} (offerer)", flush=True)
                 return
-            # Polite peer: rebuild the pc clean and take their offer (aiortc has
-            # no reliable rollback).
+            # Polite peer: recreate the peer connection to resolve glare (since aiortc lacks rollback).
+            # This resets the signaling state cleanly to stable, allowing us to accept the incoming offer.
+            print(f"[rtc] {self.my_username}: polite peer recreating PC to resolve glare", flush=True)
             await self.remove_peer(sender)
             self._init_pc(sender)
             pc = self.pcs[sender]
@@ -1340,6 +1633,8 @@ class WebRTCEngine:
         self._ice_states.pop(username, None)
         self._voice_peers.discard(username)
         self._screen_peers.discard(username)
+        self._voice_senders.pop(username, None)
+        self._screen_senders.pop(username, None)
         # Drop SFU forwarding bookkeeping for/to this peer: entries where it was
         # the source, and entries in other sources' lists where it was the dest.
         self._forwarded.pop(username, None)
@@ -1348,6 +1643,14 @@ class WebRTCEngine:
                 entry for entry in self._forwarded[source]
                 if entry[0] != username
             ]
+        # Forget per-peer auth + election bookkeeping so a gone peer is neither
+        # re-elected as hub nor left half-authenticated.
+        self._cap_tier.pop(username, None)
+        self._cap_epoch.pop(username, None)
+        self._psk_authed.pop(username, None)
+        self._psk_my_nonce.pop(username, None)
+        self._peer_is_member.pop(username, None)
+        self._pending_call_start.discard(username)
         # Release shared capture devices / mixer if no peers need them anymore
         self._teardown_media_if_idle()
 
@@ -1402,50 +1705,87 @@ class WebRTCEngine:
             )
         return self._screen_source
 
-    async def start_voice_call(self, peer: Optional[str] = None) -> None:
+    async def start_voice_call(self, peer: Optional[str] = None, ring: bool = True) -> None:
+        """Add our mic to the call with `peer`. `ring=True` means we are the one
+        STARTING the call, so notify them (call_start → their phone rings).
+        `ring=False` is used when ANSWERING — we add our mic but must NOT ring the
+        caller back (that produced a duplicate incoming-call prompt)."""
         p = peer or self.target_peer
         if p not in self.pcs or p in self._voice_peers:
             return
         src = self._get_mic_source()
-        self.pcs[p].addTrack(self._relay.subscribe(src))
+        self._voice_senders[p] = self.pcs[p].addTrack(self._relay.subscribe(src))
         self._voice_peers.add(p)
-        ch = self.data_channels.get(p)
-        if ch and ch.readyState == "open":
-            ch.send(json.dumps({"__type": "call_start"}))
+        if ring:
+            ch = self.data_channels.get(p)
+            if ch and ch.readyState == "open":
+                try:
+                    ch.send(json.dumps({"__type": "call_start"}))
+                    print(f"[rtc] {self.my_username}: sent call_start to {p}", flush=True)
+                except Exception as ex:
+                    print(f"[rtc] {self.my_username}: call_start to {p} failed: {ex}", flush=True)
+            else:
+                # Channel not open yet — defer the ring so the callee isn't missed.
+                self._pending_call_start.add(p)
+                print(f"[rtc] {self.my_username}: call_start to {p} deferred (channel not open)", flush=True)
         # aiortc won't auto-negotiate the added track — re-offer explicitly.
-        await self.request_negotiation(p)
+        # If we are the callee (ring=False), we only initiate renegotiation if we've already
+        # applied the caller's offer (meaning we have a remote audio track). Otherwise, we wait
+        # for their offer to arrive, and our answer will automatically negotiate both tracks.
+        has_remote_audio = any(r.track and r.track.kind == "audio" for r in self.pcs[p].getReceivers())
+        if ring or has_remote_audio:
+            await self.request_negotiation(p)
 
     async def start_screen_share(self, peer: Optional[str] = None) -> None:
+        # Screen share is VIDEO ONLY and independent of voice. To talk while
+        # sharing, also start a voice call — the two streams are decoupled so one
+        # never cuts the other out (and sharing won't silently hot-mic you).
         p = peer or self.target_peer
-        if p not in self.pcs:
+        if p not in self.pcs or p in self._screen_peers:
             return
-        added = False
-        if p not in self._screen_peers:
-            screen = self._get_screen_source()
-            self.pcs[p].addTrack(self._relay.subscribe(screen))
-            self._screen_peers.add(p)
-            added = True
-        # Screen share carries audio too — add the mic if not already sharing it
-        if p not in self._voice_peers:
-            src = self._get_mic_source()
-            self.pcs[p].addTrack(self._relay.subscribe(src))
-            self._voice_peers.add(p)
-            added = True
-        if added:
+        screen = self._get_screen_source()
+        self._screen_senders[p] = self.pcs[p].addTrack(self._relay.subscribe(screen))
+        self._screen_peers.add(p)
+        await self.request_negotiation(p)
+
+    async def stop_screen_share(self, peer: Optional[str] = None) -> None:
+        """Stop sharing our screen with `peer` (or everyone) WITHOUT ending the
+        call: remove just the screen track and renegotiate; voice keeps flowing."""
+        targets = [peer] if peer else list(self._screen_peers)
+        changed = []
+        for p in targets:
+            sender = self._screen_senders.pop(p, None)
+            self._screen_peers.discard(p)
+            pc = self.pcs.get(p)
+            if sender is not None and pc is not None:
+                try:
+                    pc.removeTrack(sender)
+                    changed.append(p)
+                except Exception as ex:
+                    print(f"[rtc] {self.my_username}: removeTrack(screen) for {p} failed: {ex}", flush=True)
+        self._teardown_media_if_idle()
+        for p in changed:
             await self.request_negotiation(p)
 
     def accept_call(self, peer: Optional[str] = None) -> None:
         p  = peer or self.target_peer
         ch = self.data_channels.get(p)
-        if ch:
-            ch.send(json.dumps({"__type": "call_accept"}))
-        asyncio.ensure_future(self.start_voice_call(p))
+        if ch and ch.readyState == "open":
+            try:
+                ch.send(json.dumps({"__type": "call_accept"}))
+            except Exception as ex:
+                print(f"[rtc] {self.my_username}: call_accept to {p} failed: {ex}", flush=True)
+        # We are ANSWERING: add our mic but don't ring the caller back.
+        asyncio.ensure_future(self.start_voice_call(p, ring=False))
 
     def reject_call(self, peer: Optional[str] = None) -> None:
         p  = peer or self.target_peer
         ch = self.data_channels.get(p)
-        if ch:
-            ch.send(json.dumps({"__type": "call_reject"}))
+        if ch and ch.readyState == "open":
+            try:
+                ch.send(json.dumps({"__type": "call_reject"}))
+            except Exception as ex:
+                print(f"[rtc] {self.my_username}: call_reject to {p} failed: {ex}", flush=True)
 
     def hangup(self, peer: Optional[str] = None) -> None:
         # Local hangup: notify the peer(s) AND tear down our own call media.
@@ -1464,6 +1804,8 @@ class WebRTCEngine:
         # Stop sending to this peer and stop playing their audio.
         self._voice_peers.discard(peer)
         self._screen_peers.discard(peer)
+        self._voice_senders.pop(peer, None)
+        self._screen_senders.pop(peer, None)
         self._incoming_audio_active.discard(peer)
         self._teardown_media_if_idle()
 
@@ -1540,21 +1882,34 @@ class WebRTCEngine:
         with self._play_lock:
             self._play_chunks[key] = deque()
         self._ensure_output_stream()
+
+        # Initialize the resampler to output packed s16, mono layout, 48000Hz rate.
+        # This handles dynamic format, sample rate, or channel count changes (e.g. if the
+        # Opus decoder outputs stereo, or negotiates a lower rate) and guarantees we play
+        # back normal-pitched mono audio without sample layout doubling/pitch shifts.
+        try:
+            from av.audio.resampler import AudioResampler
+        except ImportError:
+            from av import AudioResampler
+        resampler = AudioResampler(format="s16", layout="mono", rate=48000)
+
         while key in self._incoming_audio_active:
             try:
                 frame = await track.recv()
-                # Flatten decoded frame to a 1-D int16 sample vector (mono 48k).
-                samples = frame.to_ndarray().reshape(-1).astype(np.int16)
-                with self._play_lock:
-                    dq = self._play_chunks.get(key)
-                    if dq is None:
-                        break
-                    dq.append(samples)
-                    # Bound the backlog so we never drift far behind: drop oldest
-                    # whole chunks until under the cap.
-                    total = sum(len(c) for c in dq)
-                    while total > MAX_BUFFERED and len(dq) > 1:
-                        total -= len(dq.popleft())
+                resampled_frames = resampler.resample(frame)
+                for f in resampled_frames:
+                    # Flatten the resampled mono s16 frame to a 1-D int16 samples vector
+                    samples = f.to_ndarray().reshape(-1).astype(np.int16)
+                    with self._play_lock:
+                        dq = self._play_chunks.get(key)
+                        if dq is None:
+                            break
+                        dq.append(samples)
+                        # Bound the backlog so we never drift far behind: drop oldest
+                        # whole chunks until under the cap.
+                        total = sum(len(c) for c in dq)
+                        while total > MAX_BUFFERED and len(dq) > 1:
+                            total -= len(dq.popleft())
             except Exception:
                 break
         self._incoming_audio_active.discard(key)

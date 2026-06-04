@@ -218,6 +218,51 @@ def paseto_verify(token_str: str, ed25519_pub_b64: str) -> dict:
     return json.loads(decoded.payload)
 
 
+# ---------------------------------------------------------------------------
+# Membership certificates (feature D) — the room creator vouches for a member by
+# signing (room_id, member username, member ed25519 key) with its identity key.
+# A PASETO v4.public token, so verification is the same Ed25519 path as the hello.
+# ---------------------------------------------------------------------------
+
+def issue_membership_cert(
+    creator_ed25519_priv_b64: str,
+    creator_ed25519_pub_b64: str,
+    room_id: str,
+    member_username: str,
+    member_ed25519_pub_b64: str,
+) -> str:
+    """Creator-signed membership cert binding a member's identity to a room."""
+    payload = {
+        "r":   room_id,
+        "u":   member_username,
+        "e":   member_ed25519_pub_b64,
+        "iat": datetime.now(timezone.utc).isoformat(),
+    }
+    return paseto_sign(payload, creator_ed25519_priv_b64, creator_ed25519_pub_b64)
+
+
+def verify_membership_cert(
+    cert: str,
+    creator_ed25519_pub_b64: str,
+    room_id: str,
+    member_username: str,
+    member_ed25519_pub_b64: str,
+) -> bool:
+    """True iff `cert` is a valid creator signature binding this member to this
+    room (and the bound key matches the member's actual hello key)."""
+    if not cert or not creator_ed25519_pub_b64:
+        return False
+    try:
+        payload = paseto_verify(cert, creator_ed25519_pub_b64)
+    except Exception:
+        return False
+    return (
+        payload.get("r") == room_id
+        and payload.get("u") == member_username
+        and payload.get("e") == member_ed25519_pub_b64
+    )
+
+
 def paseto_encrypt(payload: dict, symmetric_key: bytes) -> str:
     key = Key.new(version=4, purpose="local", key=symmetric_key)
     token = pyseto.encode(key, payload=json.dumps(payload).encode())

@@ -18,12 +18,15 @@ def _base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def resolve_data_dir(base: Path | None = None) -> Path:
-    # Explicit override wins — lets you run several clients (each its own
-    # identity) on one machine for testing:
-    #   $env:HELUCRYPTIC_DATA_DIR = "C:\hc\rest"; python client_claude.py
-    # Without distinct data dirs the instances share one keys.json (one
-    # identity), which breaks E2EE session-key agreement.
+def _root_dir(base: Path | None = None) -> Path:
+    """The data root BEFORE any profile selection (override / portable / home).
+
+    Explicit override wins — lets you run several clients (each its own identity)
+    on one machine for testing:
+        $env:HELUCRYPTIC_DATA_DIR = "C:\\hc\\rest"; python client.py
+    Without distinct data dirs the instances share one keys.json (one identity),
+    which breaks E2EE session-key agreement.
+    """
     override = os.environ.get("HELUCRYPTIC_DATA_DIR")
     if override:
         return Path(override).expanduser()
@@ -31,6 +34,22 @@ def resolve_data_dir(base: Path | None = None) -> Path:
     if (base / _PORTABLE_FLAG).exists():
         return base / "data"
     return Path.home() / ".helucryptic"
+
+
+def resolve_data_dir(base: Path | None = None) -> Path:
+    # Honor an active profile (feature G — multi-profile compartmentalization):
+    # if profiles/.active names a profile, data lives in that sandbox. No pointer
+    # → the root itself (fully backward compatible).
+    root = _root_dir(base)
+    try:
+        ptr = root / "profiles" / ".active"
+        if ptr.exists():
+            name = ptr.read_text(encoding="utf-8").strip()
+            if name:
+                return root / "profiles" / name
+    except Exception:
+        pass
+    return root
 
 
 def is_portable(base: Path | None = None) -> bool:

@@ -106,6 +106,13 @@ python client.py
 ```
 Open a third terminal on the same or another machine and run the same command again.
 
+> **Two clients on the *same* machine?** Give each its own data directory, or they'll share one `keys.json` (the same identity) and messages will fail to decrypt:
+> ```powershell
+> $env:HELUCRYPTIC_DATA_DIR="C:\hc\alice"; python client.py
+> $env:HELUCRYPTIC_DATA_DIR="C:\hc\bob";   python client.py
+> ```
+> On two *different* machines this isn't needed — each already has its own `~/.helucryptic`.
+
 ### Step 3: Connect
 1. Each user types their **username** in the sidebar and clicks **Connect**
 2. The status dot turns yellow — you are registered with the signaling server
@@ -213,6 +220,69 @@ sudo systemctl start helucryptic-signal
 sudo systemctl status helucryptic-signal
 ```
 
+### Option D — Hosting from home with Cloudflare Tunnel (Easiest & Free, Bypasses NAT/CGNAT)
+
+If you want to host the signaling server from your home computer without touching router firewalls, exposing your public IP, or buying a VPS, you can use **Cloudflare Tunnel** (`cloudflared`). It establishes a secure outbound connection to Cloudflare's network, which then proxies traffic to your local server.
+
+#### 1. Install `cloudflared` on the host machine
+* **Windows**: Download the binary or install via winget:
+  ```bash
+  winget install Cloudflare.cloudflared
+  ```
+* **Linux (Debian/Ubuntu)**:
+  ```bash
+  curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+  sudo dpkg -i cloudflared.deb
+  ```
+
+#### 2. Log in to Cloudflare
+Authenticate the daemon with your Cloudflare account (requires a domain name managed on Cloudflare):
+```bash
+cloudflared tunnel login
+```
+
+#### 3. Create a tunnel
+Create a named tunnel (e.g., `helu-signal`):
+```bash
+cloudflared tunnel create helu-signal
+```
+This generates a Tunnel UUID and a credentials JSON file.
+
+#### 4. Configure the tunnel
+Create a configuration file `config.yml` in your `.cloudflared` folder (e.g., `~/.cloudflared/config.yml`):
+```yaml
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /path/to/credentials/YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: signal.yourdomain.com
+    service: http://localhost:8000
+  - service: http_status:404
+```
+
+#### 5. Assign DNS route
+Route traffic from your public domain hostname to your tunnel:
+```bash
+cloudflared tunnel route dns helu-signal signal.yourdomain.com
+```
+
+#### 6. Run the tunnel and server
+1. Start your local signaling server:
+   ```bash
+   uvicorn server:app --host 127.0.0.1 --port 8000
+   ```
+2. Start the tunnel:
+   ```bash
+   cloudflared tunnel run helu-signal
+   ```
+
+#### 7. Connect your clients
+In helucryptic Settings, change the **Signaling URL** to:
+```
+wss://signal.yourdomain.com
+```
+*(Cloudflare Tunnel automatically handles the SSL decryption, so `wss://` works out-of-the-box.)*
+
 ---
 
 ## Using the app
@@ -228,14 +298,18 @@ Open **Settings** (gear icon, bottom-right) to choose:
 > **Recommendation:** Use E2EE + Signing for sensitive conversations. Use DTLS-only for casual use where you trust the network.
 
 ### Verifying a contact's identity
-In E2EE mode, a yellow **⚠** badge means you have not yet verified the contact's key fingerprint. To verify:
+In E2EE mode each contact carries a verification badge: a yellow **⚠** means *not yet verified*, a green **✓** means *verified*. (Hover the badge for a reminder.) To verify:
 
 1. Long-press the contact in the sidebar
 2. Select **View Fingerprint**
 3. Compare the displayed 64-character hex fingerprint with your contact **out-of-band** (phone call, in person, Signal, etc.)
-4. If they match, click **Mark Verified** — the badge changes to green **✓**
+4. If every character matches, click **Matches — Verify** — the badge turns green **✓**
 
 This protects against a man-in-the-middle who might intercept the hello handshake.
+
+**What if the fingerprint does NOT match?** Then the key you're seeing isn't your contact's — either a man-in-the-middle is intercepting the connection, or you compared the wrong code. Verification is a *human* check: the app never auto-trusts, so just don't verify. Click **Doesn't match** in the View Fingerprint dialog — helucryptic leaves the contact **unverified**, switches on **Verified-Only mode** (so nothing is sent to an unverified contact by mistake), warns you, and offers to **remove** them. Re-exchange a fresh identity code over a trusted channel before trusting them again.
+
+> Separately, if a *previously verified* contact's key later changes, helucryptic aborts the connection, strips their verification, and warns you of a possible impostor — you don't have to catch that one yourself.
 
 ### Message history & retention
 All messages are stored locally and encrypted. To configure how long they are kept:
@@ -258,7 +332,10 @@ Click the **paperclip** icon to send a file. The receiver sees a save dialog whe
 Click the **screen share** icon. A viewer window opens on the receiver's side showing your primary monitor at 15fps. Audio is included. Click the **X** button on the viewer to stop.
 
 ### Voice calls
-Click the **phone** icon to start a voice-only call. The receiver sees an "Incoming call" dialog with Accept/Reject options. Click the **red phone** icon to hang up.
+Click the **phone** icon to start a voice-only call. The receiver sees an animated **incoming-call banner** at the top of the chat area (with the caller's avatar and **Accept / Decline**) — it shows no matter which conversation is open, and auto-declines after 25 seconds. Click the **red phone** icon to hang up.
+
+### Online / offline presence
+Each contact shows a **green dot + WiFi icon when online** and a dim **WiFi-off icon when offline**. This is **server-backed**: the client periodically asks the signaling server which of *your* contacts are currently connected (the server only confirms names you already know — it never volunteers who is online), and also marks anyone you have a live P2P link with as online. The selected conversation is highlighted in the sidebar and shown with its name + status in the chat header.
 
 ---
 
@@ -284,6 +361,19 @@ In group calls (rooms), establishing a mesh of voice/video feeds between all par
 - **Media Fan-out**: All audio/video streams are sent *only* to the elected Hub, which then duplicates and forwards (relays) them to the other participants.
 - **E2EE Integrity**: While media is decrypted at the hub for forwarding (requiring trust in the elected hub), text chat and files remain fully end-to-end encrypted with the room's group key. The signaling server is still excluded from the media path.
 
+### 3. Decentralized Invite Links
+To make connecting to rooms friction-free, you can click the copy icon next to the room name. This generates a secure **base64-encoded invitation code** (`hc_inv_...`) that packages:
+- The room code
+- Your current signaling server WebSocket URL
+- Your signaling server access password (if configured)
+
+When another user pastes this invitation code into the **Join Room** dialog, their client automatically:
+1. Parses the payload.
+2. Updates their local settings to target the inviter's signaling server.
+3. Automatically authenticates and joins the room.
+
+This removes the requirement for users to coordinate signaling servers beforehand, matching the invitation experience of decentralized apps like Quiet.
+
 ---
 
 ## Data stored on your computer
@@ -295,7 +385,9 @@ In group calls (rooms), establishing a mesh of voice/video feeds between all par
 | `~/.helucryptic/history.db` | Chat history (message content encrypted in E2EE mode) |
 | `~/.helucryptic/settings.json` | Your preferences |
 
-None of this is ever uploaded anywhere. The signaling server only ever sees your username and SDP/ICE packets — it never sees messages, files, keys, or audio.
+Set `HELUCRYPTIC_DATA_DIR` to keep this data somewhere else (or to run multiple identities on one machine). A `portable.flag` file next to the app instead keeps data in a local `data/` folder for USB use.
+
+None of this is ever uploaded anywhere. The signaling server only ever sees your username, SDP/ICE packets, and presence checks (which of your contacts are online) — it never sees messages, files, keys, or audio.
 
 ---
 
@@ -321,15 +413,21 @@ This produces `client.exe`. Copy it to any Windows machine and run it directly.
 
 > **Note:** If audio doesn't work in the compiled exe, add `--include-data-files=<path-to-portaudio.dll>=.` to the Nuitka command.
 
+> **No console in the build?** `--windows-disable-console` hides stdout, so the app mirrors every log line into itself: open **Connection diagnostics** (the chart icon in the chat header) to read the live `[rtc]`/`[crypto]` log, per-peer connection state (signaling/ICE/data-channel/hello/session-key), and **Copy all** to share a full snapshot.
+
 ---
 
 ## Troubleshooting
 
+Open **Connection diagnostics** (chart icon in the chat header) first — it shows per-peer state and a live log that usually points straight at the cause.
+
 | Problem | Likely cause | Fix |
 |---|---|---|
 | Status stuck on SIGNALING | Target user is not connected | Ask them to connect first |
-| Status stuck on CONNECTING | NAT/firewall blocking P2P | Ensure STUN is not blocked; both sides need internet access |
+| Status stuck on CONNECTING | NAT/firewall blocking P2P | Ensure STUN isn't blocked; both sides need internet access. If diagnostics shows `signaling≠stable` / `InvalidStateError`, that's offer glare — already handled; retry the call |
+| **Every** message shows `[decryption failed]` (live, not old history) | Two clients on one machine sharing one identity, **or** the other side re-keyed | Give each client its own `HELUCRYPTIC_DATA_DIR`; for a re-keyed contact, reconnect (unverified contacts self-heal; re-verify the fingerprint) |
+| Old messages show `[decryption failed]` | Keys regenerated/wiped/restored after those messages were saved | Old history was encrypted with the previous key — it can't be recovered |
+| Call never rings on the other side | Notification dropped before the channel opened, or no session yet | Fixed: the ring is now deferred until the channel opens. Check diagnostics — `dc=open hello_ok=True session_key=True` means it should ring |
 | No audio | PortAudio missing | Install PortAudio for your OS |
-| Messages not decrypting | Security mode mismatch | Both sides must use the same mode |
-| History shows "[decryption failed]" | Keys regenerated after messages saved | Old messages encrypted with previous key — they cannot be recovered |
+| Messages not decrypting (one side only) | Security mode mismatch | Both sides must use the same mode (DTLS vs E2EE) |
 | Can't connect to signaling | Wrong URL or firewall | Check Settings URL; check port 8000 is open on server |
