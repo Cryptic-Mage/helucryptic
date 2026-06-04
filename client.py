@@ -1504,6 +1504,10 @@ class HelucrypticApp:
 
     async def _connect_signaling(self, e, room: str = "") -> None:
         uname = self.username_input.value.strip()
+        # If we're already in a room and just reconnecting (e.g. after a WS
+        # drop), carry the room ID so the server puts us back in the session.
+        if not room and self._room_id:
+            room = self._room_id
         print(f"[connect] clicked. username={uname!r} room={room!r} url_base={self.settings.signaling_url!r}", flush=True)
         if not uname:
             self._log("[Error] Enter a username first.")
@@ -1606,6 +1610,14 @@ class HelucrypticApp:
                         await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
                         await self._apply_active_call_to_hub()
                         self._refresh_hub_indicator()
+                        # Server confirmed we're in the room — restore the toolbar
+                        # immediately so users can interact even before peers connect.
+                        self.msg_input.disabled  = False
+                        self.btn_send.disabled   = False
+                        self.btn_call.disabled   = False
+                        self.btn_screen.disabled = False
+                        self.btn_file.disabled   = False
+                        self.page.update()
 
                     elif t == "hub_capability":
                         self.engine.record_capability(sender, data.get("tier", 0), data.get("epoch", 0))
@@ -1655,6 +1667,26 @@ class HelucrypticApp:
                 pass
             for _peer in list(self.engine.pcs.keys()):
                 asyncio.ensure_future(self.engine.remove_peer(_peer))
+            # Wipe stale peer state so reconnect gets a clean slate (otherwise
+            # reconcile_room_connections sees phantom "connected" entries).
+            self._room_peers.clear()
+            try:
+                self._refresh_participant_list()
+            except Exception:
+                pass
+            # Grey out the toolbar — re-enabled when room_state confirms we're
+            # back in the room, or when a peer reaches "connected".
+            try:
+                self.msg_input.disabled  = True
+                self.btn_send.disabled   = True
+                self.btn_call.disabled   = True
+                self.btn_screen.disabled = True
+                self.btn_file.disabled   = True
+                self.btn_mute.disabled   = True
+                self.btn_hangup.disabled = True
+                self.page.update()
+            except Exception:
+                pass
             self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
     # ------------------------------------------------------------------
     # Room management
@@ -2808,6 +2840,13 @@ class HelucrypticApp:
         tile control. Offloading avoids blocking the async event loop."""
         try:
             quality = self._jpeg_quality
+            # Fullscreen/PiP renders the raw frame at full resolution — JPEG 55
+            # creates very visible artifacts on text and UI edges at that size.
+            # Bump to at least 85 whenever the overlay is active for this sender.
+            is_enlarged = (sender == self._fullscreen_sender and
+                           (self.screen_overlay.visible or self.pip_overlay.visible))
+            if is_enlarged:
+                quality = max(85, quality)
             def encode():
                 if cv2 is not None:
                     _, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])

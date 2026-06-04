@@ -1713,12 +1713,27 @@ class WebRTCEngine:
         hub = self.current_hub()
         if hub == self.my_username:
             return  # hub is a pure responder; it answers incoming offers
-        # Non-hub: ensure exactly one live PC -> hub, drop any others.
+
+        # Phase 1: always clean up dead connections regardless of hub status.
         for peer in list(self.pcs.keys()):
             if peer != hub:
-                await self.remove_peer(peer)
+                pc = self.pcs.get(peer)
+                if pc and pc.connectionState in ("failed", "closed", "disconnected"):
+                    await self.remove_peer(peer)
+
+        # Phase 2: initiate a connection to the hub if we don't have one yet.
         if hub and hub != self.my_username and hub not in self.pcs:
             await self.create_offer(hub, ws_send)
+
+        # Phase 3: only prune WORKING non-hub connections once the hub link is
+        # confirmed up. Dropping them speculatively leaves the user with NO
+        # connection if the new hub is unreachable (failed ICE, behind symmetric
+        # NAT, etc.) — the old working connection is then unrecoverable.
+        hub_pc = self.pcs.get(hub)
+        if hub_pc and hub_pc.connectionState == "connected":
+            for peer in list(self.pcs.keys()):
+                if peer != hub:
+                    await self.remove_peer(peer)
 
     # ------------------------------------------------------------------
     # Voice / screen
