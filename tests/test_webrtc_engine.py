@@ -164,13 +164,14 @@ def test_play_callback_mixing(engine):
     outdata = np.zeros((4, 1), dtype=np.int16)
     engine._play_callback(outdata, 4, None, None)
     
-    # Expected mix:
+    # Base mix BEFORE the playback gain:
     # Frame 0: bob[0] (1000) + charlie[0] (100) = 1100
     # Frame 1: bob[1] (2000) + charlie[1] (200) = 2200
     # Frame 2: bob[2] (3000) + charlie[2] (300) = 3300
     # Frame 3: bob's next chunk[0] (4000) + charlie[3] (400) = 4400
-    
-    expected = np.array([[3300], [6600], [9900], [13200]], dtype=np.int16)
+    # Output applies the engine's adjustable gain, then clips to int16.
+    base = np.array([1100, 2200, 3300, 4400], dtype=np.float32)
+    expected = np.clip(base * engine._volume, -32768, 32767).astype(np.int16).reshape(-1, 1)
     assert np.array_equal(outdata, expected)
     
     # Check remaining chunks:

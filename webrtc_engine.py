@@ -444,6 +444,7 @@ class WebRTCEngine:
         self.on_call_rejected: Optional[Callable] = None
         self.on_hangup:        Optional[Callable] = None
         self.on_video_frame:   Optional[Callable] = None  # (sender: str, img: np.ndarray)
+        self.on_video_end:     Optional[Callable] = None  # (sender: str) — incoming screen track ended
         self.on_key_change:    Optional[Callable] = None  # (peer: str) — verified key changed
         self.on_session_ready: Optional[Callable] = None  # (peer: str) — hello verified, channel usable
         self.on_history_request:  Optional[Callable] = None  # (peer, room_id, since)
@@ -460,6 +461,9 @@ class WebRTCEngine:
         # np.concatenate did on every 20 ms frame (GC churn on weak hardware).
         self._play_chunks: dict[str, deque] = {}
         self._play_lock = threading.Lock()
+        # Playback gain applied in the audio callback. Adjustable live from the
+        # UI (no reconnection needed) since _play_callback reads it every block.
+        self._volume: float = 4.0
 
         # Diagnostics state (read by get_diagnostics; cheap, no secrets).
         self._ice_states:      dict[str, str] = {}
@@ -1880,10 +1884,17 @@ class WebRTCEngine:
                         dq[0]  = chunk[need:]
                         taken += need
                         need   = 0
-        # Boost playback volume by a factor of 3.0
-        mix = mix * 3
-        np.clip(mix, -32768, 32767, out=mix)
-        outdata[:, 0] = mix.astype(np.int16)
+        # Apply the live, user-adjustable playback gain, then clip to int16.
+        boosted = mix.astype(np.float32) * float(self._volume)
+        np.clip(boosted, -32768, 32767, out=boosted)
+        outdata[:, 0] = boosted.astype(np.int16)
+
+    def set_volume(self, factor: float) -> None:
+        """Set the call playback gain (applied live in the audio thread)."""
+        try:
+            self._volume = max(0.0, float(factor))
+        except (TypeError, ValueError):
+            pass
 
     def _ensure_output_stream(self) -> None:
         if self._output_stream is None:
@@ -1961,14 +1972,26 @@ class WebRTCEngine:
                     await q.put(img)
                 except Exception:
                     break
+            # Track ended (sender stopped sharing or the call dropped): signal the
+            # consumer with a sentinel so the UI tears the stream down immediately.
+            await q.put(None)
 
         asyncio.ensure_future(fetch())
-        while True:
-            try:
-                img = await asyncio.wait_for(q.get(), timeout=5.0)
+        try:
+            while True:
+                try:
+                    img = await asyncio.wait_for(q.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    break
+                if img is None:        # end-of-track sentinel
+                    break
                 if self.on_video_frame:
                     self.on_video_frame(origin, img)
-            except asyncio.TimeoutError:
-                continue
-            except Exception:
-                break
+        finally:
+            # Always notify the UI that this peer's screen stream is gone, so a
+            # stale frame can never linger after sharing stops / the call ends.
+            print(f"[screen] {self.my_username}: video track from {origin} ended", flush=True)
+            if self.on_video_end:
+                self.on_video_end(origin)

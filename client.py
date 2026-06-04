@@ -608,20 +608,25 @@ class HelucrypticApp:
         )
         self.participant_list = ft.Column(spacing=4)
 
-        brand = ft.Row(
-            [
-                ft.Container(
-                    content=ft.Icon(ft.Icons.SHIELD_MOON, color=C.CYAN, size=22),
-                    padding=ft.Padding.all(8), border_radius=R.MD, bgcolor=C.ELEV,
-                    border=ft.Border.all(1, C.BORDER2), shadow=_glow(C.CYAN + "55", blur=14),
-                ),
-                ft.Column([
-                    ft.Text("helucryptic", size=18, weight=ft.FontWeight.W_800, color=C.WHITE),
-                    ft.Text("encrypted p2p", size=10, color=C.CYAN,
-                            weight=ft.FontWeight.W_600),
-                ], spacing=0, tight=True),
-            ],
-            spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        brand = ft.Container(
+            on_click=lambda e: self._go_home(),
+            tooltip="Home",
+            border_radius=R.MD, padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.SHIELD_MOON, color=C.CYAN, size=22),
+                        padding=ft.Padding.all(8), border_radius=R.MD, bgcolor=C.ELEV,
+                        border=ft.Border.all(1, C.BORDER2), shadow=_glow(blur=14),
+                    ),
+                    ft.Column([
+                        ft.Text("helucryptic", size=18, weight=ft.FontWeight.W_800, color=C.WHITE),
+                        ft.Text("encrypted p2p", size=10, color=C.CYAN,
+                                weight=ft.FontWeight.W_600),
+                    ], spacing=0, tight=True),
+                ],
+                spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
 
         self.status_pill = ft.Container(
@@ -712,6 +717,7 @@ class HelucrypticApp:
         self.btn_screen   = ft.IconButton(ft.Icons.SCREEN_SHARE, on_click=self._toggle_screen, disabled=True, icon_color=C.SUBTLE,  tooltip="Share screen")
         self.btn_file     = ft.IconButton(ft.Icons.ATTACH_FILE,  on_click=self._send_file,    disabled=True, icon_color=C.SUBTLE,  tooltip="Send file")
         self.btn_mute     = ft.IconButton(ft.Icons.MIC,          on_click=self._toggle_mute,  disabled=True, icon_color=C.SUBTLE,  tooltip="Mute mic")
+        self.btn_volume   = ft.IconButton(ft.Icons.VOLUME_UP,    on_click=self._show_volume,  icon_color=C.SUBTLE,  tooltip="Call volume")
         self.btn_hangup   = ft.IconButton(ft.Icons.CALL_END,     on_click=self._hangup,       disabled=True, icon_color=C.RED,     tooltip="Hang up")
         self.btn_join_call = ft.FilledButton(
             "Join call", icon=ft.Icons.CALL, on_click=self._start_call,
@@ -786,6 +792,7 @@ class HelucrypticApp:
                 self._tool_wrap(self.btn_screen),
                 self._tool_wrap(self.btn_file),
                 self._tool_wrap(self.btn_mute),
+                self._tool_wrap(self.btn_volume),
                 self._tool_wrap(self.btn_hangup),
                 self.btn_join_call,
                 ft.Container(expand=True),
@@ -806,18 +813,30 @@ class HelucrypticApp:
             content=ft.Row([]),
         )
 
+        # Conversation surface (chat + composer + call tools). Hidden on the
+        # home view; shown once a contact or room is open.
+        self._conversation_col = ft.Column([
+            self.call_banner,
+            self._tile_row,
+            self.mute_banner,
+            self.chat_log,
+            self.file_progress,
+            self._composer,
+            toolbar,
+        ], spacing=12, expand=True, visible=False)
+
+        # Home / landing view shown when nothing is open (first launch, or after
+        # clicking the logo to go home).
+        self.home_view = self._build_home_view()
+
+        # A visibility-toggled Column (NOT a Stack): the visible expand child
+        # fills the height so the composer + controls anchor to the bottom with
+        # no dead space below them.
         chat_body = ft.Container(
             expand=True,
             padding=ft.Padding.symmetric(horizontal=16, vertical=12),
-            content=ft.Column([
-                self.call_banner,
-                self._tile_row,
-                self.mute_banner,
-                self.chat_log,
-                self.file_progress,
-                self._composer,
-                toolbar,
-            ], spacing=12, expand=True),
+            content=ft.Column([self.home_view, self._conversation_col],
+                              spacing=0, expand=True),
         )
 
         chat_panel = ft.Container(
@@ -922,6 +941,8 @@ class HelucrypticApp:
         # Entrance reveal only. The rebrand drops ambient motion (drifting
         # background + pulsing status halo) in favour of a calm, static surface.
         self._reveal(app_frame, delay=0.05)
+        # Start on the home/landing view (nothing open yet).
+        self._update_main_view()
 
     # ---- command palette (Ctrl/Cmd+K) ---------------------------------
 
@@ -1051,6 +1072,75 @@ class HelucrypticApp:
             self._toggle_sidebar()
         elif mod and key == ",":
             self._show_settings(None)
+
+    # ---- home / landing view -------------------------------------------
+
+    def _build_home_view(self) -> ft.Control:
+        def action(icon, label, fn, primary=False):
+            return ft.FilledButton(
+                label, icon=icon, on_click=lambda e: fn(),
+                style=_filled_style(C.CYAN if primary else C.ELEV2,
+                                    C.BTN_CYAN if primary else C.TEXT),
+            )
+        hero = ft.Column(
+            [
+                ft.Container(
+                    content=ft.Icon(ft.Icons.SHIELD_MOON, color=C.CYAN, size=40),
+                    padding=ft.Padding.all(18), border_radius=R.LG, bgcolor=C.ELEV,
+                    border=ft.Border.all(1, C.BORDER2), shadow=_glow(blur=20),
+                ),
+                ft.Text("Welcome to helucryptic", size=20,
+                        weight=ft.FontWeight.W_700, color=C.TEXT),
+                ft.Text("End-to-end encrypted, peer-to-peer chat, calls and files.\n"
+                        "Create a room, add a contact, or pick a conversation to begin.",
+                        size=13, color=C.SUBTLE, text_align=ft.TextAlign.CENTER),
+                ft.Container(height=8),
+                ft.Row([
+                    action(ft.Icons.ADD, "Create room", lambda: self._create_room(None), primary=True),
+                    action(ft.Icons.LOGIN, "Join room", lambda: self._show_join_room(None)),
+                    action(ft.Icons.PERSON_ADD, "Add contact", lambda: self._show_add_contact(None)),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10, wrap=True),
+                ft.Container(height=6),
+                ft.Row([
+                    ft.Icon(ft.Icons.KEYBOARD_COMMAND_KEY, color=C.MUTED, size=14),
+                    ft.Text("Press Ctrl+K for the command palette",
+                            size=11, color=C.MUTED, font_family=_t_FONTS["mono"]),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=8, tight=True),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10, tight=True,
+        )
+        return ft.Container(visible=True, alignment=ft.Alignment.CENTER, expand=True,
+                            content=hero)
+
+    def _update_main_view(self) -> None:
+        """Toggle between the home view and the conversation surface based on
+        whether a contact or room is currently open."""
+        on_home = not self._active_contact and not self._room_id
+        self.home_view.visible = on_home
+        self._conversation_col.visible = not on_home
+        try:
+            self.home_view.update()
+            self._conversation_col.update()
+        except Exception:
+            pass
+
+    def _go_home(self) -> None:
+        """Return to the landing view (e.g. clicking the logo)."""
+        self._active_contact = ""
+        # Reset the chat header to its default, no-conversation state.
+        try:
+            self.chat_header_title.value = "Select a conversation"
+            self.chat_header_lead.visible = True
+            self.chat_header_avatar.visible = False
+            self.chat_header_status_dot.visible = False
+            self.chat_header_status_text.visible = False
+        except Exception:
+            pass
+        self._update_main_view()
+        try:
+            self.page.update()
+        except Exception:
+            pass
 
     # ---- small builders ------------------------------------------------
 
@@ -1286,8 +1376,9 @@ class HelucrypticApp:
             self.btn_screen.icon_color = C.SUBTLE
             self.btn_screen.tooltip    = "Share screen"
             self._set_mute_banner(False)
-            self._remove_video_tile(peer) if peer else None
-            self._close_fullscreen()
+            # Remote hung up — clear ALL incoming screen shares and exit full
+            # screen / PiP so nothing stale remains after the call ends.
+            self._clear_all_video()
             self._update_call_status(False)
             self._log("[Call ended]")
             self._refresh_call_controls()
@@ -1386,6 +1477,9 @@ class HelucrypticApp:
         self.engine.on_file_complete  = on_file_complete
         self.engine.on_hangup         = on_hangup
         self.engine.on_video_frame    = on_video_frame
+        # Incoming screen track ended (sender stopped / call dropped) → remove the
+        # tile and drop out of full screen / PiP so nothing stale lingers.
+        self.engine.on_video_end      = lambda sender: self._remove_video_tile(sender)
         def on_membership_change(peer: str, is_member: bool):
             # Feature D: refresh the participant badge (✓ member / ⚠ unvouched).
             if peer in self._room_peers:
@@ -2242,6 +2336,7 @@ class HelucrypticApp:
                     if self._active_contact == username:
                         self._active_contact = ""
                         self.chat_log.controls.clear()
+                        self._update_main_view()   # fall back to home
                     self._refresh_contact_list()
                     self._close_dialog(warn)
 
@@ -2291,6 +2386,7 @@ class HelucrypticApp:
             if self._active_contact == username:
                 self._active_contact = ""
                 self.chat_log.controls.clear()
+                self._update_main_view()   # fall back to home
             self._refresh_contact_list()
             self._close_dialog(menu)
 
@@ -2312,6 +2408,7 @@ class HelucrypticApp:
         self._load_more_history()
         self._refresh_contact_list()              # move the active highlight
         self._update_chat_header_contact(username)  # show selected conversation as context
+        self._update_main_view()                  # leave home → show conversation
         self.page.update()
         # In 1-to-1 mode, selecting an online contact establishes the P2P link
         # (data channel) so you can chat/call without a separate step.
@@ -2353,6 +2450,7 @@ class HelucrypticApp:
         self._history_offset = 0
         self.chat_log.controls.clear()
         self._load_more_room_history()
+        self._update_main_view()                  # leave home → show conversation
         self.page.update()
 
     def _load_more_room_history(self) -> None:
@@ -2602,6 +2700,9 @@ class HelucrypticApp:
         if self._in_screen_share:
             await self._stop_screen()
         self.engine.hangup()
+        # Tear down any INCOMING screen shares too — a hung-up call must never
+        # leave a peer's screen visible (tile / full screen / PiP).
+        self._clear_all_video()
         sounds.stop_loop()
         sounds.play("call_end")
         self._muted = False
@@ -2736,15 +2837,57 @@ class HelucrypticApp:
         if sender not in self._video_tiles:
             return
         self._fullscreen_sender = sender
-        if self.pip_overlay.visible:
-            self._pip_title.value = f"{sender}'s screen"
-            self._pip_img.src = self._video_tiles[sender].src or ""
-        else:
-            self._fs_title.value = f"{sender}'s screen"
-            self._fs_img.src = self._video_tiles[sender].src or ""
-            self.screen_overlay.visible = True
+        # Clicking a tile (or a switcher chip) ALWAYS maximizes to full screen,
+        # leaving PiP if it happened to be active. (Previously, once PiP had been
+        # used, clicks only updated PiP and full screen never reappeared.)
+        self.pip_overlay.visible = False
+        self._fs_title.value = f"{sender}'s screen"
+        self._fs_img.src = self._video_tiles[sender].src or ""
+        self.screen_overlay.visible = True
         self._rebuild_share_switcher()
         self.page.update()
+
+    def _clear_all_video(self) -> None:
+        """Tear down ALL incoming screen tiles and exit full screen / PiP. Used
+        on hang up / call end so a screen share can never linger after a call."""
+        self._video_tiles.clear()
+        self._tile_row.controls = []
+        self._tile_row.visible = False
+        self._close_fullscreen()   # hides overlay + pip and clears fullscreen_sender
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _show_volume(self, e=None) -> None:
+        cur = float(getattr(self.engine, "_volume", 4.0))
+        val = ft.Text(f"{cur:.1f}×", size=12, color=C.SUBTLE,
+                      text_align=ft.TextAlign.CENTER)
+
+        def on_change(ev):
+            self.engine.set_volume(ev.control.value)
+            val.value = f"{ev.control.value:.1f}×"
+            try:
+                val.update()
+            except Exception:
+                pass
+
+        slider = ft.Slider(min=0, max=8, divisions=16, value=cur,
+                           expand=True, active_color=C.CYAN, on_change=on_change)
+        dlg = ft.AlertDialog(
+            title=ft.Text("Call volume"),
+            content=ft.Column([
+                ft.Text("Adjust remote participant volume — applies instantly.",
+                        size=12, color=C.SUBTLE),
+                ft.Row([ft.Icon(ft.Icons.VOLUME_MUTE, color=C.MUTED, size=18),
+                        slider,
+                        ft.Icon(ft.Icons.VOLUME_UP, color=C.MUTED, size=18)],
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                val,
+            ], tight=True, width=360, spacing=12),
+            actions=[ft.TextButton("Done", on_click=lambda ev: self._close_dialog(dlg))],
+        )
+        self._show_dialog(dlg)
 
     def _close_fullscreen(self) -> None:
         self._fullscreen_sender = ""
