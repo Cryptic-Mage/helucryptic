@@ -65,6 +65,7 @@ cp .env.example .env
 ```
 
 The knobs that matter most:
+
 - `HELUCRYPTIC_SIGNALING_URL` — WebSocket URL of the signaling server
 - `HELUCRYPTIC_SERVER_PASSWORD` — Shared access token (validated **server-side**)
 - `HELUCRYPTIC_LOW_PERF_MODE` — `true` lowers screen-share resolution/FPS defaults
@@ -72,6 +73,7 @@ The knobs that matter most:
 - `HELUCRYPTIC_DATA_DIR` — overrides where identity/keys/contacts/history live (default `~/.helucryptic`)
 
 > **Running two clients on one machine (testing):** each client needs its **own** data directory, otherwise both load the same `keys.json` — i.e. the *same* identity — and E2EE session-key agreement fails (every message shows `[decryption failed]`). Give each its own dir:
+>
 > ```powershell
 > $env:HELUCRYPTIC_DATA_DIR="C:\hc\alice"; python client.py   # window 1
 > $env:HELUCRYPTIC_DATA_DIR="C:\hc\bob";   python client.py   # window 2
@@ -104,25 +106,31 @@ HELUCRYPTIC_TURN_PASSWORD=my-turn-password-456
 Sometimes two peers simply can't reach each other directly — typically when one or both sit behind a **symmetric NAT** (the norm on cellular data, public hotspots, and strict office firewalls). A TURN (Traversal Using Relays around NAT) server is the safety net: WebRTC reroutes the **still-encrypted** media through it so the call survives. The relay sees ciphertext, never your content.
 
 ### Option A — Managed cloud TURN (easiest)
+
 Grab credentials from a hosted service and paste them into your `.env`:
-* **Metered.ca** — free tier with 50 GB/month of TURN bandwidth.
-* **Twilio Network Traversal** — pay-as-you-go TURN/STUN.
-* **Xirsys** — developer-friendly free tiers.
+- **Metered.ca** — free tier with 50 GB/month of TURN bandwidth.
+- **Twilio Network Traversal** — pay-as-you-go TURN/STUN.
+- **Xirsys** — developer-friendly free tiers.
 
 ### Option B — Self-host `coturn` on a VPS (Linux)
+
 `coturn` is the de-facto open-source TURN/STUN server.
 
 1. **Install it** on your Ubuntu/Debian VPS:
+
    ```bash
    sudo apt update
    sudo apt install coturn -y
    ```
 
 2. **Configure** `/etc/turnserver.conf`:
+
    ```bash
    sudo nano /etc/turnserver.conf
    ```
+
    Uncomment and set:
+
    ```ini
    # Listen port for STUN/TURN requests
    listening-port=3478
@@ -141,6 +149,7 @@ Grab credentials from a hosted service and paste them into your `.env`:
    ```
 
 3. **Open the firewall** (TCP/UDP):
+
    ```bash
    sudo ufw allow 3478/tcp
    sudo ufw allow 3478/udp
@@ -148,6 +157,7 @@ Grab credentials from a hosted service and paste them into your `.env`:
    ```
 
 4. **Enable and start it**:
+
    ```bash
    sudo systemctl enable coturn
    sudo systemctl restart coturn
@@ -173,17 +183,11 @@ For VPS/HTTPS deployment and a full feature walkthrough, see [GUIDE.md](GUIDE.md
 
 ## 📦 Building a standalone executable
 
-### Local Build
 ```bash
 python build.py
 ```
-This bundles `tracks/`, `icon.ico`, and (if present) your `.env` into `dist/Helucryptic`. Heads-up: bundling `.env` embeds its contents in the binary — the server password is a real gate only because the **server** validates it.
 
-### Automated Build & CI/CD Release
-A GitHub Actions workflow is configured in `.github/workflows/build-and-release.yml`. When you push to the `main` branch or push a version tag (matching `v*`):
-1. The workflow checks if the commit message contains `"build release"` (case-insensitive).
-2. If present, it restores `.env` from your GitHub repository secret `ENV_FILE`, compiles the application on a `windows-latest` runner using `build.py --fresh`, and uploads the resulting `Helucryptic.exe` to a new GitHub Release.
-3. If not present, the build and release steps are skipped.
+This bundles `tracks/`, `icon.ico`, and (if present) your `.env` into `dist/Helucryptic`. Heads-up: bundling `.env` embeds its contents in the binary — the server password is a real gate only because the **server** validates it.
 
 ## 🪶 Built for the underdog (low-end PC optimisations)
 
