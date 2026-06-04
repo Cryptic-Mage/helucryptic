@@ -1,5 +1,6 @@
 import asyncio
 import base64 as _b64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -241,22 +242,51 @@ class ScreenShareTrack(VideoStreamTrack):
     def __init__(self, max_width: int | None = None, max_height: int | None = None,
                  target_fps: int | None = None):
         super().__init__()
-        # mss instances are thread-affine; create lazily INSIDE recv() so it
-        # binds to the thread that actually grabs frames.
         self._sct     = None
         self._monitor = None
         self._last_ts = 0.0
         self._logged  = False
-        # Downscale caps keep the (software) encoder load sane on old CPUs —
-        # encoding a native 4K frame 15x/sec will peg a weak machine.
         self._max_w   = max_width  or config.SCREEN_MAX_WIDTH
         self._max_h   = max_height or config.SCREEN_MAX_HEIGHT
         self.target_fps = target_fps or config.SCREEN_FPS
+        # Single-thread executor: mss is thread-affine so every grab must run
+        # on the same OS thread. max_workers=1 guarantees that. Running grabs
+        # off the asyncio loop also prevents ICE keepalives from being blocked
+        # by the 30-150 ms it takes to capture + downscale a 4K/2K frame,
+        # which was the cause of the connection-drop-after-first-frame bug.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-    def _ensure(self):
+    def _grab_frame(self) -> np.ndarray:
+        """Blocking capture + resize — always called from the dedicated grab thread."""
         if self._sct is None:
             self._sct     = mss.mss()
             self._monitor = self._sct.monitors[1]
+        img = np.ascontiguousarray(np.array(self._sct.grab(self._monitor))[:, :, :3])
+        h0, w0 = img.shape[:2]
+        scale  = min(self._max_w / w0, self._max_h / h0, 1.0)
+        if scale < 1.0:
+            if cv2 is not None:
+                img = cv2.resize(img, (int(w0 * scale), int(h0 * scale)),
+                                 interpolation=cv2.INTER_AREA)
+            else:
+                img = np.asarray(Image.fromarray(img).resize(
+                    (int(w0 * scale), int(h0 * scale)), _BOX))
+        h, w = img.shape[0] & ~1, img.shape[1] & ~1
+        img = np.ascontiguousarray(img[:h, :w])
+        if not self._logged:
+            print(f"[screen] capturing {w0}x{h0} -> {w}x{h} @ {self.target_fps}fps",
+                  flush=True)
+            self._logged = True
+        return img
+
+    def _close_sct(self) -> None:
+        """Close mss on the grab thread (maintains thread affinity)."""
+        try:
+            if self._sct is not None:
+                self._sct.close()
+        except Exception:
+            pass
+        self._sct = None
 
     async def recv(self):
         pts, time_base = await self.next_timestamp()
@@ -269,48 +299,31 @@ class ScreenShareTrack(VideoStreamTrack):
             elapsed = now - self._last_ts
             if elapsed < interval:
                 await asyncio.sleep(interval - elapsed)
-            # Advance by a fixed interval so the schedule doesn't drift even if
-            # the sleep wakes slightly late (OS jitter accumulates without this).
             self._last_ts += interval
-            # If more than one frame behind (overloaded CPU), resync to avoid a
-            # burst of catch-up frames that would spike the encoder.
             if loop.time() - self._last_ts > interval:
                 self._last_ts = loop.time()
         try:
-            self._ensure()
-            # mss returns BGRA; drop alpha + make contiguous (from_ndarray needs it).
-            img = np.ascontiguousarray(np.array(self._sct.grab(self._monitor))[:, :, :3])
-            # Downscale to fit within the caps (preserve aspect ratio) BEFORE
-            # the frame reaches the encoder. INTER_AREA is best for shrinking.
-            h0, w0 = img.shape[:2]
-            scale  = min(self._max_w / w0, self._max_h / h0, 1.0)
-            if scale < 1.0:
-                if cv2 is not None:
-                    img = cv2.resize(img, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_AREA)
-                else:
-                    # Channel order is irrelevant to a per-channel resize, so the
-                    # BGR array stays BGR through Pillow.
-                    img = np.asarray(Image.fromarray(img).resize(
-                        (int(w0 * scale), int(h0 * scale)), _BOX))
-            # Even dimensions keep video encoders happy.
-            h, w = img.shape[0] & ~1, img.shape[1] & ~1
-            img = np.ascontiguousarray(img[:h, :w])
-            if not self._logged:
-                print(f"[screen] capturing {w0}x{h0} -> {w}x{h} @ {self.target_fps}fps", flush=True)
-                self._logged = True
+            # Offload the blocking grab + resize to the dedicated thread so the
+            # asyncio event loop (ICE keepalives, DTLS, etc.) keeps running.
+            img = await loop.run_in_executor(self._executor, self._grab_frame)
         except Exception as ex:
             print(f"[screen] capture error: {type(ex).__name__}: {ex}", flush=True)
             img = np.zeros((480, 640, 3), dtype=np.uint8)
-            self._sct = None  # force re-create next time
+            # Reset mss on its own thread so the next grab gets a fresh instance.
+            try:
+                self._executor.submit(self._close_sct)
+            except Exception:
+                pass
         frame = VideoFrame.from_ndarray(img, format="bgr24")
         frame.pts       = pts
         frame.time_base = time_base
         return frame
 
     def stop(self):
+        # Close mss on the grab thread, then release the executor.
         try:
-            if self._sct is not None:
-                self._sct.close()
+            self._executor.submit(self._close_sct)
+            self._executor.shutdown(wait=False)
         except Exception:
             pass
         self._sct = None
