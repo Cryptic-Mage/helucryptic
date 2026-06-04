@@ -362,17 +362,24 @@ In group calls (rooms), establishing a mesh of voice/video feeds between all par
 - **E2EE Integrity**: While media is decrypted at the hub for forwarding (requiring trust in the elected hub), text chat and files remain fully end-to-end encrypted with the room's group key. The signaling server is still excluded from the media path.
 
 ### 3. Decentralized Invite Links
-To make connecting to rooms friction-free, you can click the copy icon next to the room name. This generates a secure **base64-encoded invitation code** (`hc_inv_...`) that packages:
-- The room code
-- Your current signaling server WebSocket URL
-- Your signaling server access password (if configured)
 
-When another user pastes this invitation code into the **Join Room** dialog, their client automatically:
-1. Parses the payload.
+To make connecting to rooms friction-free, you can click the copy icon next to the room name. This generates a secure **base64-encoded invitation code** with the prefix `HELU-INV1:` (e.g., `HELU-INV1:<base64url(json)>`) that packages:
+- `r` (**room_id**): The unique room code (e.g., `ROOM-XXXX`)
+- `u` (**signaling_url**): Your current signaling server WebSocket URL
+- `p` (**password**): Your signaling server access password (if configured, optional)
+- `k` (**psk**): The room's pre-shared key (for channel authentication/invite-only rooms, optional)
+- `c` (**creator_ed25519_pub**): The room creator's public signing key (for membership PKI/vouching, optional)
+- `v` (**version**): The format version (default: `1`)
+- `h` (**checksum**): First 16 characters of the SHA-256 hash of the canonical JSON payload (used as a corruption and tamper guard)
+
+When another user pastes this invitation code into the **Join via invite link** dialog, their client automatically:
+1. Parses the payload and validates the integrity checksum.
 2. Updates their local settings to target the inviter's signaling server.
-3. Automatically authenticates and joins the room.
+3. Automatically authenticates with the signaling server (using the embedded password, if present).
+4. Configures the WebRTC engine with the room's pre-shared key and the creator's identity for membership verification.
+5. Joins the secure room automatically.
 
-This removes the requirement for users to coordinate signaling servers beforehand, matching the invitation experience of decentralized apps like Quiet.
+This removes the requirement for users to coordinate signaling servers and passwords beforehand, matching the invitation experience of decentralized apps like Quiet.
 
 ---
 

@@ -167,10 +167,9 @@ uvicorn server:app --host 127.0.0.1 --port 8000
 python main.py
 ```
 
-Want a friend on the call? Spin up a second client, create a room, copy the secure **base64-encoded invite link** (which packages the room ID, signaling URL, and server password), and share it. The receiver can paste this link directly in the Join dialog to connect and join automatically.
+Want a friend on the room call? Spin up a second client, create a room, and click the copy icon next to the room name to copy the secure **base64-encoded invite link** (prefixed with `HELU-INV1:`). This invite code packages the room ID, signaling server WebSocket URL, password, room PSK (pre-shared key), and the creator's public signing key. The receiver can click the **Join via invite link** dialog, paste the code, and their client will auto-configure to dial the right server and join the room instantly.
 
 For VPS/HTTPS deployment and a full feature walkthrough, see [GUIDE.md](GUIDE.md).
-For WebSocket hosting troubleshooting, see **`DEPLOY-WEBSOCKETS.md`**.
 
 ## 📦 Building a standalone executable
 
