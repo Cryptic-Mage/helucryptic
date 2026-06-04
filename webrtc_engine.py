@@ -261,11 +261,21 @@ class ScreenShareTrack(VideoStreamTrack):
     async def recv(self):
         pts, time_base = await self.next_timestamp()
         loop     = asyncio.get_event_loop()
-        elapsed  = loop.time() - self._last_ts
+        now      = loop.time()
         interval = 1.0 / self.target_fps
-        if elapsed < interval:
-            await asyncio.sleep(interval - elapsed)
-        self._last_ts = loop.time()
+        if self._last_ts == 0.0:
+            self._last_ts = now
+        else:
+            elapsed = now - self._last_ts
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+            # Advance by a fixed interval so the schedule doesn't drift even if
+            # the sleep wakes slightly late (OS jitter accumulates without this).
+            self._last_ts += interval
+            # If more than one frame behind (overloaded CPU), resync to avoid a
+            # burst of catch-up frames that would spike the encoder.
+            if loop.time() - self._last_ts > interval:
+                self._last_ts = loop.time()
         try:
             self._ensure()
             # mss returns BGRA; drop alpha + make contiguous (from_ndarray needs it).
@@ -1232,6 +1242,10 @@ class WebRTCEngine:
             elif not ok:
                 self._delete_tmp_file(state["path"])
 
+        elif t == "screen_share_ended":
+            if self.on_video_end:
+                self.on_video_end(peer)
+
         elif t == "call_start":
             if self.on_call_incoming:
                 self.on_call_incoming(peer)
@@ -1785,6 +1799,12 @@ class WebRTCEngine:
                     print(f"[rtc] {self.my_username}: removeTrack(screen) for {p} failed: {ex}", flush=True)
         self._teardown_media_if_idle()
         for p in changed:
+            ch = self.data_channels.get(p)
+            if ch and ch.readyState == "open":
+                try:
+                    ch.send(json.dumps({"__type": "screen_share_ended"}))
+                except Exception:
+                    pass
             await self.request_negotiation(p)
 
     def accept_call(self, peer: Optional[str] = None) -> None:
@@ -1951,32 +1971,41 @@ class WebRTCEngine:
     # ------------------------------------------------------------------
 
     async def _render_video(self, track, peer: str) -> None:
+        from aiortc.mediastreams import MediaStreamError
         print(f"[screen] {self.my_username}: receiving video track from {peer}", flush=True)
         origin = await self._resolve_origin(track.id, peer)
         q: asyncio.Queue = asyncio.Queue(maxsize=2)
-        self._got_frame = False
+        got_frame = False  # local to this call — avoids clobbering across concurrent tracks
 
         async def fetch():
+            nonlocal got_frame
             while True:
                 try:
                     frame = await track.recv()
                     img   = frame.to_ndarray(format="bgr24")
-                    if not self._got_frame:
+                    if not got_frame:
                         print(f"[screen] {self.my_username}: first frame from {peer} (origin={origin}) {img.shape[1]}x{img.shape[0]}", flush=True)
-                        self._got_frame = True
+                        got_frame = True
                     if q.full():
                         try:
                             q.get_nowait()
                         except asyncio.QueueEmpty:
                             pass
                     await q.put(img)
-                except Exception:
-                    break
-            # Track ended (sender stopped sharing or the call dropped): signal the
-            # consumer with a sentinel so the UI tears the stream down immediately.
-            await q.put(None)
+                except MediaStreamError:
+                    break  # track ended cleanly — fall through to sentinel
+                except Exception as ex:
+                    # Transient error (decode glitch, buffer underrun) — log and
+                    # retry instead of killing the whole stream.
+                    print(f"[screen] {self.my_username}: frame error from {peer}: {type(ex).__name__}", flush=True)
+                    await asyncio.sleep(0.05)
+            # Track ended: signal the consumer so the UI tears down immediately.
+            try:
+                await asyncio.wait_for(q.put(None), timeout=1.0)
+            except Exception:
+                pass
 
-        asyncio.ensure_future(fetch())
+        fetch_task = asyncio.ensure_future(fetch())
         try:
             while True:
                 try:
@@ -1990,6 +2019,7 @@ class WebRTCEngine:
                 if self.on_video_frame:
                     self.on_video_frame(origin, img)
         finally:
+            fetch_task.cancel()  # stop producer if consumer exits first (no zombie tasks)
             # Always notify the UI that this peer's screen stream is gone, so a
             # stale frame can never linger after sharing stops / the call ends.
             print(f"[screen] {self.my_username}: video track from {origin} ended", flush=True)

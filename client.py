@@ -1636,6 +1636,9 @@ class HelucrypticApp:
         except Exception as ex:
             self._toast(f"Disconnected from signaling: {ex}", "error")
             self._update_status("IDLE", C.FAINT)
+            self._clear_all_video()
+            for _peer in list(self.engine.pcs.keys()):
+                asyncio.ensure_future(self.engine.remove_peer(_peer))
             self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
 
     # ------------------------------------------------------------------
@@ -2844,6 +2847,10 @@ class HelucrypticApp:
         self._fs_title.value = f"{sender}'s screen"
         self._fs_img.src = self._video_tiles[sender].src or ""
         self.screen_overlay.visible = True
+        try:
+            self.screen_overlay.update()
+        except Exception:
+            pass
         self._rebuild_share_switcher()
         self.page.update()
 
@@ -2919,6 +2926,11 @@ class HelucrypticApp:
         self.pip_overlay.visible = False
         self._fs_img.src = self._pip_img.src or ""
         self.screen_overlay.visible = True
+        try:
+            self.screen_overlay.update()
+        except Exception:
+            pass
+        self._rebuild_share_switcher()
         self.page.update()
 
     def _rebuild_share_switcher(self) -> None:
@@ -4093,6 +4105,16 @@ class StartupScreen:
 
 async def main(page: ft.Page) -> None:
     _install_log_capture()   # mirror stdout/stderr into the in-app diagnostics log
+    # Suppress aiortc SCTP "Cannot send data, not connected" noise: these are
+    # background Tasks inside aiortc that try to flush a dead DTLS transport.
+    # They are expected on abrupt disconnects and not actionable from our side.
+    _loop = asyncio.get_event_loop()
+    def _sctp_filter(lp, ctx):
+        exc = ctx.get("exception")
+        if isinstance(exc, ConnectionError) and "Cannot send data" in str(exc):
+            return
+        lp.default_exception_handler(ctx)
+    _loop.set_exception_handler(_sctp_filter)
     page.title         = "helucryptic"
     # Apply the unified "Refined dark console" theme: dark Material ColorScheme
     # (so built-in dialogs/dropdowns/checkboxes inherit the palette instead of
