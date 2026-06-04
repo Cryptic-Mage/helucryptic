@@ -14,3 +14,4 @@ Helucryptic.spec
 desktop.ini
 *.txt
 *.spec
+*.venv
