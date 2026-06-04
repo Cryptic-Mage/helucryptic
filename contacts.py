@@ -27,8 +27,17 @@ def _load_raw() -> list[dict]:
     if _CONTACTS_PATH.exists():
         try:
             return json.loads(_CONTACTS_PATH.read_text())
-        except Exception:
-            return []
+        except Exception as ex:
+            backup_path = _CONTACTS_PATH.with_name(_CONTACTS_PATH.name + ".corrupted")
+            try:
+                _CONTACTS_PATH.rename(backup_path)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Your contacts file at {_CONTACTS_PATH} is corrupted and could not be read ({ex}). "
+                f"It has been backed up to {backup_path.name}. "
+                f"Restore it from a backup, or delete/re-create it."
+            ) from ex
     return []
 
 

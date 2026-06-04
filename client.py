@@ -2538,8 +2538,17 @@ class HelucrypticApp:
             self.settings.security_mode, limit=100, offset=self._history_offset,
         )
         self._bulk_load = True
+        if self._history_offset > 0 and self.chat_log.controls:
+            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == "Load more…":
+                self.chat_log.controls.pop(0)
+
+        bubbles = []
         for m in msgs:
-            self._append_to_log(m["direction"], m["content"], bool(m["verified"]))
+            is_sent = m["direction"] == "sent"
+            prefix  = "You" if is_sent else (m.get("sender") or self._active_contact or "Peer")
+            bubbles.append(self._make_bubble(prefix, m["content"], bool(m["verified"]), is_sent))
+
+        self.chat_log.controls = bubbles + self.chat_log.controls
         self._bulk_load = False
         self._history_offset += len(msgs)
         if len(msgs) == 100:
@@ -2564,11 +2573,17 @@ class HelucrypticApp:
             self.settings.security_mode, limit=100, offset=self._history_offset,
         )
         self._bulk_load = True
+        if self._history_offset > 0 and self.chat_log.controls:
+            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == "Load more…":
+                self.chat_log.controls.pop(0)
+
+        bubbles = []
         for m in msgs:
-            self._append_to_log(
-                m["direction"], m["content"], bool(m["verified"]),
-                label=m.get("sender") or "You",
-            )
+            is_sent = m["direction"] == "sent"
+            prefix  = "You" if is_sent else (m.get("sender") or "Peer")
+            bubbles.append(self._make_bubble(prefix, m["content"], bool(m["verified"]), is_sent))
+
+        self.chat_log.controls = bubbles + self.chat_log.controls
         self._bulk_load = False
         self._history_offset += len(msgs)
         if len(msgs) == 100:
@@ -2696,25 +2711,30 @@ class HelucrypticApp:
         async def ws_send(payload: dict):
             await self.ws.send(json.dumps(payload))
 
-        if self._room_id:
-            hub = self.engine.current_hub()
-            if hub == self.engine.my_username:
-                # We are the hub: send our mic to every connected member.
-                for peer in list(self.engine.pcs.keys()):
-                    if self.engine.pcs[peer].connectionState == "connected":
-                        await self.engine.start_voice_call(peer)
-            elif hub and self.engine.pcs.get(hub):
-                # Non-hub: send our mic only to the hub; it fans out to the others.
-                await self.engine.start_voice_call(hub)
-        else:
-            if not self._active_contact:
-                return
-            if not self._is_allowed(self._active_contact):
-                self._block_unverified(self._active_contact)
-                return
-            if not self.engine.pcs.get(self._active_contact):
-                await self.engine.create_offer(self._active_contact, ws_send)
-            await self.engine.start_voice_call(self._active_contact)
+        try:
+            if self._room_id:
+                hub = self.engine.current_hub()
+                if hub == self.engine.my_username:
+                    # We are the hub: send our mic to every connected member.
+                    for peer in list(self.engine.pcs.keys()):
+                        if self.engine.pcs[peer].connectionState == "connected":
+                            await self.engine.start_voice_call(peer)
+                elif hub and self.engine.pcs.get(hub):
+                    # Non-hub: send our mic only to the hub; it fans out to the others.
+                    await self.engine.start_voice_call(hub)
+            else:
+                if not self._active_contact:
+                    return
+                if not self._is_allowed(self._active_contact):
+                    self._block_unverified(self._active_contact)
+                    return
+                if not self.engine.pcs.get(self._active_contact):
+                    await self.engine.create_offer(self._active_contact, ws_send)
+                await self.engine.start_voice_call(self._active_contact)
+        except Exception as ex:
+            self._log(f"[Error] Failed to start voice call: {ex}")
+            self._toast("Could not access microphone. Please check your audio settings or permissions.", "error")
+            return
 
         self._in_voice_call = True
         if self._room_id:

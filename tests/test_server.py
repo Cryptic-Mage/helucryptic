@@ -93,16 +93,15 @@ async def test_password_auth():
             thread.stop()
             thread.join()
 
-def test_duplicate_username_rejected():
+def test_duplicate_username_replaces_old():
     client = TestClient(server.app)
     with patch_password(""):
         with client.websocket_connect("/ws/alice") as ws1:
             # Try connecting second client with same username
             with client.websocket_connect("/ws/alice") as ws2:
-                # Expect to get an error message and then closed
-                data = ws2.receive_json()
-                assert data["type"] == "error"
-                assert "already connected" in data["data"]
+                # The first connection should be closed by the server
+                with pytest.raises(Exception):
+                    ws1.receive_json()
 
 def test_p2p_message_routing():
     client = TestClient(server.app)

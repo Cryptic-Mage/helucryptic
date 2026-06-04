@@ -210,6 +210,7 @@ async def test_send_file_chunked(engine, tmp_path):
     
     # Mock data channel
     mock_ch = MagicMock()
+    mock_ch.readyState = "open"
     mock_ch.bufferedAmount = 0 # Ensure it behaves as an integer, not a MagicMock!
     engine.data_channels["bob"] = mock_ch
     engine.target_peer = "bob"
@@ -257,6 +258,7 @@ async def test_send_room_file_uses_group_key(engine, tmp_path):
     file_path.write_bytes(b"A" * 1024)
 
     mock_ch = MagicMock()
+    mock_ch.readyState = "open"
     mock_ch.bufferedAmount = 0
     engine.data_channels["hub"] = mock_ch
     engine.target_peer = "hub"

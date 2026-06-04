@@ -9,7 +9,9 @@ from paths import DATA_DIR
 _DB_PATH  = DATA_DIR / "history.db"
 
 
-def _get_conn() -> sqlite3.Connection:
+from contextlib import contextmanager
+
+def _connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -22,6 +24,17 @@ def _get_conn() -> sqlite3.Connection:
     except Exception:
         pass
     return conn
+
+
+@contextmanager
+def _get_conn():
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
 
 
 def init_db() -> None:

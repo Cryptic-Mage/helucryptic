@@ -289,6 +289,9 @@ class ScreenShareTrack(VideoStreamTrack):
         self._sct = None
 
     async def recv(self):
+        from aiortc.mediastreams import MediaStreamError
+        if self.readyState != "live":
+            raise MediaStreamError
         pts, time_base = await self.next_timestamp()
         loop     = asyncio.get_event_loop()
         now      = loop.time()
@@ -320,6 +323,7 @@ class ScreenShareTrack(VideoStreamTrack):
         return frame
 
     def stop(self):
+        super().stop()
         # Close mss on the grab thread, then release the executor.
         try:
             self._executor.submit(self._close_sct)
@@ -370,6 +374,8 @@ class MicrophoneTrack(AudioStreamTrack):
             raise MediaStreamError
 
         data  = await self._queue.get()
+        if data is None:
+            raise MediaStreamError
         # Apply digital volume boost (factor of 3.0) to mic input
         boosted_data = np.clip(data.astype(np.int32) * 3, -32768, 32767).astype(np.int16)
         frame = AudioFrame.from_ndarray(boosted_data.T, format="s16", layout="mono")
@@ -381,8 +387,13 @@ class MicrophoneTrack(AudioStreamTrack):
         return frame
 
     def stop(self) -> None:
-        self._stream.stop()
-        self._stream.close()
+        super().stop()
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        self._queue_put(None)
 
 
 # ---------------------------------------------------------------------------
@@ -1149,9 +1160,18 @@ class WebRTCEngine:
             remaining = state["size"] - state["received"]
             block = data[:max(0, remaining)]
             if block:
-                state["file"].write(block)
-                state["sha"].update(block)
-                state["received"] += len(block)
+                try:
+                    state["file"].write(block)
+                    state["sha"].update(block)
+                    state["received"] += len(block)
+                except OSError as ex:
+                    print(f"[file] Write error: {ex}", flush=True)
+                    self._close_file_state(state, delete=True)
+                    self._file_buffers.get(peer, {}).pop(state["filename"], None)
+                    self._file_buffers.get(peer, {}).pop("_current", None)
+                    if self.on_file_complete:
+                        self.on_file_complete(state["filename"], state["path"], False)
+                    return
             received = state["received"]
             if self.on_file_chunk:
                 self.on_file_chunk(state["filename"], received, state["size"])
@@ -1854,7 +1874,15 @@ class WebRTCEngine:
             except Exception as ex:
                 print(f"[rtc] {self.my_username}: call_accept to {p} failed: {ex}", flush=True)
         # We are ANSWERING: add our mic but don't ring the caller back.
-        asyncio.ensure_future(self.start_voice_call(p, ring=False))
+        task = asyncio.ensure_future(self.start_voice_call(p, ring=False))
+        def call_done(t):
+            try:
+                t.result()
+            except Exception as ex:
+                self.last_error = f"Audio capture error: {ex}"
+                if self.on_state_change:
+                    self.on_state_change(p, "failed")
+        task.add_done_callback(call_done)
 
     def reject_call(self, peer: Optional[str] = None) -> None:
         p  = peer or self.target_peer
@@ -1956,11 +1984,16 @@ class WebRTCEngine:
 
     def _ensure_output_stream(self) -> None:
         if self._output_stream is None:
-            self._output_stream = sd.OutputStream(
-                samplerate=48000, channels=1, dtype="int16",
-                blocksize=960, callback=self._play_callback,
-            )
-            self._output_stream.start()
+            try:
+                self._output_stream = sd.OutputStream(
+                    samplerate=48000, channels=1, dtype="int16",
+                    blocksize=960, callback=self._play_callback,
+                )
+                self._output_stream.start()
+            except Exception as ex:
+                self.last_error = f"Audio output error: {ex}"
+                print(f"[rtc] Failed to open audio output stream: {ex}", flush=True)
+                raise ex
 
     async def _handle_incoming_audio(self, track, peer: str) -> None:
         MAX_BUFFERED = 48000   # ~1 s @ 48 kHz; drop oldest beyond this
@@ -1968,7 +2001,13 @@ class WebRTCEngine:
         self._incoming_audio_active.add(key)
         with self._play_lock:
             self._play_chunks[key] = deque()
-        self._ensure_output_stream()
+        try:
+            self._ensure_output_stream()
+        except Exception:
+            self._incoming_audio_active.discard(key)
+            with self._play_lock:
+                self._play_chunks.pop(key, None)
+            return
 
         # Initialize the resampler to output packed s16, mono layout, 48000Hz rate.
         # This handles dynamic format, sample rate, or channel count changes (e.g. if the

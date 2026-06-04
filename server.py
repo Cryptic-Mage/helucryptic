@@ -47,19 +47,13 @@ async def websocket_endpoint(
 
     await websocket.accept()
 
-    # --- Username uniqueness ---
-    # Reject a second live connection for an already-connected username so a
-    # newcomer cannot silently hijack an existing user's message routing.
-    # A genuine reconnect after a drop is fine: the disconnect handler removes
-    # the old entry from active_connections before the new socket arrives.
     if username in active_connections:
-        await websocket.send_text(json.dumps({
-            "sender": "system",
-            "type": "error",
-            "data": f"Username '{username}' is already connected.",
-        }))
-        await websocket.close()
-        return
+        old_ws = active_connections[username]
+        try:
+            await old_ws.close()
+        except Exception:
+            pass
+        active_connections.pop(username, None)
 
     # --- Room capacity check ---
     if room:
