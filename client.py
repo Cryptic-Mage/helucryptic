@@ -1631,22 +1631,28 @@ class HelucrypticApp:
                         else:
                             self._toast(msg_text, "error")
                 except Exception as inner_ex:
+                    if "destroyed session" in str(inner_ex):
+                        print("[signaling] Session destroyed. Exiting listener.", flush=True)
+                        break
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
 
         except Exception as ex:
-            self._toast(f"Disconnected from signaling: {ex}", "error")
-            self._update_status("IDLE", C.FAINT)
-            self._clear_all_video()
+            if "destroyed session" in str(ex):
+                return
+            try:
+                self._toast(f"Disconnected from signaling: {ex}", "error")
+                self._update_status("IDLE", C.FAINT)
+                self._clear_all_video()
+            except Exception:
+                pass
             for _peer in list(self.engine.pcs.keys()):
                 asyncio.ensure_future(self.engine.remove_peer(_peer))
             self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
-
     # ------------------------------------------------------------------
     # Room management
     # ------------------------------------------------------------------
 
-    async def _create_room(self, e) -> None:
-        print("[create_room] clicked", flush=True)
+    def _create_room(self, e) -> None:
         uname = self.username_input.value.strip()
         if not uname:
             self._log("[Error] Enter a username first.")
@@ -1655,7 +1661,10 @@ class HelucrypticApp:
         code = generate_room_code()
 
         ephem_cb = ft.Checkbox(
-            label="🔥 Ephemeral — auto-destruct (nothing saved to disk)", value=False)
+            label="Ephemeral Mode (auto-destruct)",
+            value=False,
+            label_style=ft.TextStyle(size=11, weight=ft.FontWeight.BOLD, color=C.TEXT)
+        )
 
         # Two doors, lock on the secure one: an invite-only room is gated by a
         # pre-shared key (joinable ONLY with the invite link); an open room is
@@ -1667,23 +1676,49 @@ class HelucrypticApp:
             asyncio.ensure_future(self._create_room_finish(code, secure))
 
         dlg = ft.AlertDialog(
-            title=ft.Text(f"Create room {code}"),
+            title=ft.Text(f"Create room {code}", size=16, weight=ft.FontWeight.BOLD),
             content=ft.Column([
-                ft.Text("How can people join?", size=12, color=C.SUBTLE),
-                ft.Text("🔒 Invite-only — join only with the invite link (a pre-shared "
-                        "key hides the room from anyone without it). Recommended.",
-                        size=11, color=C.MUTED),
-                ft.Text("🌐 Open — anyone who knows the room code can join.",
-                        size=11, color=C.MUTED),
-                ephem_cb,
-                ft.Text("Ephemeral rooms keep messages in memory only and purge keys, "
-                        "logs and tracks the moment you disconnect.", size=11, color=C.MUTED),
-            ], tight=True, spacing=8, width=360),
+                ft.Text("Join Policy", size=11, weight=ft.FontWeight.BOLD, color=C.CYAN),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.LOCK, color=C.CYAN, size=18),
+                        ft.Column([
+                            ft.Text("Invite-only (Recommended)", size=11, weight=ft.FontWeight.BOLD, color=C.TEXT),
+                            ft.Text("Requires secure invite link. Pre-shared keys hide room completely.", size=10, color=C.MUTED),
+                        ], spacing=1, expand=True)
+                    ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=10, border_radius=R.MD, bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER),
+                ),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.PUBLIC, color=C.SUBTLE, size=18),
+                        ft.Column([
+                            ft.Text("Open Room", size=11, weight=ft.FontWeight.BOLD, color=C.TEXT),
+                            ft.Text("Anyone who knows the room code can connect instantly.", size=10, color=C.MUTED),
+                        ], spacing=1, expand=True)
+                    ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=10, border_radius=R.MD, bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER),
+                ),
+                ft.Container(height=4),
+                ft.Text("Storage Policy", size=11, weight=ft.FontWeight.BOLD, color=C.CYAN),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.WHATSHOT, color=C.RED, size=18),
+                            ephem_cb,
+                        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        ft.Text("Messages are kept in memory only. Keys, logs, and tracks are purged completely when you disconnect.", size=10, color=C.MUTED),
+                    ], spacing=4),
+                    padding=10, border_radius=R.MD, bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER),
+                ),
+            ], tight=True, spacing=8, width=380),
             actions=[
-                ft.FilledButton("🔒 Invite-only", on_click=lambda e: choose(True),
+                ft.FilledButton("Invite-only", icon=ft.Icons.LOCK, on_click=lambda e: choose(True),
                                 style=_filled_style(C.CYAN)),
-                ft.TextButton("🌐 Open", on_click=lambda e: choose(False)),
-                ft.TextButton("Cancel", on_click=lambda e: self._close_dialog(dlg)),
+                ft.FilledButton("Open", icon=ft.Icons.PUBLIC, on_click=lambda e: choose(False),
+                                style=_filled_style(C.ELEV2, C.TEXT)),
+                ft.TextButton("Cancel", on_click=lambda e: self._close_dialog(dlg),
+                              style=_ghost_style(C.MUTED)),
             ],
         )
         self._show_dialog(dlg)
@@ -1713,11 +1748,16 @@ class HelucrypticApp:
             await self._join_room(code, is_creator=False)
 
         dlg = ft.AlertDialog(
-            title=ft.Text("Join Room"),
-            content=field,
+            title=ft.Text("Join Room", size=16, weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                ft.Text("Enter a 9-character room code to connect to an existing room.", size=11, color=C.SUBTLE),
+                field,
+            ], tight=True, spacing=12, width=320),
             actions=[
-                ft.TextButton("Join",   on_click=do_join),
-                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+                ft.FilledButton("Join", icon=ft.Icons.LOGIN, on_click=do_join,
+                                style=_filled_style(C.CYAN)),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg),
+                              style=_ghost_style(C.MUTED)),
             ],
         )
         self._show_dialog(dlg)
@@ -3713,14 +3753,54 @@ class HelucrypticApp:
                 self._refresh_contact_list()
             self._close_dialog(dlg)
         dlg = ft.AlertDialog(
-            title=ft.Text("Add Contact"),
-            content=field,
+            title=ft.Text("Add Contact", size=16, weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                ft.Text("Enter the username of the contact you want to add to your list.", size=11, color=C.SUBTLE),
+                field,
+            ], tight=True, spacing=12, width=320),
             actions=[
-                ft.TextButton("Add",    on_click=add),
-                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+                ft.FilledButton("Add", icon=ft.Icons.PERSON_ADD, on_click=add,
+                                style=_filled_style(C.CYAN)),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg),
+                              style=_ghost_style(C.MUTED)),
             ],
         )
         self._show_dialog(dlg)
+
+    async def shutdown(self) -> None:
+        """Cleanly close all background loops, websockets, and WebRTC engines on close."""
+        print("[app] starting shutdown cleanup...", flush=True)
+        # Close websocket connection
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+        # Clean up all peer connections
+        for peer in list(self.engine.pcs.keys()):
+            try:
+                await self.engine.remove_peer(peer)
+            except Exception:
+                pass
+        # Stop port forwarding
+        if self._pf_manager is not None:
+            try:
+                await self._pf_manager.stop()
+            except Exception:
+                pass
+            self._pf_manager = None
+        # Cancel all background tasks
+        for task in self._bg_tasks:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        self._bg_tasks.clear()
+        if self._status_label_task and not self._status_label_task.done():
+            self._status_label_task.cancel()
+        if self._flash_task and not self._flash_task.done():
+            self._flash_task.cancel()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -4143,6 +4223,10 @@ async def main(page: ft.Page) -> None:
         # Thread the access token through so the app sends it to the server.
         app._server_password = password or config.SERVER_PASSWORD
         app._refresh_contact_list()
+
+        async def handle_disconnect(e):
+            await app.shutdown()
+        page.on_disconnect = handle_disconnect
 
     StartupScreen(page, on_done=launch_app)
 
