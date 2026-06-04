@@ -1,0 +1,86 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check Commit Message for "build release"
+        id: check_msg
+        shell: bash
+        run: |
+          commit_message=$(git log -1 --pretty=%B)
+          echo "Commit message: $commit_message"
+          if [[ "${commit_message,,}" == *"build release"* ]]; then
+            echo "Match found! Proceeding with build and release."
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "No 'build release' in commit message. Skipping remaining steps."
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python
+        if: steps.check_msg.outputs.should_release == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Determine Version
+        if: steps.check_msg.outputs.should_release == 'true'
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="v1.0.${{ github.run_number }}"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Building version ${VERSION}"
+
+      - name: Restore .env from Secret
+        if: steps.check_msg.outputs.should_release == 'true'
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+        shell: bash
+        run: |
+          if [ -n "$ENV_FILE_CONTENT" ]; then
+            # Use printf or carefully write to avoid shell expansion issues
+            printf "%s" "$ENV_FILE_CONTENT" > .env
+            echo ".env file successfully restored from secrets."
+          else
+            echo "Warning: ENV_FILE secret is empty or not set. Proceeding without custom .env."
+          fi
+
+      - name: Build Executable
+        if: steps.check_msg.outputs.should_release == 'true'
+        run: |
+          python build.py --fresh
+
+      - name: Create Release and Upload Asset
+        if: steps.check_msg.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/Helucryptic.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
