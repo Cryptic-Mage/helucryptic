@@ -9,8 +9,9 @@ sounddevice
 cryptography
 pyopenssl
 pyseto
-flet
-Pillow
+flet>=0.28
+flet-desktop>=0.28
+Pillow>=10.0
 qrcode
 python-dotenv
 opencv-python

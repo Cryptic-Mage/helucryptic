@@ -30,7 +30,7 @@ BUILD_VENV = ROOT / ".build-venv"
 
 # Native-heavy packages whose binaries/data PyInstaller's auto-analysis can miss.
 COLLECT_ALL = (
-    "aiortc", "av", "flet", "cryptography", "pyseto", "sounddevice", "mss",
+    "aiortc", "av", "flet", "flet_desktop", "cryptography", "pyseto", "sounddevice", "mss",
     "PIL", "qrcode",
 )
 
