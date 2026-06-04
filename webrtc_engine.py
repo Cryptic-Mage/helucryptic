@@ -15,6 +15,11 @@ import sounddevice as sd
 from PIL import Image
 from av import AudioFrame, VideoFrame
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 # Pillow's BOX resampling is area-averaging — the equivalent of cv2.INTER_AREA
 # used for downscaling. Pillow replaces opencv here to keep the binary small.
 _BOX = getattr(Image, "Resampling", Image).BOX
@@ -270,10 +275,13 @@ class ScreenShareTrack(VideoStreamTrack):
             h0, w0 = img.shape[:2]
             scale  = min(self._max_w / w0, self._max_h / h0, 1.0)
             if scale < 1.0:
-                # Channel order is irrelevant to a per-channel resize, so the
-                # BGR array stays BGR through Pillow.
-                img = np.asarray(Image.fromarray(img).resize(
-                    (int(w0 * scale), int(h0 * scale)), _BOX))
+                if cv2 is not None:
+                    img = cv2.resize(img, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_AREA)
+                else:
+                    # Channel order is irrelevant to a per-channel resize, so the
+                    # BGR array stays BGR through Pillow.
+                    img = np.asarray(Image.fromarray(img).resize(
+                        (int(w0 * scale), int(h0 * scale)), _BOX))
             # Even dimensions keep video encoders happy.
             h, w = img.shape[0] & ~1, img.shape[1] & ~1
             img = np.ascontiguousarray(img[:h, :w])
@@ -1759,7 +1767,13 @@ class WebRTCEngine:
             pc = self.pcs.get(p)
             if sender is not None and pc is not None:
                 try:
-                    pc.removeTrack(sender)
+                    if hasattr(pc, "removeTrack"):
+                        pc.removeTrack(sender)
+                    else:
+                        for transceiver in pc.getTransceivers():
+                            if transceiver.sender == sender:
+                                await transceiver.stop()
+                                break
                     changed.append(p)
                 except Exception as ex:
                     print(f"[rtc] {self.my_username}: removeTrack(screen) for {p} failed: {ex}", flush=True)

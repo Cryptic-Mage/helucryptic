@@ -32,6 +32,11 @@ import numpy as np
 import websockets
 from PIL import Image
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 import config
 from contacts import (
     delete_contact,
@@ -825,6 +830,9 @@ class HelucrypticApp:
                     self._fs_title,
                     ft.Container(expand=True),
                     self._fs_switcher,
+                    ft.IconButton(ft.Icons.PICTURE_IN_PICTURE, icon_color=C.WHITE,
+                                  tooltip="Pop out stream",
+                                  on_click=lambda e: self._minimize_to_pip()),
                     ft.IconButton(ft.Icons.CLOSE_FULLSCREEN, icon_color=C.WHITE,
                                   tooltip="Exit full screen",
                                   on_click=lambda e: self._close_fullscreen()),
@@ -834,7 +842,46 @@ class HelucrypticApp:
             ], spacing=8, expand=True),
         )
 
-        root = ft.Stack([self._build_background(), app_frame, self.screen_overlay],
+        # Picture-in-picture floating overlay
+        self._pip_img = ft.Image(src="", fit=ft.BoxFit.CONTAIN, expand=True, gapless_playback=True)
+        self._pip_title = ft.Text("", size=11, weight=ft.FontWeight.W_700, color=C.WHITE)
+
+        def on_pip_pan(e: ft.DragUpdateEvent):
+            self.pip_overlay.left = max(0, min((self.page.window.width or 1180) - 340, (self.pip_overlay.left or 0) + e.delta_x))
+            self.pip_overlay.top = max(0, min((self.page.window.height or 760) - 260, (self.pip_overlay.top or 0) + e.delta_y))
+            self.pip_overlay.update()
+
+        self.pip_overlay = ft.GestureDetector(
+            visible=False,
+            mouse_cursor=ft.MouseCursor.MOVE,
+            on_pan_update=on_pip_pan,
+            left=600,
+            top=300,
+            content=ft.Container(
+                width=320, height=220,
+                bgcolor="#000000eb",
+                border=ft.Border.all(1, C.BORDER2),
+                border_radius=R.MD,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                shadow=_glow(C.CYAN + "22", blur=20, spread=-2),
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SCREEN_SHARE, color=C.MAGENTA, size=14),
+                        self._pip_title,
+                        ft.Container(expand=True),
+                        ft.IconButton(ft.Icons.ASPECT_RATIO, icon_color=C.WHITE, icon_size=14,
+                                      tooltip="Expand to full screen",
+                                      on_click=lambda e: self._expand_from_pip()),
+                        ft.IconButton(ft.Icons.CLOSE, icon_color=C.WHITE, icon_size=14,
+                                      tooltip="Close",
+                                      on_click=lambda e: self._close_fullscreen()),
+                    ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
+                    ft.Container(content=self._pip_img, expand=True, alignment=ft.Alignment.CENTER),
+                ], spacing=4, expand=True)
+            )
+        )
+
+        root = ft.Stack([self._build_background(), app_frame, self.screen_overlay, self.pip_overlay],
                         expand=True)
         self.page.add(root)
 
@@ -2397,19 +2444,27 @@ class HelucrypticApp:
         try:
             quality = self._jpeg_quality
             def encode():
-                rgb = np.ascontiguousarray(img[:, :, ::-1])
-                bio = BytesIO()
-                Image.fromarray(rgb).save(bio, format="JPEG", quality=quality)
-                return base64.b64encode(bio.getvalue()).decode()
+                if cv2 is not None:
+                    _, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                    return base64.b64encode(buf).decode()
+                else:
+                    rgb = np.ascontiguousarray(img[:, :, ::-1])
+                    bio = BytesIO()
+                    Image.fromarray(rgb).save(bio, format="JPEG", quality=quality)
+                    return base64.b64encode(bio.getvalue()).decode()
             b64 = await asyncio.to_thread(encode)
             if sender not in self._video_tiles:
                 self._add_video_tile(sender)
             tile = self._video_tiles[sender]
             tile.src = "data:image/jpeg;base64," + b64
             tile.update()
-            if self._fullscreen_sender == sender and self.screen_overlay.visible:
-                self._fs_img.src = tile.src
-                self._fs_img.update()
+            if self._fullscreen_sender == sender:
+                if self.screen_overlay.visible:
+                    self._fs_img.src = tile.src
+                    self._fs_img.update()
+                if self.pip_overlay.visible:
+                    self._pip_img.src = tile.src
+                    self._pip_img.update()
         except Exception:
             pass
 
@@ -2494,20 +2549,47 @@ class HelucrypticApp:
         if sender not in self._video_tiles:
             return
         self._fullscreen_sender = sender
-        self._fs_title.value = f"{sender}'s screen"
-        self._fs_img.src = self._video_tiles[sender].src or ""
+        if self.pip_overlay.visible:
+            self._pip_title.value = f"{sender}'s screen"
+            self._pip_img.src = self._video_tiles[sender].src or ""
+        else:
+            self._fs_title.value = f"{sender}'s screen"
+            self._fs_img.src = self._video_tiles[sender].src or ""
+            self.screen_overlay.visible = True
         self._rebuild_share_switcher()
-        self.screen_overlay.visible = True
         self.page.update()
 
     def _close_fullscreen(self) -> None:
         self._fullscreen_sender = ""
         if getattr(self, "screen_overlay", None) is not None:
             self.screen_overlay.visible = False
-            try:
-                self.page.update()
-            except Exception:
-                pass
+        if getattr(self, "pip_overlay", None) is not None:
+            self.pip_overlay.visible = False
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _minimize_to_pip(self) -> None:
+        if not self._fullscreen_sender:
+            return
+        self.screen_overlay.visible = False
+        self._pip_title.value = f"{self._fullscreen_sender}'s screen"
+        self._pip_img.src = self._fs_img.src or ""
+        w = self.page.window.width or 1180
+        h = self.page.window.height or 760
+        self.pip_overlay.left = w - 360
+        self.pip_overlay.top = h - 280
+        self.pip_overlay.visible = True
+        self.page.update()
+
+    def _expand_from_pip(self) -> None:
+        if not self._fullscreen_sender:
+            return
+        self.pip_overlay.visible = False
+        self._fs_img.src = self._pip_img.src or ""
+        self.screen_overlay.visible = True
+        self.page.update()
 
     def _rebuild_share_switcher(self) -> None:
         # One chip per active incoming stream — tap to switch which is maximized.

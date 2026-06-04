@@ -13,3 +13,4 @@ flet>=0.28
 Pillow>=10.0
 qrcode>=7.4
 python-dotenv>=1.0
+opencv-python>=4.8.0
