@@ -173,11 +173,17 @@ For VPS/HTTPS deployment and a full feature walkthrough, see [GUIDE.md](GUIDE.md
 
 ## 📦 Building a standalone executable
 
+### Local Build
 ```bash
 python build.py
 ```
-
 This bundles `tracks/`, `icon.ico`, and (if present) your `.env` into `dist/Helucryptic`. Heads-up: bundling `.env` embeds its contents in the binary — the server password is a real gate only because the **server** validates it.
+
+### Automated Build & CI/CD Release
+A GitHub Actions workflow is configured in `.github/workflows/build-and-release.yml`. When you push to the `main` branch or push a version tag (matching `v*`):
+1. The workflow checks if the commit message contains `"build release"` (case-insensitive).
+2. If present, it restores `.env` from your GitHub repository secret `ENV_FILE`, compiles the application on a `windows-latest` runner using `build.py --fresh`, and uploads the resulting `Helucryptic.exe` to a new GitHub Release.
+3. If not present, the build and release steps are skipped.
 
 ## 🪶 Built for the underdog (low-end PC optimisations)
 
