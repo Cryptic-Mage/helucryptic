@@ -858,7 +858,10 @@ class WebRTCEngine:
         hello = {"__type": "hello", "token": token}
         if self.my_membership_cert:            # feature D: present our membership cert
             hello["cert"] = self.my_membership_cert
-        self.data_channels[peer].send(json.dumps(hello))
+        ch = self.data_channels.get(peer)
+        if not (ch and ch.readyState == "open"):
+            return
+        ch.send(json.dumps(hello))
         self._hello_sent[peer] = True
 
     def _hello_iat_fresh(self, iat: str) -> bool:
@@ -1332,7 +1335,9 @@ class WebRTCEngine:
             {"group_key": b64mod.b64encode(self.group_key).decode()},
             self.session_keys[peer],
         )
-        self.data_channels[peer].send(json.dumps({"__type": "group_key", "token": token}))
+        ch = self.data_channels.get(peer)
+        if ch and ch.readyState == "open":
+            ch.send(json.dumps({"__type": "group_key", "token": token}))
 
     async def _handle_group_key(self, frame: dict, peer: str) -> None:
         import base64 as b64mod
@@ -1387,7 +1392,10 @@ class WebRTCEngine:
             frame = self._encrypt_frame_for(
                 {"__type": "chat", "text": text}, self.target_peer
             )
-            self.data_channels[self.target_peer].send(json.dumps(frame))
+            ch = self.data_channels.get(self.target_peer)
+            if not (ch and ch.readyState == "open"):
+                raise RuntimeError(f"Not connected to {self.target_peer!r} — wait for the peer to come online")
+            ch.send(json.dumps(frame))
 
     # ------------------------------------------------------------------
     # Peer-assisted history sync (feature E) — encrypted over the session channel
@@ -1425,7 +1433,9 @@ class WebRTCEngine:
         CHUNK   = 64 * 1024
         BUF_CAP = 1 * 1024 * 1024   # pause sending above ~1 MB buffered
         peer    = target or self.target_peer
-        ch      = self.data_channels[peer]
+        ch = self.data_channels.get(peer)
+        if not (ch and ch.readyState == "open"):
+            raise RuntimeError(f"Cannot send file: not connected to {peer!r}")
         fname   = os.path.basename(path)
         size    = os.path.getsize(path)
         if self.room_id and self.settings.security_mode == "e2ee" and not self.group_key:

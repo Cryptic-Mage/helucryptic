@@ -587,7 +587,7 @@ class HelucrypticApp:
                 self.page.clipboard.set(self._room_id)
                 self._log(f"Room code {self._room_id} copied.")
 
-        self.room_code_label  = ft.Text("", size=12, color=C.SUBTLE, selectable=True,
+        self.room_code_label  = ft.Text("", size=12, color=C.CYAN, selectable=False,
                                         weight=ft.FontWeight.W_600)
         self.hub_banner       = ft.Text("", size=11, color=C.YELLOW, visible=False)
         self.btn_copy_room    = ft.IconButton(
@@ -641,8 +641,16 @@ class HelucrypticApp:
             [
                 ft.Row([self.btn_create_room, self.btn_join_room], spacing=8),
                 self.btn_join_invite,
-                ft.Row([self.room_code_label, self.btn_copy_room, self.btn_invite,
-                        self.btn_invite_link],
+                ft.Row([
+                    ft.Container(
+                        content=self.room_code_label,
+                        on_click=lambda e: self._select_room(),
+                        tooltip="Go to room",
+                        border_radius=R.SM,
+                        padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+                    ),
+                    self.btn_copy_room, self.btn_invite,
+                    self.btn_invite_link],
                        spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.hub_banner,
                 self.participant_list,
@@ -1786,6 +1794,13 @@ class HelucrypticApp:
         self.btn_copy_room.visible    = True
         self.btn_invite_link.visible  = True
         self._update_chat_header_room(code)   # show the room as the active context
+        self._select_room()                    # switch home → conversation view
+        # Enable toolbar immediately — messages are buffered until peers arrive.
+        self.msg_input.disabled  = False
+        self.btn_send.disabled   = False
+        self.btn_call.disabled   = False
+        self.btn_screen.disabled = False
+        self.btn_file.disabled   = False
         self.page.update()
         self._refresh_hub_indicator()
         await self._connect_signaling(None, room=code)
@@ -2433,11 +2448,26 @@ class HelucrypticApp:
             self._refresh_contact_list()
             self._close_dialog(menu)
 
+        is_connected = username in self.engine.pcs
+
+        def do_disconnect(e):
+            self._close_dialog(menu)
+            asyncio.ensure_future(self.engine.remove_peer(username))
+            self._log(f"[Disconnected from {username}]")
+            self._refresh_contact_list()
+            self.page.update()
+
         menu = ft.AlertDialog(
             title=ft.Text(c.nickname or username),
             content=ft.Column([
                 ft.TextButton("Rename",           on_click=do_rename),
                 ft.TextButton("View Fingerprint", on_click=do_fingerprint),
+                *([ ft.TextButton(
+                        "Disconnect",
+                        icon=ft.Icons.LINK_OFF,
+                        on_click=do_disconnect,
+                        style=ft.ButtonStyle(color=C.YELLOW),
+                    )] if is_connected else []),
                 ft.TextButton("Remove Contact",   on_click=do_remove),
             ], tight=True, spacing=0),
         )
@@ -2528,7 +2558,11 @@ class HelucrypticApp:
         if not self._room_id and not self._is_allowed(self._active_contact):
             self._block_unverified(self._active_contact)
             return
-        await self.engine.send_chat(text)
+        try:
+            await self.engine.send_chat(text)
+        except RuntimeError as ex:
+            self._toast(str(ex), "error")
+            return
         contact = self._room_id if self._room_id else self._active_contact
         if contact and not (self._ephemeral and self._room_id):  # ephemeral → memory only
             write_message(
