@@ -1,8 +1,10 @@
-import pytest
-from pathlib import Path
 import json
+
+import pytest
+
 import settings
 from settings import Settings
+
 
 @pytest.fixture(autouse=True)
 def patch_settings_dir(tmp_path, monkeypatch):
@@ -26,10 +28,10 @@ def test_save_and_load_settings():
         low_perf_mode=True
     )
     settings.save_settings(s)
-    
+
     # Check if saved to disk correctly
     assert settings._SETTINGS_PATH.exists()
-    
+
     # Load settings back
     loaded = settings.load_settings()
     assert loaded.security_mode == "dtls"
@@ -42,7 +44,7 @@ def test_load_corrupted_settings():
     # Write invalid JSON to settings file
     settings.DATA_DIR.mkdir(exist_ok=True)
     settings._SETTINGS_PATH.write_text("corrupted json string{")
-    
+
     # It should catch the exception and return default settings
     s = settings.load_settings()
     assert s.security_mode == "e2ee"
@@ -78,7 +80,7 @@ def test_load_partial_or_unknown_fields():
         "security_mode": "dtls",
         "unknown_field": "some_value"
     }))
-    
+
     s = settings.load_settings()
     # Explicitly matched fields are loaded
     assert s.security_mode == "dtls"

@@ -1,8 +1,8 @@
 import hmac
 import json
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
-from typing import Optional
+
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
 try:
     from dotenv import load_dotenv
@@ -25,7 +25,7 @@ room_of: dict[str, str]      = {}   # username → room_id
 _SERVER_TYPES = {"peer_joined", "peer_left", "room_state", "error"}
 
 
-def _password_ok(supplied: Optional[str]) -> bool:
+def _password_ok(supplied: str | None) -> bool:
     if not _EXPECTED_PASSWORD:
         return True  # no password configured → open server
     # Constant-time comparison to avoid leaking the token via timing.
@@ -36,8 +36,8 @@ def _password_ok(supplied: Optional[str]) -> bool:
 async def websocket_endpoint(
     websocket: WebSocket,
     username: str,
-    room: Optional[str] = Query(default=None),
-    password: Optional[str] = Query(default=None),
+    room: str | None = Query(default=None),
+    password: str | None = Query(default=None),
 ):
     # --- Access control (Pre-upgrade) ---
     if not _password_ok(password):

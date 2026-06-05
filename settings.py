@@ -1,10 +1,9 @@
 import json
 from dataclasses import asdict, dataclass, fields
-from pathlib import Path
 
 import config
-
 from paths import DATA_DIR, write_private_text
+
 _SETTINGS_PATH = DATA_DIR / "settings.json"
 
 # Performance profiles map a single user choice to the concrete media caps.
@@ -122,5 +121,12 @@ def save_settings(s: Settings) -> None:
 
 
 # Convenience re-export so callers can do `from settings import asdict`.
-__all__ = ["Settings", "PROFILES", "apply_profile", "profile_for_values",
-           "load_settings", "save_settings", "asdict"]
+__all__ = [
+    "PROFILES",
+    "Settings",
+    "apply_profile",
+    "asdict",
+    "load_settings",
+    "profile_for_values",
+    "save_settings",
+]

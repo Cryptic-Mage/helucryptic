@@ -9,8 +9,8 @@ forwarding) so WebRTC can bind its ICE socket to it. See
 import asyncio
 import socket
 import struct
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
 
 NATPMP_PORT = 5351
 OP_MAP_UDP = 1
@@ -84,14 +84,14 @@ def discover_gateway() -> str | None:
     return ".".join(parts[:3] + ["1"])
 
 
-def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> Optional[int]:
+def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> int | None:
     """Request UDP+TCP NAT-PMP maps; return the assigned external port.
 
     Proton requires both protocols mapped and maps the same number both
     publicly and to that same local port. Returns the UDP external port (the
     one we bind ICE to), or None if the gateway did not grant a mapping.
     """
-    def _one(opcode: int) -> Optional[int]:
+    def _one(opcode: int) -> int | None:
         pkt = encode_mapping_request(opcode, 0, 0, lifetime)
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -120,10 +120,10 @@ class PortForwardManager:
     lost so new connections fall back to normal gathering.
     """
 
-    def __init__(self, gateway: str, local_ip: Optional[str],
-                 request_fn: Callable[[str], Awaitable[Optional[int]]],
+    def __init__(self, gateway: str, local_ip: str | None,
+                 request_fn: Callable[[str], Awaitable[int | None]],
                  publish_fn: Callable[[str, list], None],
-                 clear_fn: Optional[Callable[[], None]] = None,
+                 clear_fn: Callable[[], None] | None = None,
                  renew_interval: int = 45,
                  pool_size: int = 1) -> None:
         self.gateway = gateway
@@ -133,9 +133,9 @@ class PortForwardManager:
         self._clear_fn = clear_fn or (lambda: None)
         self._interval = renew_interval
         self.pool_size = pool_size
-        self.current_port: Optional[int] = None
+        self.current_port: int | None = None
         self.current_ports: list = []
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
     async def _detect_once(self) -> None:
         ports = []

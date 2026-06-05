@@ -38,7 +38,7 @@ _FONT_FILES = {
 # primitive mappers
 # --------------------------------------------------------------------------
 
-def font_weight(numeric: int) -> "ft.FontWeight":
+def font_weight(numeric: int) -> ft.FontWeight:
     """Map a 100-900 numeric weight to the nearest Flet FontWeight enum.
 
     Uses conventional round-half-up (not Python's banker's rounding) so e.g.
@@ -52,7 +52,7 @@ def _family(logical: str) -> str:
     return tokens.FONTS.get(logical, tokens.FONTS["sans"])
 
 
-def text_style(role: str) -> "ft.TextStyle":
+def text_style(role: str) -> ft.TextStyle:
     """Build an ft.TextStyle for a named type role (e.g. 'title', 'label')."""
     spec = tokens.TYPE[role]
     return ft.TextStyle(
@@ -65,7 +65,7 @@ def text_style(role: str) -> "ft.TextStyle":
     )
 
 
-def box_shadow(level: int) -> "ft.BoxShadow | None":
+def box_shadow(level: int) -> ft.BoxShadow | None:
     """Build the ft.BoxShadow for an elevation step (0 == flat == None)."""
     step = tokens.ELEVATION[max(0, min(level, len(tokens.ELEVATION) - 1))]
     if step["blur"] == 0:
@@ -78,7 +78,7 @@ def box_shadow(level: int) -> "ft.BoxShadow | None":
     )
 
 
-def animation(speed: str = "base", curve: "ft.AnimationCurve | None" = None) -> "ft.Animation":
+def animation(speed: str = "base", curve: ft.AnimationCurve | None = None) -> ft.Animation:
     """Standard functional animation for a named motion speed."""
     return ft.Animation(tokens.MOTION[speed], curve or ft.AnimationCurve.EASE_OUT)
 
@@ -87,7 +87,7 @@ def animation(speed: str = "base", curve: "ft.AnimationCurve | None" = None) -> 
 # colour scheme + theme
 # --------------------------------------------------------------------------
 
-def color_scheme() -> "ft.ColorScheme":
+def color_scheme() -> ft.ColorScheme:
     """Map tokens onto Flet's Material ColorScheme so built-in controls
     (dialogs, dropdowns, checkboxes) inherit the palette instead of defaulting
     to stock Material — fixing the audit's dialog-inconsistency at the root."""
@@ -110,7 +110,7 @@ def color_scheme() -> "ft.ColorScheme":
     )
 
 
-def build_theme() -> "ft.Theme":
+def build_theme() -> ft.Theme:
     """The application ft.Theme built from tokens."""
     return ft.Theme(
         color_scheme=color_scheme(),
@@ -123,7 +123,7 @@ def build_theme() -> "ft.Theme":
 # page application
 # --------------------------------------------------------------------------
 
-def register_fonts(page: "ft.Page") -> None:
+def register_fonts(page: ft.Page) -> None:
     """Register bundled fonts if their files exist; otherwise no-op (graceful
     fallback to system fonts)."""
     fonts = {}
@@ -135,7 +135,7 @@ def register_fonts(page: "ft.Page") -> None:
         page.fonts = {**(getattr(page, "fonts", None) or {}), **fonts}
 
 
-def apply(page: "ft.Page") -> None:
+def apply(page: ft.Page) -> None:
     """Apply the full theme foundation to a page: fonts, dark theme, backdrop.
     Static background by design (no animated gradient / perf fork)."""
     register_fonts(page)
@@ -145,6 +145,12 @@ def apply(page: "ft.Page") -> None:
 
 
 __all__ = [
-    "font_weight", "text_style", "box_shadow", "animation",
-    "color_scheme", "build_theme", "register_fonts", "apply",
+    "animation",
+    "apply",
+    "box_shadow",
+    "build_theme",
+    "color_scheme",
+    "font_weight",
+    "register_fonts",
+    "text_style",
 ]

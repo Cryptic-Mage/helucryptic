@@ -6,14 +6,13 @@
 - F-09 group key only from the room creator
 """
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import crypto
 import secure_store
 import webrtc_engine
-
 
 # --- F-02: ephemeral DH gives an agreed, forward-secret session key ----------
 
@@ -108,12 +107,12 @@ def _engine():
 
 def test_hello_iat_fresh_accepts_now():
     e = _engine()
-    assert e._hello_iat_fresh(datetime.now(timezone.utc).isoformat())
+    assert e._hello_iat_fresh(datetime.now(UTC).isoformat())
 
 
 def test_hello_iat_fresh_rejects_old_and_garbage():
     e = _engine()
-    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=3)).isoformat()
     assert not e._hello_iat_fresh(old)
     assert not e._hello_iat_fresh("")
     assert not e._hello_iat_fresh("not-a-date")

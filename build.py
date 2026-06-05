@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 try:
+    # pyrefly: ignore [missing-import]
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
@@ -84,7 +85,7 @@ def _clean_build_dir() -> None:
                 os.chmod(os.path.join(root, f), stat.S_IWRITE)
             except Exception:
                 pass
-    for attempt in range(5):
+    for _ in range(5):
         try:
             shutil.rmtree(build_dir)
             return

@@ -5,8 +5,8 @@ By default data lives in the per-user home dir (`~/.helucryptic`). If a
 root (running from source), data instead lives in a local `data/` folder beside
 it — for USB/offline use. Existing non-portable data is never moved automatically.
 """
-import sys
 import os
+import sys
 from pathlib import Path
 
 _PORTABLE_FLAG = "portable.flag"

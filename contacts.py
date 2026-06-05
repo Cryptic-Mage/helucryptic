@@ -1,12 +1,10 @@
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+from datetime import UTC, datetime
 
 from crypto import compute_fingerprint
-
 from paths import DATA_DIR, write_private_text
+
 _CONTACTS_PATH = DATA_DIR / "contacts.json"
 
 
@@ -18,7 +16,7 @@ class Contact:
     ed25519_pub: str = ""
     fingerprint: str = ""
     verified: bool = False
-    added_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    added_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     last_seen: str = ""
 
 
@@ -54,7 +52,7 @@ def save_contacts(contacts: list[Contact]) -> None:
     _save_raw([asdict(c) for c in contacts])
 
 
-def get_contact(username: str) -> Optional[Contact]:
+def get_contact(username: str) -> Contact | None:
     return next((c for c in load_contacts() if c.username == username), None)
 
 
@@ -80,7 +78,7 @@ def upsert_contact(
             existing.ed25519_pub = ed25519_pub
         if key_changed:
             existing.verified = False
-        existing.last_seen = datetime.now(timezone.utc).isoformat()
+        existing.last_seen = datetime.now(UTC).isoformat()
         save_contacts(contacts)
         return existing
     new_contact = Contact(

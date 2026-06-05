@@ -8,13 +8,13 @@ import os
 import tempfile
 import threading
 from collections import deque
-from typing import Callable, Optional
+from collections.abc import Callable
 
-import numpy as np
 import mss
+import numpy as np
 import sounddevice as sd
-from PIL import Image
 from av import AudioFrame, VideoFrame
+from PIL import Image
 
 try:
     import cv2
@@ -24,18 +24,21 @@ except ImportError:
 # Pillow's BOX resampling is area-averaging — the equivalent of cv2.INTER_AREA
 # used for downscaling. Pillow replaces opencv here to keep the binary small.
 _BOX = getattr(Image, "Resampling", Image).BOX
+from datetime import UTC
+
 from aiortc import (
+    AudioStreamTrack,
     RTCConfiguration,
     RTCIceCandidate,
     RTCIceServer,
     RTCPeerConnection,
     RTCSessionDescription,
-    AudioStreamTrack,
     VideoStreamTrack,
 )
 from aiortc.contrib.media import MediaRelay
 
 import config
+from contacts import get_contact, upsert_contact
 from crypto import (
     derive_session_key_v2,
     generate_ephemeral_x25519,
@@ -46,8 +49,6 @@ from crypto import (
     paseto_verify,
     verify_membership_cert,
 )
-from contacts import get_contact, upsert_contact
-
 
 _STUN_SERVERS = [
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
@@ -162,19 +163,19 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
         pc.createDataChannel("probe")
         # setLocalDescription starts ICE gathering.
         await pc.setLocalDescription(await pc.createOffer())
-        
+
         # Wait for ICE gathering to complete (timeout at 8s).
         if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
             async def wait_gathering():
                 while pc.iceGatheringState != "complete":
                     await asyncio.sleep(0.05)
             await asyncio.wait_for(wait_gathering(), timeout=8.0)
-            
+
         sdp = pc.localDescription.sdp if pc.localDescription else ""
         if "typ relay" in sdp:
             return (True, "Relay reachable")
         return (False, "No relay candidate — check URL/credentials")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return (False, "Timed out contacting TURN server")
     except Exception as ex:
         return (False, f"Error: {type(ex).__name__}")
@@ -382,7 +383,7 @@ class MicrophoneTrack(AudioStreamTrack):
         frame.pts         = self._timestamp
         frame.time_base   = self._time_base
         frame.sample_rate = self._sample_rate
-        
+
         self._timestamp += frame.samples
         return frame
 
@@ -424,14 +425,14 @@ class WebRTCEngine:
         # PSK channel authentication (feature C). When room_psk is set, peers must
         # prove knowledge of the pre-shared key (HMAC challenge) BEFORE the hello
         # — a room becomes invisible to anyone without the PSK from the invite.
-        self.room_psk:             Optional[str]                = None   # base64 32-byte
+        self.room_psk:             str | None                = None   # base64 32-byte
         self._psk_authed:          dict[str, bool]              = {}
         self._psk_my_nonce:        dict[str, str]               = {}
         # Membership PKI (feature D, advisory). The creator vouches for members by
         # signing a cert; peers verify it against the creator's key but never drop
         # the connection (PSK already gates access) — they just flag membership.
-        self.room_creator_pubkey:  Optional[str]                = None   # creator ed25519 pub
-        self.my_membership_cert:   Optional[str]                = None   # our creator-signed cert
+        self.room_creator_pubkey:  str | None                = None   # creator ed25519 pub
+        self.my_membership_cert:   str | None                = None   # our creator-signed cert
         self._peer_is_member:      dict[str, bool]              = {}
         self._file_buffers:        dict[str, dict]              = {}
         self._forwarded:           dict[str, list]              = {}  # source_peer -> [(dest, sub, sub_id)]
@@ -453,37 +454,37 @@ class WebRTCEngine:
         self._incoming_audio_active: set[str] = set()  # peers whose audio we play
 
         # Group call state
-        self.group_key:             Optional[bytes] = None
+        self.group_key:             bytes | None = None
         self.is_room_creator:       bool            = False
-        self.room_id:               Optional[str]   = None
+        self.room_id:               str | None   = None
         self._pre_group_key_buffer: deque           = deque()
-        self._send_ws:              Optional[Callable] = None
+        self._send_ws:              Callable | None = None
 
         # Hub-election state
         self._cap_tier:          dict[str, int] = {}
         self._cap_epoch:         dict[str, int] = {}
         self._my_epoch:          int            = 0   # bumped in client before each hub_capability broadcast
-        self._room_creator_name: Optional[str]  = None
+        self._room_creator_name: str | None  = None
 
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
 
         # Callbacks set by client.py — on_state_change(peer, state)
-        self.on_state_change:  Optional[Callable] = None  # (peer: str, state: str)
-        self.on_message:       Optional[Callable] = None  # (sender, text, verified)
-        self.on_file_chunk:    Optional[Callable] = None
-        self.on_file_complete: Optional[Callable] = None
-        self.on_call_incoming: Optional[Callable] = None
-        self.on_call_accepted: Optional[Callable] = None
-        self.on_call_rejected: Optional[Callable] = None
-        self.on_hangup:        Optional[Callable] = None
-        self.on_video_frame:   Optional[Callable] = None  # (sender: str, img: np.ndarray)
-        self.on_video_end:     Optional[Callable] = None  # (sender: str) — incoming screen track ended
-        self.on_key_change:    Optional[Callable] = None  # (peer: str) — verified key changed
-        self.on_session_ready: Optional[Callable] = None  # (peer: str) — hello verified, channel usable
-        self.on_history_request:  Optional[Callable] = None  # (peer, room_id, since)
-        self.on_history_response: Optional[Callable] = None  # (peer, room_id, messages)
-        self.on_membership_change: Optional[Callable] = None  # (peer, is_member)
+        self.on_state_change:  Callable | None = None  # (peer: str, state: str)
+        self.on_message:       Callable | None = None  # (sender, text, verified)
+        self.on_file_chunk:    Callable | None = None
+        self.on_file_complete: Callable | None = None
+        self.on_call_incoming: Callable | None = None
+        self.on_call_accepted: Callable | None = None
+        self.on_call_rejected: Callable | None = None
+        self.on_hangup:        Callable | None = None
+        self.on_video_frame:   Callable | None = None  # (sender: str, img: np.ndarray)
+        self.on_video_end:     Callable | None = None  # (sender: str) — incoming screen track ended
+        self.on_key_change:    Callable | None = None  # (peer: str) — verified key changed
+        self.on_session_ready: Callable | None = None  # (peer: str) — hello verified, channel usable
+        self.on_history_request:  Callable | None = None  # (peer, room_id, since)
+        self.on_history_response: Callable | None = None  # (peer, room_id, messages)
+        self.on_membership_change: Callable | None = None  # (peer, is_member)
 
         # Audio playback: a single callback-driven output stream. Incoming
         # decoded frames are appended to per-peer numpy buffers; sounddevice's
@@ -643,7 +644,7 @@ class WebRTCEngine:
             self._origin_waiters[track_id] = fut
         try:
             return await asyncio.wait_for(asyncio.shield(fut), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return fallback
 
     # ------------------------------------------------------------------
@@ -680,7 +681,7 @@ class WebRTCEngine:
             print(f"[rtc] {self.my_username}: pc[{peer}] connection -> {state}", flush=True)
             if self.on_state_change:
                 self.on_state_change(peer, state)
-            
+
             # Clean up automatically when the connection fails or closes
             if state in ("closed", "failed"):
                 # Asynchronously clean up the dead peer connection
@@ -763,7 +764,7 @@ class WebRTCEngine:
     # PSK channel authentication (feature C)
     # ------------------------------------------------------------------
 
-    def set_room_psk(self, psk: Optional[str]) -> None:
+    def set_room_psk(self, psk: str | None) -> None:
         """Set (or clear with None) the room's pre-shared key. When set, every
         peer must prove knowledge of it before any identity/media is exchanged."""
         self.room_psk = psk or None
@@ -779,7 +780,7 @@ class WebRTCEngine:
             self.keys["ed25519_private"], self.keys["ed25519_public"],
             self.room_id, self.my_username, self.keys["ed25519_public"])
 
-    def set_room_creator_pubkey(self, pub: Optional[str]) -> None:
+    def set_room_creator_pubkey(self, pub: str | None) -> None:
         """Member side: trust anchor (creator's key) from the invite. Our own
         cert is unknown until the creator issues one."""
         self.room_creator_pubkey = pub or None
@@ -870,13 +871,13 @@ class WebRTCEngine:
         ).decode()
 
     async def _send_hello(self, peer: str) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
         payload = {
             "username":    self.my_username,
             "x25519_pub":  self.keys["x25519_public"],
             "ed25519_pub": self.keys["ed25519_public"],
             "eph_x25519_pub": self._ephemeral_pub(peer),
-            "iat":         datetime.now(timezone.utc).isoformat(),
+            "iat":         datetime.now(UTC).isoformat(),
         }
         token = paseto_sign(payload, self.keys["ed25519_private"], self.keys["ed25519_public"])
         hello = {"__type": "hello", "token": token}
@@ -892,14 +893,14 @@ class WebRTCEngine:
         """Defence-in-depth: reject a signed hello with an implausible timestamp."""
         if not iat:
             return False
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             ts = datetime.fromisoformat(iat)
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
         except (ValueError, TypeError):
             return False
-        skew = abs((datetime.now(timezone.utc) - ts).total_seconds())
+        skew = abs((datetime.now(UTC) - ts).total_seconds())
         return skew <= MAX_HELLO_SKEW_SECONDS
 
     async def _handle_hello(self, frame: dict, peer: str) -> None:
@@ -1037,7 +1038,7 @@ class WebRTCEngine:
         if self.on_membership_change:
             self.on_membership_change(peer, ok)
 
-    def _evaluate_membership(self, peer: str, cert: Optional[str]) -> bool:
+    def _evaluate_membership(self, peer: str, cert: str | None) -> bool:
         c = get_contact(peer)
         peer_pub = c.ed25519_pub if c else None
         ok = bool(
@@ -1463,7 +1464,7 @@ class WebRTCEngine:
         except Exception:
             pass
 
-    async def send_file(self, path: str, target: Optional[str] = None) -> None:
+    async def send_file(self, path: str, target: str | None = None) -> None:
         # Stream from disk in chunks (never load the whole file into RAM) and
         # respect the channel's send-buffer so a big file can't balloon memory
         # or stall the event loop on a weak machine.
@@ -1808,7 +1809,7 @@ class WebRTCEngine:
             )
         return self._screen_source
 
-    async def start_voice_call(self, peer: Optional[str] = None, ring: bool = True) -> None:
+    async def start_voice_call(self, peer: str | None = None, ring: bool = True) -> None:
         """Add our mic to the call with `peer`. `ring=True` means we are the one
         STARTING the call, so notify them (call_start → their phone rings).
         `ring=False` is used when ANSWERING — we add our mic but must NOT ring the
@@ -1839,7 +1840,7 @@ class WebRTCEngine:
         if ring or has_remote_audio:
             await self.request_negotiation(p)
 
-    async def start_screen_share(self, peer: Optional[str] = None) -> None:
+    async def start_screen_share(self, peer: str | None = None) -> None:
         # Screen share is VIDEO ONLY and independent of voice. To talk while
         # sharing, also start a voice call — the two streams are decoupled so one
         # never cuts the other out (and sharing won't silently hot-mic you).
@@ -1851,7 +1852,7 @@ class WebRTCEngine:
         self._screen_peers.add(p)
         await self.request_negotiation(p)
 
-    async def stop_screen_share(self, peer: Optional[str] = None) -> None:
+    async def stop_screen_share(self, peer: str | None = None) -> None:
         """Stop sharing our screen with `peer` (or everyone) WITHOUT ending the
         call: remove just the screen track and renegotiate; voice keeps flowing."""
         targets = [peer] if peer else list(self._screen_peers)
@@ -1882,7 +1883,7 @@ class WebRTCEngine:
                     pass
             await self.request_negotiation(p)
 
-    def accept_call(self, peer: Optional[str] = None) -> None:
+    def accept_call(self, peer: str | None = None) -> None:
         p  = peer or self.target_peer
         ch = self.data_channels.get(p)
         if ch and ch.readyState == "open":
@@ -1901,7 +1902,7 @@ class WebRTCEngine:
                     self.on_state_change(p, "failed")
         task.add_done_callback(call_done)
 
-    def reject_call(self, peer: Optional[str] = None) -> None:
+    def reject_call(self, peer: str | None = None) -> None:
         p  = peer or self.target_peer
         ch = self.data_channels.get(p)
         if ch and ch.readyState == "open":
@@ -1910,7 +1911,7 @@ class WebRTCEngine:
             except Exception as ex:
                 print(f"[rtc] {self.my_username}: call_reject to {p} failed: {ex}", flush=True)
 
-    def hangup(self, peer: Optional[str] = None) -> None:
+    def hangup(self, peer: str | None = None) -> None:
         # Local hangup: notify the peer(s) AND tear down our own call media.
         targets = [peer] if peer else list(self.data_channels.keys())
         for p in targets:
@@ -2104,7 +2105,7 @@ class WebRTCEngine:
             while True:
                 try:
                     img = await asyncio.wait_for(q.get(), timeout=5.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 except Exception:
                     break

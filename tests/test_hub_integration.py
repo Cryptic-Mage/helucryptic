@@ -29,19 +29,17 @@ Assertion path used: CONTROL-PLANE
 """
 
 import asyncio
-import json
-import sys
 import os
+import sys
+
 import pytest
 
 # Ensure repo root is on the path for direct imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from aiortc.mediastreams import AudioStreamTrack
-import webrtc_engine
-from webrtc_engine import WebRTCEngine
-from settings import Settings
 
+from webrtc_engine import WebRTCEngine
 
 # ---------------------------------------------------------------------------
 # Minimal settings for the test — DTLS only (no crypto keys needed for hello)

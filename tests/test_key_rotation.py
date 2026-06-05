@@ -10,7 +10,7 @@ Desired behaviour:
 - VERIFIED contact re-keys (possible MITM)         -> alert + abort, never accept
 - Garbage / tampered hello                          -> reject, no re-pin, no alert
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -49,7 +49,7 @@ def _hello_token(signer_keys, peer_eph_pub, username, claim_ed_pub=None):
         "x25519_pub": signer_keys["x25519_public"],
         "ed25519_pub": claim_ed_pub or signer_keys["ed25519_public"],
         "eph_x25519_pub": peer_eph_pub,
-        "iat": datetime.now(timezone.utc).isoformat(),
+        "iat": datetime.now(UTC).isoformat(),
     }
     return crypto.paseto_sign(
         payload, signer_keys["ed25519_private"], signer_keys["ed25519_public"]

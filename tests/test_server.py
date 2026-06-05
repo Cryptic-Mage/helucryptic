@@ -1,8 +1,12 @@
-import pytest
+# pyrefly: ignore [missing-import]
 import json
-from fastapi.testclient import TestClient
 from contextlib import ExitStack, contextmanager
+
+import pytest
+from fastapi.testclient import TestClient
+
 import server
+
 
 @contextmanager
 def patch_password(pw):
@@ -26,12 +30,13 @@ def test_signaling_websocket_connect():
         with client.websocket_connect("/ws/alice") as ws:
             assert "alice" in server.active_connections
 
-import threading
-import time
+import asyncio
 import socket
+import threading
+
 import uvicorn
 import websockets
-import asyncio
+
 
 def get_free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -71,24 +76,24 @@ async def test_password_auth():
                 break
             except Exception:
                 await asyncio.sleep(0.05)
-                
+
         try:
-            # 1. Connecting without password should raise websockets.exceptions.InvalidStatusCode (403)
-            with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
+            # 1. Connecting without password should raise websockets.exceptions.InvalidStatus (403)
+            with pytest.raises(websockets.exceptions.InvalidStatus) as exc_info:
                 async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice") as ws:
                     pass
-            assert exc_info.value.status_code == 403
+            assert exc_info.value.response.status_code == 403
 
-            # 2. Connecting with wrong password should raise websockets.exceptions.InvalidStatusCode (403)
-            with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc_info:
+            # 2. Connecting with wrong password should raise websockets.exceptions.InvalidStatus (403)
+            with pytest.raises(websockets.exceptions.InvalidStatus) as exc_info:
                 async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=wrong") as ws:
                     pass
-            assert exc_info.value.status_code == 403
+            assert exc_info.value.response.status_code == 403
 
             # 3. Connecting with correct password should succeed
             async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=CrypticKodu") as ws:
                 await ws.send(json.dumps({"target": "system", "type": "ping"}))
-                
+
         finally:
             thread.stop()
             thread.join()
@@ -115,7 +120,7 @@ def test_p2p_message_routing():
                     "data": {"sdp": "dummy sdp"}
                 }
                 ws_alice.send_json(payload)
-                
+
                 # Bob should receive the message
                 received = ws_bob.receive_json()
                 assert received["sender"] == "alice"
@@ -130,14 +135,14 @@ def test_room_join_and_state_broadcasts():
             data = ws_alice.receive_json()
             assert data["type"] == "room_state"
             assert data["peers"] == []  # Alice is first
-            
+
             # 2. Bob joins room
             with client.websocket_connect("/ws/bob?room=ROOM1") as ws_bob:
                 # Bob receives room state with Alice listed
                 bob_state = ws_bob.receive_json()
                 assert bob_state["type"] == "room_state"
                 assert "alice" in bob_state["peers"]
-                
+
                 # Alice receives notification that Bob joined
                 alice_notif = ws_alice.receive_json()
                 assert alice_notif["type"] == "peer_joined"
@@ -147,7 +152,7 @@ def test_room_capacity_limit():
     client = TestClient(server.app)
     usernames = ["user1", "user2", "user3", "user4"]
     websockets = []
-    
+
     with patch_password(""):
         with ExitStack() as stack:
             # Connect 4 users to same room
@@ -156,7 +161,7 @@ def test_room_capacity_limit():
                 # Drain the initial room_state message
                 ws.send_text(ws.receive_text())
                 websockets.append(ws)
-                
+
             # Try to connect 5th user
             with client.websocket_connect("/ws/user5?room=ROOM1") as ws_fifth:
                 # Should receive full room error
@@ -166,18 +171,18 @@ def test_room_capacity_limit():
 
 def test_peer_left_broadcast():
     client = TestClient(server.app)
-    
+
     with patch_password(""):
         # Alice and Bob join room
         with client.websocket_connect("/ws/alice?room=ROOM1") as ws_alice:
             ws_alice.receive_text()  # drain room_state
-            
+
             with client.websocket_connect("/ws/bob?room=ROOM1") as ws_bob:
                 ws_bob.receive_text()  # drain room_state
                 ws_alice.receive_text() # drain Bob joined notification
-                
+
                 # Bob exits (closes context)
-                
+
             # Alice should receive peer_left notification
             data = ws_alice.receive_json()
             assert data["type"] == "peer_left"

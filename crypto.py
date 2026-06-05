@@ -1,27 +1,26 @@
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
+import pyseto
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
     NoEncryption,
     PrivateFormat,
     PublicFormat,
 )
-import pyseto
 from pyseto import Key
 
 import secure_store
-from paths import DATA_DIR, write_private_bytes, harden_dir
+from paths import DATA_DIR, harden_dir, write_private_bytes
 
 
 def _keys_path():
@@ -55,7 +54,7 @@ def generate_and_save_keys() -> dict:
         "ed25519_public": base64.b64encode(
             e_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         ).decode(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     _save_keys(keys)
     return keys
@@ -236,7 +235,7 @@ def issue_membership_cert(
         "r":   room_id,
         "u":   member_username,
         "e":   member_ed25519_pub_b64,
-        "iat": datetime.now(timezone.utc).isoformat(),
+        "iat": datetime.now(UTC).isoformat(),
     }
     return paseto_sign(payload, creator_ed25519_priv_b64, creator_ed25519_pub_b64)
 
