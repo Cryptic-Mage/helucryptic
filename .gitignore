@@ -16,3 +16,4 @@ desktop.ini
 *.spec
 *.venv
 *.vscode
+.ruff_cache

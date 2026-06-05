@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0c10" />
+      <stop offset="100%" stop-color="#151922" />
+    </linearGradient>
+    <filter id="glow-cyan" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-violet" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    .bg { fill: url(#bg-grad); rx: 16px; stroke: #1f2833; stroke-width: 1.5; }
+    .node-text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-weight: 700; font-size: 13px; fill: #ffffff; }
+    .node-subtext { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-weight: 400; font-size: 11px; fill: #8b9bb4; }
+    .title-text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-weight: 800; font-size: 20px; fill: #00C4CC; }
+    .subtitle-text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-weight: 600; font-size: 10px; fill: #8B5CF6; letter-spacing: 2px; }
+    
+    /* Animation Timings */
+    @keyframes drawSignaling {
+      0% { stroke-dashoffset: 207; opacity: 0; }
+      5% { stroke-dashoffset: 207; opacity: 1; }
+      18% { stroke-dashoffset: 0; opacity: 1; }
+      40% { stroke-dashoffset: 0; opacity: 1; }
+      45% { stroke-dashoffset: 207; opacity: 1; }
+      48%, 100% { stroke-dashoffset: 207; opacity: 0; }
+    }
+    @keyframes flowSignaling {
+      0%, 15% { opacity: 0; stroke-dashoffset: 207; }
+      18% { opacity: 1; }
+      40% { opacity: 1; stroke-dashoffset: 0; }
+      45% { opacity: 0; stroke-dashoffset: -40; }
+      48%, 100% { opacity: 0; }
+    }
+    @keyframes drawP2P {
+      0%, 48% { stroke-dashoffset: 396; opacity: 0; }
+      55% { stroke-dashoffset: 396; opacity: 1; }
+      68% { stroke-dashoffset: 0; opacity: 1; }
+      90% { stroke-dashoffset: 0; opacity: 1; }
+      95% { stroke-dashoffset: 396; opacity: 1; }
+      98%, 100% { opacity: 0; }
+    }
+    @keyframes flowP2P {
+      0%, 68% { opacity: 0; stroke-dashoffset: 396; }
+      70% { opacity: 1; }
+      90% { opacity: 1; stroke-dashoffset: 0; }
+      95% { opacity: 0; stroke-dashoffset: -40; }
+      100% { opacity: 0; }
+    }
+    @keyframes lockState {
+      0%, 48% { opacity: 0; transform: scale(0.6); }
+      55% { opacity: 0.3; transform: scale(0.8); }
+      68% { opacity: 1; transform: scale(1.1); }
+      72%, 90% { opacity: 1; transform: scale(1); }
+      95% { opacity: 0; transform: scale(0.6); }
+      100% { opacity: 0; }
+    }
+    @keyframes glowLock {
+      0%, 68%, 95%, 100% { opacity: 0; }
+      72%, 90% { opacity: 0.7; }
+    }
+    @keyframes borderAliceBob {
+      0%, 48%, 100% { stroke: #1f2833; fill: #151922; }
+      5%, 40% { stroke: #00C4CC; fill: #0d2329; }
+      55%, 90% { stroke: #00C4CC; fill: #0d2329; }
+    }
+    @keyframes glowAliceBob {
+      0%, 48%, 100% { opacity: 0; }
+      5%, 40% { opacity: 0.35; }
+      55%, 90% { opacity: 0.65; }
+    }
+    @keyframes borderServer {
+      0%, 48%, 100% { stroke: #1f2833; fill: #151922; }
+      5%, 40% { stroke: #8B5CF6; fill: #201733; }
+    }
+    @keyframes glowServer {
+      0%, 48%, 100% { opacity: 0; }
+      5%, 40% { opacity: 0.6; }
+    }
+
+    .line-signaling {
+      stroke: #8b9bb4;
+      stroke-width: 2;
+      stroke-dasharray: 207;
+      animation: drawSignaling 8s infinite cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .line-signaling-packets {
+      stroke: #ffffff;
+      stroke-width: 2;
+      stroke-dasharray: 6 12;
+      animation: flowSignaling 8s infinite linear;
+    }
+    .line-p2p {
+      stroke: #00C4CC;
+      stroke-width: 3;
+      stroke-dasharray: 396;
+      animation: drawP2P 8s infinite cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .line-p2p-packets {
+      stroke: #ffffff;
+      stroke-width: 3;
+      stroke-dasharray: 10 18;
+      animation: flowP2P 8s infinite linear;
+    }
+
+    .center-lock {
+      animation: lockState 8s infinite cubic-bezier(0.34, 1.56, 0.64, 1);
+      transform-origin: center;
+    }
+    .lock-border { stroke: #00C4CC; stroke-width: 2.5; fill: #0b0c10; }
+    .lock-glow { animation: glowLock 8s infinite ease-in-out; }
+    
+    .node-border { stroke-width: 2; animation: borderAliceBob 8s infinite ease-in-out; }
+    .node-glow { animation: glowAliceBob 8s infinite ease-in-out; }
+    
+    .server-border { stroke-width: 2; animation: borderServer 8s infinite ease-in-out; }
+    .server-glow { animation: glowServer 8s infinite ease-in-out; }
+  </style>
+
+  <!-- Background -->
+  <rect class="bg" width="800" height="340" />
+
+  <!-- Title -->
+  <g transform="translate(40, 45)">
+    <text class="title-text" x="0" y="0">helucryptic signaling &amp; p2p loop</text>
+    <text class="subtitle-text" x="0" y="18">AUTOMATED TRAVERSAL &amp; HANDSHAKE ENGINE</text>
+  </g>
+
+  <!-- Paths / Connections -->
+  <!-- Signaling Phase Paths (Alice & Bob to Server) -->
+  <path class="line-signaling" d="M 197 208 L 370 95" />
+  <path class="line-signaling" d="M 603 208 L 430 95" />
+  
+  <path class="line-signaling-packets" d="M 197 208 L 370 95" />
+  <path class="line-signaling-packets" d="M 603 208 L 430 95" />
+
+  <!-- P2P Phase Path (Direct) -->
+  <path class="line-p2p" d="M 202 225 L 598 225" />
+  <path class="line-p2p-packets" d="M 202 225 L 598 225" />
+
+  <!-- Node: Signaling Server (Top) -->
+  <g transform="translate(400, 75)">
+    <circle class="server-glow" r="36" fill="#8B5CF6" filter="url(#glow-violet)" />
+    <circle class="server-border" r="36" />
+    <!-- Server Icon (Cloud/Tower) -->
+    <path d="M-10 8 h20 v-4 h-2 v-6 a8 8 0 0 0 -16 0 v6 h-2 z" fill="#8B5CF6" />
+    <circle cx="0" cy="-6" r="2" fill="#ffffff" />
+    <text class="node-text" x="0" y="54" text-anchor="middle">Signaling Server</text>
+    <text class="node-subtext" x="0" y="68" text-anchor="middle">ws://127.0.0.1:8000</text>
+  </g>
+
+  <!-- Node: Alice (Left) -->
+  <g transform="translate(170, 225)">
+    <circle class="node-glow" r="32" fill="#00C4CC" filter="url(#glow-cyan)" />
+    <circle class="node-border" r="32" />
+    <!-- Laptop Icon -->
+    <path d="M-12 -6 h24 v12 h-24 z M-16 8 h32 v2 h-32 z" fill="#00C4CC" />
+    <text class="node-text" x="0" y="50" text-anchor="middle">Alice (Client 1)</text>
+    <text class="node-subtext" x="0" y="64" text-anchor="middle">Port: Auto NAT-PMP</text>
+  </g>
+
+  <!-- Node: Bob (Right) -->
+  <g transform="translate(630, 225)">
+    <circle class="node-glow" r="32" fill="#00C4CC" filter="url(#glow-cyan)" />
+    <circle class="node-border" r="32" />
+    <!-- Laptop Icon -->
+    <path d="M-12 -6 h24 v12 h-24 z M-16 8 h32 v2 h-32 z" fill="#00C4CC" />
+    <text class="node-text" x="0" y="50" text-anchor="middle">Bob (Client 2)</text>
+    <text class="node-subtext" x="0" y="64" text-anchor="middle">Port: behind symmetric NAT</text>
+  </g>
+
+  <!-- Animated Secure Lock (Center) - Nested Group Design Pattern to prevent transform overrides -->
+  <g transform="translate(400, 225)">
+    <g class="center-lock">
+      <circle class="lock-glow" r="26" fill="#00C4CC" filter="url(#glow-cyan)" />
+      <circle class="lock-border" r="26" />
+      <!-- Lock Icon -->
+      <path d="M-6 -2 h12 v10 h-12 z M-4 -2 v-4 a4 4 0 0 1 8 0 v4" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" />
+      <text class="node-text" x="0" y="-34" text-anchor="middle" fill="#00C4CC">E2EE PASETO v4</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 80" width="100%" height="100%">
+  <defs>
+    <filter id="glow-violet" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    .tagline-text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-weight: 600; font-size: 13px; fill: #8b9bb4; letter-spacing: 3px; }
+    .highlight { fill: #8B5CF6; font-weight: 700; filter: url(#glow-violet); }
+    
+    @keyframes lineDrawBottom {
+      0% { stroke-dashoffset: -800; }
+      50% { stroke-dashoffset: 0; }
+      100% { stroke-dashoffset: 800; }
+    }
+    @keyframes textBreath {
+      0%, 100% { opacity: 0.6; }
+      50% { opacity: 1; fill: #ffffff; }
+    }
+
+    .cyber-line-bottom {
+      stroke: #8B5CF6;
+      stroke-width: 1.5;
+      stroke-dasharray: 200 600;
+      animation: lineDrawBottom 6s infinite linear;
+      opacity: 0.8;
+      filter: url(#glow-violet);
+    }
+    .sec-line-bottom {
+      stroke: #00C4CC;
+      stroke-width: 0.5;
+      opacity: 0.3;
+    }
+    .tagline-text {
+      animation: textBreath 4s infinite ease-in-out;
+    }
+  </style>
+
+  <!-- Top Line Decor -->
+  <line class="sec-line-bottom" x1="0" y1="5" x2="800" y2="5" />
+  <line class="cyber-line-bottom" x1="0" y1="5" x2="800" y2="5" />
+
+  <!-- Tagline Text (Centered Horizontally) -->
+  <text class="tagline-text" x="400" y="45" text-anchor="middle">YOUR CONVERSATIONS. <tspan class="highlight">NOBODY ELSE'S HARDWARE.</tspan></text>
+</svg>
