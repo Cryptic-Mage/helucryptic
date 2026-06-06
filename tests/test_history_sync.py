@@ -64,3 +64,12 @@ def test_since_excludes_other_rooms_and_filetype(db):
                           room_id="ROOM-AB12", sender="alice", filename="photo.png")
     out = history.read_room_messages_since("ROOM-AB12", None, db, "e2ee", "me")
     assert [m["content"] for m in out] == ["roomA"]  # other room + file excluded
+
+
+def test_read_since_future_watermark_returns_empty(db):
+    _write("ROOM-AB12", "received", "msg", db, sender="alice")
+    # watermark far in the future
+    future_ts = "9999-12-31T23:59:59.999999"
+    out = history.read_room_messages_since("ROOM-AB12", future_ts, db, "e2ee", "me")
+    assert out == []
+

@@ -17,5 +17,5 @@ desktop.ini
 *.venv
 *.vscode
 .ruff_cache
-.claudeignore
+.scannerwork/
 Helucryptic.spec

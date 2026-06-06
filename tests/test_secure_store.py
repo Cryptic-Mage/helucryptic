@@ -1,7 +1,7 @@
 """Dedicated tests for secure_store.py — OS-keystore protection."""
 import secure_store
 
-_MAGIC = b"HELUDPAPI1\n"
+from constants.secure_store_constants import MAGIC
 
 
 def test_available_returns_bool():
@@ -9,7 +9,7 @@ def test_available_returns_bool():
 
 
 def test_is_protected_detects_magic():
-    assert secure_store.is_protected(_MAGIC + b"data") is True
+    assert secure_store.is_protected(MAGIC + b"data") is True
 
 
 def test_is_protected_no_magic():
@@ -36,5 +36,5 @@ def test_protect_adds_magic_on_windows(monkeypatch):
     monkeypatch.setattr(secure_store, "available", lambda: True)
     data = b"test data"
     blob = secure_store.protect(data)
-    assert blob.startswith(_MAGIC)
+    assert blob.startswith(MAGIC)
     assert secure_store.is_protected(blob)

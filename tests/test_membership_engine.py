@@ -85,3 +85,46 @@ async def test_purge_clears_membership(tmp_path, monkeypatch):
     assert c.my_membership_cert is None
     assert c.room_creator_pubkey is None
     assert c._peer_is_member == {}
+
+
+def test_evaluate_membership_returns_false_when_contact_missing(tmp_path, monkeypatch):
+    ck = _keys(tmp_path, "creator", monkeypatch)
+    c = _engine("creator", ck)
+    c.adopt_creator_identity()
+    # No contact registered for "bob"
+    monkeypatch.setattr(webrtc_engine, "get_contact", lambda u: None)
+    assert c._evaluate_membership("bob", "some-cert") is False
+
+
+@pytest.mark.asyncio
+async def test_send_cert_grant_noop_for_non_creator(tmp_path, monkeypatch):
+    mk = _keys(tmp_path, "member", monkeypatch)
+    c = _engine("bob", mk)
+    c.is_room_creator = False
+    
+    sent = []
+    class _Ch:
+        readyState = "open"
+        def send(self, s): sent.append(s)
+    c.data_channels["creator"] = _Ch()
+    
+    await c._send_cert_grant("creator", "bob", mk["ed25519_public"])
+    assert sent == []  # should not send anything because bob is not the creator
+
+
+@pytest.mark.asyncio
+async def test_handle_membership_decrypts_and_evaluates(tmp_path, monkeypatch):
+    mk = _keys(tmp_path, "member", monkeypatch)
+    c = _engine("bob", mk)
+    c.session_keys["carol"] = b"key"
+    c.room_creator_pubkey = "creatorpub"
+
+    evaluated = []
+    c._evaluate_membership = lambda peer, cert: evaluated.append((peer, cert))
+    
+    # Simple frame decrypt mock or bypass decryption by using plaintext or mocking _decrypt_with_session
+    c._decrypt_with_session = lambda frame, peer: {"cert": "DECRYPTED_CERT"} if peer == "carol" else {}
+    
+    await c._handle_membership({"__type": "membership", "token": "dummy"}, "carol")
+    assert evaluated == [("carol", "DECRYPTED_CERT")]
+

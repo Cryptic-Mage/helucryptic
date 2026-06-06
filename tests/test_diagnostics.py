@@ -39,3 +39,52 @@ def test_get_diagnostics_shape_and_redaction():
     blob = repr(d).lower()
     for forbidden in ("password", "candidate", "sdp", "private", "\"p\""):
         assert forbidden not in blob
+
+
+def test_get_diagnostics_when_last_error_set():
+    e = _engine()
+    e.last_error = "Failed to connect to signaling"
+    d = e.get_diagnostics()
+    assert d["last_error"] == "Failed to connect to signaling"
+
+
+def test_get_diagnostics_hub_fallback_on_exception(monkeypatch):
+    e = _engine()
+    e.room_id = "ROOM-123"
+    # Cause current_hub to raise an exception
+    monkeypatch.setattr(e, "current_hub", lambda: exec("raise ValueError('hub error')"))
+    d = e.get_diagnostics()
+    assert d["hub"] == "?"
+
+
+def test_get_diagnostics_peer_details():
+    e = _engine()
+    # Mock a minimal peer connection
+    class DummyPC:
+        connectionState = "connected"
+        signalingState = "stable"
+        iceConnectionState = "completed"
+        iceGatheringState = "complete"
+    
+    class DummyDC:
+        readyState = "open"
+
+    e.pcs["bob"] = DummyPC()
+    e.data_channels["bob"] = DummyDC()
+    e._hello_sent["bob"] = True
+    e._peer_hello_verified["bob"] = True
+    e.session_keys["bob"] = b"key"
+
+    d = e.get_diagnostics()
+    assert d["num_peers"] == 1
+    peer_info = d["peers"][0]
+    assert peer_info["peer"] == "bob"
+    assert peer_info["connection"] == "connected"
+    assert peer_info["signaling"] == "stable"
+    assert peer_info["ice"] == "completed"
+    assert peer_info["ice_gathering"] == "complete"
+    assert peer_info["datachannel"] == "open"
+    assert peer_info["hello_sent"] is True
+    assert peer_info["hello_ok"] is True
+    assert peer_info["session_key"] is True
+

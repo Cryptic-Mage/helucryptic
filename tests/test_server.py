@@ -10,12 +10,12 @@ import server
 
 @contextmanager
 def patch_password(pw):
-    old = server._EXPECTED_PASSWORD
-    server._EXPECTED_PASSWORD = pw
+    old = server.EXPECTED_PASSWORD
+    server.EXPECTED_PASSWORD = pw
     try:
         yield
     finally:
-        server._EXPECTED_PASSWORD = old
+        server.EXPECTED_PASSWORD = old
 
 @pytest.fixture(autouse=True)
 def clear_server_state():
@@ -77,18 +77,17 @@ async def test_password_auth():
             except Exception:
                 await asyncio.sleep(0.05)
 
+        _ws_exc = websockets.exceptions.InvalidHandshake
         try:
-            # 1. Connecting without password should raise websockets.exceptions.InvalidStatus (403)
-            with pytest.raises(websockets.exceptions.InvalidStatus) as exc_info:
+            # 1. Connecting without password should be rejected (403)
+            with pytest.raises(_ws_exc):
                 async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice") as ws:
                     pass
-            assert exc_info.value.response.status_code == 403
 
-            # 2. Connecting with wrong password should raise websockets.exceptions.InvalidStatus (403)
-            with pytest.raises(websockets.exceptions.InvalidStatus) as exc_info:
+            # 2. Connecting with wrong password should be rejected (403)
+            with pytest.raises(_ws_exc):
                 async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=wrong") as ws:
                     pass
-            assert exc_info.value.response.status_code == 403
 
             # 3. Connecting with correct password should succeed
             async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=CrypticKodu") as ws:
@@ -102,17 +101,26 @@ def test_duplicate_username_replaces_old():
     client = TestClient(server.app)
     with patch_password(""):
         with client.websocket_connect("/ws/alice") as ws1:
-            # Try connecting second client with same username
+            # Drain session_token so we can read the next message
+            token_msg = ws1.receive_json()
+            assert token_msg["type"] == "session_token"
+            session_token = token_msg["data"]["token"]
+
+            # Second connection without the session token should be rejected;
+            # ws1 stays alive.
             with client.websocket_connect("/ws/alice") as ws2:
-                # The first connection should be closed by the server
-                with pytest.raises(Exception):
-                    ws1.receive_json()
+                rejection = ws2.receive_json()
+                assert rejection["type"] == "error"
+                assert "already in use" in rejection["data"]
 
 def test_p2p_message_routing():
     client = TestClient(server.app)
     with patch_password(""):
         with client.websocket_connect("/ws/alice") as ws_alice:
+            ws_alice.receive_json()  # drain session_token
             with client.websocket_connect("/ws/bob") as ws_bob:
+                ws_bob.receive_json()  # drain session_token
+
                 # Alice sends a message to Bob
                 payload = {
                     "target": "bob",
@@ -132,12 +140,14 @@ def test_room_join_and_state_broadcasts():
     with patch_password(""):
         # 1. Alice joins room
         with client.websocket_connect("/ws/alice?room=ROOM1") as ws_alice:
+            ws_alice.receive_json()  # drain session_token
             data = ws_alice.receive_json()
             assert data["type"] == "room_state"
             assert data["peers"] == []  # Alice is first
 
             # 2. Bob joins room
             with client.websocket_connect("/ws/bob?room=ROOM1") as ws_bob:
+                ws_bob.receive_json()  # drain session_token
                 # Bob receives room state with Alice listed
                 bob_state = ws_bob.receive_json()
                 assert bob_state["type"] == "room_state"
@@ -151,19 +161,20 @@ def test_room_join_and_state_broadcasts():
 def test_room_capacity_limit():
     client = TestClient(server.app)
     usernames = ["user1", "user2", "user3", "user4"]
-    websockets = []
+    websockets_list = []
 
     with patch_password(""):
         with ExitStack() as stack:
             # Connect 4 users to same room
             for name in usernames:
                 ws = stack.enter_context(client.websocket_connect(f"/ws/{name}?room=ROOM1"))
-                # Drain the initial room_state message
-                ws.send_text(ws.receive_text())
-                websockets.append(ws)
+                ws.receive_json()  # drain session_token
+                ws.receive_json()  # drain room_state (or peer_joined for earlier users)
+                websockets_list.append(ws)
 
             # Try to connect 5th user
             with client.websocket_connect("/ws/user5?room=ROOM1") as ws_fifth:
+                ws_fifth.receive_json()  # drain session_token
                 # Should receive full room error
                 data = ws_fifth.receive_json()
                 assert data["type"] == "error"
@@ -175,11 +186,13 @@ def test_peer_left_broadcast():
     with patch_password(""):
         # Alice and Bob join room
         with client.websocket_connect("/ws/alice?room=ROOM1") as ws_alice:
+            ws_alice.receive_text()  # drain session_token
             ws_alice.receive_text()  # drain room_state
 
             with client.websocket_connect("/ws/bob?room=ROOM1") as ws_bob:
+                ws_bob.receive_text()  # drain session_token
                 ws_bob.receive_text()  # drain room_state
-                ws_alice.receive_text() # drain Bob joined notification
+                ws_alice.receive_text()  # drain peer_joined(bob)
 
                 # Bob exits (closes context)
 

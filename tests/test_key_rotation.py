@@ -133,3 +133,77 @@ async def test_tampered_hello_rejected(tmp_path, monkeypatch):
     assert "bob" not in e.session_keys
     assert changed == []      # no spurious alert
     assert upserts == []      # nothing re-pinned
+
+
+@pytest.mark.asyncio
+async def test_hello_iat_wildly_skewed_rejected(tmp_path, monkeypatch):
+    e = _alice_engine(tmp_path, monkeypatch)
+    bob_keys = _real_keys(tmp_path, "bob_skewed", monkeypatch)
+    pinned = _FakeContact("bob", ed25519_pub=bob_keys["ed25519_public"], verified=False)
+    monkeypatch.setattr(webrtc_engine, "get_contact", lambda u: pinned if u == "bob" else None)
+    
+    # Sign a token but with an old iat
+    _, bob_eph_pub = crypto.generate_ephemeral_x25519()
+    payload = {
+        "username": "bob",
+        "x25519_pub": bob_keys["x25519_public"],
+        "ed25519_pub": bob_keys["ed25519_public"],
+        "eph_x25519_pub": bob_eph_pub,
+        "iat": "2020-01-01T00:00:00+00:00",
+    }
+    token = crypto.paseto_sign(
+        payload, bob_keys["ed25519_private"], bob_keys["ed25519_public"]
+    )
+    await e._handle_hello({"token": token}, "bob")
+    
+    assert e._peer_hello_verified.get("bob") is not True
+    assert "bob" not in e.session_keys
+
+
+@pytest.mark.asyncio
+async def test_hello_username_mismatch_ignored(tmp_path, monkeypatch):
+    e = _alice_engine(tmp_path, monkeypatch)
+    bob_keys = _real_keys(tmp_path, "bob_mismatch", monkeypatch)
+    pinned = _FakeContact("bob", ed25519_pub=bob_keys["ed25519_public"], verified=False)
+    monkeypatch.setattr(webrtc_engine, "get_contact", lambda u: pinned if u == "bob" else None)
+    
+    _, bob_eph_pub = crypto.generate_ephemeral_x25519()
+    # Signed payload says username is "charlie" but signaling peer is "bob"
+    payload = {
+        "username": "charlie",
+        "x25519_pub": bob_keys["x25519_public"],
+        "ed25519_pub": bob_keys["ed25519_public"],
+        "eph_x25519_pub": bob_eph_pub,
+        "iat": datetime.fromtimestamp(datetime.now().timestamp(), UTC).isoformat(),
+    }
+    token = crypto.paseto_sign(
+        payload, bob_keys["ed25519_private"], bob_keys["ed25519_public"]
+    )
+    await e._handle_hello({"token": token}, "bob")
+    
+    assert e._peer_hello_verified.get("bob") is not True
+    assert "bob" not in e.session_keys
+
+
+@pytest.mark.asyncio
+async def test_hello_missing_ephemeral_key_rejected(tmp_path, monkeypatch):
+    e = _alice_engine(tmp_path, monkeypatch)
+    bob_keys = _real_keys(tmp_path, "bob_no_eph", monkeypatch)
+    pinned = _FakeContact("bob", ed25519_pub=bob_keys["ed25519_public"], verified=False)
+    monkeypatch.setattr(webrtc_engine, "get_contact", lambda u: pinned if u == "bob" else None)
+    
+    # Payload is missing "eph_x25519_pub"
+    payload = {
+        "username": "bob",
+        "x25519_pub": bob_keys["x25519_public"],
+        "ed25519_pub": bob_keys["ed25519_public"],
+        "iat": datetime.fromtimestamp(datetime.now().timestamp(), UTC).isoformat(),
+    }
+    token = crypto.paseto_sign(
+        payload, bob_keys["ed25519_private"], bob_keys["ed25519_public"]
+    )
+    await e._handle_hello({"token": token}, "bob")
+    
+    assert e._peer_hello_verified.get("bob") is not True
+    assert "bob" not in e.session_keys
+

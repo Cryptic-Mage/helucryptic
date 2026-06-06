@@ -105,3 +105,13 @@ def test_purge_secrets_clears_senders():
     e._end_call_local("x")
     assert e._voice_senders == {}
     assert e._screen_senders == {}
+
+
+@pytest.mark.asyncio
+async def test_start_screen_share_fails_when_pc_missing():
+    e = _engine()
+    # No peer connection for 'bob' in e.pcs
+    await e.start_screen_share("bob")
+    assert "bob" not in e._screen_peers
+    assert "bob" not in e._screen_senders
+

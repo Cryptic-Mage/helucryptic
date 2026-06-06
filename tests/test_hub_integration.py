@@ -240,7 +240,6 @@ async def test_hub_star_origin_keying():
         print(f"\n[integration] BONUS: bbb._play_chunks['aaa'] has "
               f"{len(b_eng._play_chunks['aaa'])} chunk(s) — audio flow confirmed")
 
-    # ------------------------------------------------------------------
     # Teardown: close all PeerConnections
     # ------------------------------------------------------------------
     all_engines = [hub_eng, a_eng, b_eng]
@@ -250,3 +249,61 @@ async def test_hub_star_origin_keying():
                 await pc.close()
             except Exception:
                 pass
+
+
+@pytest.mark.asyncio
+async def test_router_routes_offer():
+    calls = []
+    class DummyEngine:
+        async def handle_offer(self, sender, data, ws_send):
+            calls.append(("offer", sender, data))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "offer", "data": "sdp_data"})
+    assert calls == [("offer", "alice", "sdp_data")]
+
+
+@pytest.mark.asyncio
+async def test_router_routes_answer():
+    calls = []
+    class DummyEngine:
+        async def handle_answer(self, data, sender):
+            calls.append(("answer", data, sender))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "answer", "data": "sdp_data"})
+    assert calls == [("answer", "sdp_data", "alice")]
+
+
+@pytest.mark.asyncio
+async def test_router_routes_ice_candidate():
+    calls = []
+    class DummyEngine:
+        async def handle_ice(self, data, sender):
+            calls.append(("ice", data, sender))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "ice-candidate", "data": "ice_data"})
+    assert calls == [("ice", "ice_data", "alice")]
+
+
+@pytest.mark.asyncio
+async def test_router_unregistered_target_raises_key_error():
+    engines = {}
+    ws_send = make_router(engines)("alice")
+    with pytest.raises(KeyError):
+        await ws_send({"target": "bob", "type": "offer"})
+
+
+def test_integration_settings_defaults():
+    settings = _Settings()
+    assert settings.security_mode == "dtls"
+    assert settings.turn_url == ""
+    assert settings.port_forward_enabled is False
+
