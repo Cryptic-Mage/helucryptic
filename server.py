@@ -1,6 +1,8 @@
 import hmac
 import json
 import logging
+import os
+import secrets as _secrets
 
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
@@ -26,6 +28,7 @@ app = FastAPI(title=SERVER_TITLE)
 active_connections: dict[str, WebSocket] = {}
 rooms:   dict[str, set[str]] = {}   # room_id → {username, ...}
 room_of: dict[str, str]      = {}   # username → room_id
+_session_tokens:   dict[str, str]    = {}   # username → session token (prevents impersonation)
 
 
 def _password_ok(supplied: str | None) -> bool:
@@ -188,32 +191,57 @@ async def _handle_websocket_disconnect(username: str) -> None:
         else:
             await _notify_peer_left(room_id, username)
 
-
-@app.websocket("/ws/{username}")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    username: str,
-    room: str | None = Query(default=None),
-    password: str | None = Query(default=None),
-):
-    logger.info("Incoming connection request from '%s'", username)
-    # --- Access control (Pre-upgrade) ---
+async def _authenticate_and_accept_connection(
+    websocket: WebSocket, username: str, password: str | None
+) -> bool:
     if not _password_ok(password):
         logger.warning("Access denied for user '%s' due to invalid password.", username)
         await websocket.send_denial_response(Response(status_code=403, content="Invalid server access password."))
-        return
+        return False
 
     await websocket.accept()
     logger.info("Websocket connection accepted for '%s'", username)
+    return True
+
+
+async def _verify_and_update_session(
+    websocket: WebSocket, username: str, session_token: str | None
+) -> bool:
     await _handle_stale_connection(username)
 
-    if room:
-        joined = await _handle_room_joining(websocket, username, room)
-        if not joined:
-            return
+    if username in active_connections:
+        expected = _session_tokens.get(username, "")
+        supplied = session_token or ""
+        if not (expected and hmac.compare_digest(supplied, expected)):
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "data": "Username already in use by an active session.",
+            }))
+            await websocket.close()
+            return False
+        old_ws = active_connections[username]
+        try:
+            await old_ws.close()
+        except Exception:
+            pass
+        active_connections.pop(username, None)
+        _session_tokens.pop(username, None)
+    return True
 
+
+async def _establish_connection_session(websocket: WebSocket, username: str) -> str:
+    new_token = _secrets.token_hex(32)
+    _session_tokens[username] = new_token
     active_connections[username] = websocket
 
+    await websocket.send_text(json.dumps({
+        "type": "session_token",
+        "data": {"token": new_token},
+    }))
+    return new_token
+
+
+async def _run_message_loop(websocket: WebSocket, username: str) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
@@ -229,5 +257,56 @@ async def websocket_endpoint(
         logger.info("Websocket disconnected gracefully for '%s'", username)
     except Exception as e:
         logger.exception("Websocket connection error for '%s': %s", username, e, exc_info=True)
+
+
+async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
+    # Guard against the reconnect race: if a new socket has already
+    # replaced this one, skip cleanup so we don't clobber the new state.
+    if active_connections.get(username) is websocket:
+        active_connections.pop(username, None)
+        _session_tokens.pop(username, None)
+        room_id = room_of.pop(username, None)
+        if room_id and room_id in rooms:
+            rooms[room_id].discard(username)
+            if not rooms[room_id]:
+                del rooms[room_id]
+            else:
+                for peer in list(rooms[room_id]):
+                    ws = active_connections.get(peer)
+                    if ws:
+                        try:
+                            await ws.send_text(json.dumps({
+                                "type": "peer_left",
+                                "sender": username,
+                                }))
+                        except Exception:
+                            pass
+
+
+@app.websocket("/ws/{username}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    username: str,
+    room: str | None = Query(default=None),
+    password: str | None = Query(default=None),
+    session_token: str | None = Query(default=None),
+):
+    logger.info("Incoming connection request from '%s'", username)
+
+    if not await _authenticate_and_accept_connection(websocket, username, password):
+        return
+
+    if not await _verify_and_update_session(websocket, username, session_token):
+        return
+
+    await _establish_connection_session(websocket, username)
+
+    try:
+        if room:
+            joined = await _handle_room_joining(websocket, username, room)
+            if not joined:
+                return
+
+        await _run_message_loop(websocket, username)
     finally:
-        await _handle_websocket_disconnect(username)
+        await _cleanup_connection(websocket, username)

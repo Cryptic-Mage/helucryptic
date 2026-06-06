@@ -157,6 +157,9 @@ class HelucrypticApp:
         self._session_allowed: set[str]        = set()
         # Shared access token sent to the signaling server (validated server-side).
         self._server_password: str             = HELUCRYPTIC_SERVER_PASSWORD
+        # Session token issued by the server on connect; resent on reconnect to
+        # prove we own this username slot (prevents third-party eviction).
+        self._ws_session_token: str            = ""
         # Incoming-video render throttle (per sender) + encode quality. Lower in
         # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
         self._last_tile_render: dict[str, float] = {}
@@ -1358,6 +1361,8 @@ class HelucrypticApp:
             params["room"] = room
         if self._server_password:
             params["password"] = self._server_password
+        if self._ws_session_token:
+            params["session_token"] = self._ws_session_token
         suffix = ("?" + urllib.parse.urlencode(params)) if params else ""
         base   = _to_ws_url(self.settings.signaling_url)
         url    = f"{base}/ws/{urllib.parse.quote(uname, safe='')}{suffix}"
@@ -1474,15 +1479,37 @@ class HelucrypticApp:
         await self._apply_active_call_to_hub()
         self._refresh_hub_indicator()
 
-    def _handle_sig_error(self, msg: dict, data) -> None:
-        msg_text = data if isinstance(data, str) else msg.get("error", str(data))
-        match = _re.search(r"User '(.+?)' is offline", msg_text)
-        if match and match.group(1) in self._pending_invites:
-            username = match.group(1)
-            self._pending_invites.discard(username)
-            self._toast(f"Could not invite {username} — they are offline", "warn")
-        else:
-            self._toast(msg_text, "error")
+                    elif t == "call_active":
+                        self._room_call_active = True
+                        self._log("📞 A call is active in the room — click 'Join call' to join.")
+                        self._refresh_call_controls()
+
+                    elif t == "room_invite":
+                        room_id = data.get("room_id", "")
+                        inviter = data.get("inviter", sender)
+                        self._show_room_invite_dialog(inviter, room_id)
+
+                    elif t == "session_token":
+                        self._ws_session_token = (data or {}).get("token", "")
+
+                    elif t == "presence":
+                        # Server-confirmed online set for our contacts.
+                        self._apply_presence(data.get("online", []))
+
+                    elif t == "error":
+                        msg_text = data if isinstance(data, str) else msg.get("error", str(data))
+                        match = _re.search(r"User '(.+?)' is offline", msg_text)
+                        if match and match.group(1) in self._pending_invites:
+                            username = match.group(1)
+                            self._pending_invites.discard(username)
+                            self._toast(f"Could not invite {username} — they are offline", "warn")
+                        else:
+                            self._toast(msg_text, "error")
+                except Exception as inner_ex:
+                    if "destroyed session" in str(inner_ex):
+                        print("[signaling] Session destroyed. Exiting listener.", flush=True)
+                        break
+                    print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
 
     def _cleanup_signaling_disconnect(self, ex: Exception) -> None:
         if "destroyed session" in str(ex):
