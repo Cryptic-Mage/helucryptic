@@ -1766,6 +1766,13 @@ class WebRTCEngine:
                             await self._send_group_key_to(p)
                 await self._flush_group_buffer()
 
+    async def _prune_dead_non_hub_peers(self, hub: str) -> None:
+        for peer in list(self.pcs.keys()):
+            if peer != hub:
+                pc = self.pcs.get(peer)
+                if pc and pc.connectionState in ("failed", "closed", "disconnected"):
+                    await self.remove_peer(peer)
+
     async def reconcile_room_connections(self, _members: list, ws_send) -> None:
         """Star topology: non-hub connects only to the hub; the hub waits for offers."""
         self._send_ws = ws_send
@@ -1774,11 +1781,7 @@ class WebRTCEngine:
             return  # hub is a pure responder; it answers incoming offers
 
         # Phase 1: always clean up dead connections regardless of hub status.
-        for peer in list(self.pcs.keys()):
-            if peer != hub:
-                pc = self.pcs.get(peer)
-                if pc and pc.connectionState in ("failed", "closed", "disconnected"):
-                    await self.remove_peer(peer)
+        await self._prune_dead_non_hub_peers(hub)
 
         # Phase 2: initiate a connection to the hub if we don't have one yet.
         if hub and hub != self.my_username and hub not in self.pcs:

@@ -1522,6 +1522,13 @@ class HelucrypticApp:
             pass
         self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
 
+    async def _handle_sig_connect_request(self, sender: str, ws_send) -> None:
+        upsert_contact(sender)
+        self._refresh_contact_list()
+        if not self._active_contact:
+            self.engine.target_peer = sender
+        await self.engine.add_peer(sender, ws_send)
+
     async def _handle_signaling_message(self, t: str, sender: str, data: dict, msg: dict, ws_send) -> None:
         if t == "offer":
             await self.engine.handle_offer(sender, data, ws_send)
@@ -1530,12 +1537,7 @@ class HelucrypticApp:
         elif t == "ice-candidate":
             await self.engine.handle_ice(data, sender=sender)
         elif t == "connect_request":
-            # A contact wants to start a 1-to-1 conversation with us.
-            upsert_contact(sender)
-            self._refresh_contact_list()
-            if not self._active_contact:
-                self.engine.target_peer = sender
-            await self.engine.add_peer(sender, ws_send)
+            await self._handle_sig_connect_request(sender, ws_send)
         elif t == "peer_joined":
             await self._handle_sig_peer_joined(sender, ws_send)
         elif t == "peer_left":

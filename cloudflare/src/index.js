@@ -92,13 +92,27 @@ export class SignalHub {
     const username = decodeURIComponent(parts[1] || "");
     const room = url.searchParams.get("room") || "";
     const password = url.searchParams.get("password") || "";
-    return { username, room, password };
+    const sessionToken = url.searchParams.get("session_token") || "";
+    return { username, room, password, sessionToken };
   }
 
-  _replaceExistingUserSockets(username) {
-    for (const old of this.state.getWebSockets(`user:${username}`)) {
-      try { old.close(1000, "replaced"); } catch { }
+  _evictOrRejectExisting(username, sessionToken) {
+    const existingSockets = this.state.getWebSockets(`user:${username}`);
+    if (existingSockets.length === 0) return null;
+    const expectedToken = this._sessionTokens.get(username) || "";
+    const enc = new TextEncoder();
+    const a = enc.encode(sessionToken);
+    const b = enc.encode(expectedToken);
+    const tokenOk =
+      expectedToken.length > 0 &&
+      a.byteLength === b.byteLength &&
+      crypto.subtle.timingSafeEqual(a, b);
+    if (!tokenOk) return this._rejectWS("Username already in use by an active session.");
+    for (const old of existingSockets) {
+      try { old.close(1000, "replaced"); } catch {}
     }
+    this._sessionTokens.delete(username);
+    return null;
   }
 
   _isRoomFull(room, username) {
@@ -128,47 +142,15 @@ export class SignalHub {
       return new Response("expected websocket", { status: 426 });
     }
 
-    const url = new URL(request.url);
-    const parts = url.pathname.split("/").filter(Boolean); // ["ws", "<username>"]
-    const username = decodeURIComponent(parts[1] || "");
-    const room = url.searchParams.get("room") || "";
-    const password = url.searchParams.get("password") || "";
-    const sessionToken = url.searchParams.get("session_token") || "";
+    const { username, room, password, sessionToken } = this._parseUrlParams(request);
 
     if (!username) return new Response("missing username", { status: 400 });
+    if (!this._passwordOk(password)) return this._rejectWS("Invalid server access password.");
 
-    // --- Access control --- (reject before touching any existing sockets)
-    if (!this._passwordOk(password)) {
-      return this._rejectWS("Invalid server access password.");
-    }
+    const evictionError = this._evictOrRejectExisting(username, sessionToken);
+    if (evictionError) return evictionError;
 
-    // Username uniqueness: only allow eviction if the reconnecting client proves
-    // ownership via the session token issued at their last connect. This prevents
-    // any holder of the server password from impersonating an active user.
-    const existingSockets = this.state.getWebSockets(`user:${username}`);
-    if (existingSockets.length > 0) {
-      const expectedToken = this._sessionTokens.get(username) || "";
-      const enc = new TextEncoder();
-      const a = enc.encode(sessionToken);
-      const b = enc.encode(expectedToken);
-      const tokenOk =
-        expectedToken.length > 0 &&
-        a.byteLength === b.byteLength &&
-        crypto.subtle.timingSafeEqual(a, b);
-      if (!tokenOk) {
-        return this._rejectWS("Username already in use by an active session.");
-      }
-      for (const old of existingSockets) {
-        try { old.close(1000, "replaced"); } catch {}
-      }
-      this._sessionTokens.delete(username);
-    }
-
-    // Room capacity (max 4) — count only OTHER usernames so a reconnecting
-    // member doesn't count against the limit.
-    if (this._isRoomFull(room, username)) {
-      return this._rejectWS("Room is full (max 4 participants).");
-    }
+    if (this._isRoomFull(room, username)) return this._rejectWS("Room is full (max 4 participants).");
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -178,26 +160,12 @@ export class SignalHub {
     if (room) tags.push(`room:${room}`);
     this.state.acceptWebSocket(server, tags);
 
-    // Issue a new session token so the client can prove ownership on reconnect.
     const newToken = this._generateToken();
     this._sessionTokens.set(username, newToken);
-    // Store the token in the attachment so webSocketClose can guard against
-    // clobbering a replacement socket's state (reconnect race condition).
     server.serializeAttachment({ username, room, token: newToken });
     server.send(JSON.stringify({ type: "session_token", data: { token: newToken } }));
 
-    if (room) {
-      const existing = this._roomMembers(room).filter((u) => u !== username);
-      // Notify existing members that a new peer joined.
-      for (const ws of this.state.getWebSockets()) {
-        const a = this._attach(ws);
-        if (a.room === room && a.username !== username && ws.readyState === OPEN) {
-          ws.send(JSON.stringify({ type: "peer_joined", sender: username }));
-        }
-      }
-      // Tell the joiner who is already here.
-      server.send(JSON.stringify({ type: "room_state", peers: existing }));
-    }
+    this._notifyRoomJoin(room, username, server);
 
     return new Response(null, { status: 101, webSocket: client });
   }

@@ -260,25 +260,18 @@ async def _run_message_loop(websocket: WebSocket, username: str) -> None:
 async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
     # Guard against the reconnect race: if a new socket has already
     # replaced this one, skip cleanup so we don't clobber the new state.
-    if active_connections.get(username) is websocket:
-        active_connections.pop(username, None)
-        _session_tokens.pop(username, None)
-        room_id = room_of.pop(username, None)
-        if room_id and room_id in rooms:
-            rooms[room_id].discard(username)
-            if not rooms[room_id]:
-                del rooms[room_id]
-            else:
-                for peer in list(rooms[room_id]):
-                    ws = active_connections.get(peer)
-                    if ws:
-                        try:
-                            await ws.send_text(json.dumps({
-                                "type": "peer_left",
-                                "sender": username,
-                                }))
-                        except Exception:
-                            pass
+    if active_connections.get(username) is not websocket:
+        return
+    active_connections.pop(username, None)
+    _session_tokens.pop(username, None)
+    room_id = room_of.pop(username, None)
+    if not room_id or room_id not in rooms:
+        return
+    rooms[room_id].discard(username)
+    if not rooms[room_id]:
+        del rooms[room_id]
+    else:
+        await _notify_peer_left(room_id, username)
 
 
 @app.websocket("/ws/{username}")
