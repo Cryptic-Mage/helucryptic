@@ -83,9 +83,6 @@ from settings import PROFILES, apply_profile, load_settings, save_settings
 from sounds import manager as sounds
 from theme import flet_theme
 from theme.tokens import FONTS as _t_FONTS
-from theme.tokens import MOTION as _t_MOTION
-from theme.tokens import PALETTE as _P
-from theme.tokens import RADIUS as _t_RADIUS
 from ui_state import summarize_peer_states
 from webrtc_engine import (
     WebRTCEngine,
@@ -93,199 +90,32 @@ from webrtc_engine import (
     set_forwarded_ports,
 )
 
-# ---------------------------------------------------------------------------
-# Deployment config comes from the environment / .env (see config.py), never
-# hardcoded here. Override via HELUCRYPTIC_SIGNALING_URL / _SERVER_PASSWORD.
-# ---------------------------------------------------------------------------
-HELUCRYPTIC_SERVER_URL      = config.DEFAULT_SIGNALING_URL
-HELUCRYPTIC_SERVER_PASSWORD = config.SERVER_PASSWORD
-SHARE_SCREEN_TXT            = "Share screen"
-DIAGNOSTICS_TXT             = "Connection diagnostics"
-JOIN_ROOM_TXT               = "Join room"
-
-
-# ===========================================================================
-# In-app log capture — mirror everything printed to stdout/stderr into a ring
-# buffer so the Diagnostics dialog can show it even in a windowed .exe build
-# (built with --windows-disable-console), where there is no console to read.
-# ===========================================================================
-LOG_BUFFER: "deque[str]" = deque(maxlen=1500)
-
-
-class _LogTee:
-    """Writes through to the original stream (if any) and keeps the last N
-    non-blank lines, timestamped, in LOG_BUFFER for the diagnostics view."""
-
-    def __init__(self, original):
-        self._orig = original
-
-    def write(self, s):
-        if self._orig is not None:
-            try:
-                self._orig.write(s)
-            except Exception:
-                pass
-        try:
-            for line in str(s).splitlines():
-                if line.strip():
-                    LOG_BUFFER.append(time.strftime("%H:%M:%S ") + line)
-        except Exception:
-            pass
-        return len(s) if s else 0
-
-    def flush(self):
-        if self._orig is not None:
-            try:
-                self._orig.flush()
-            except Exception:
-                pass
-
-    def isatty(self):
-        return False
-
-
-def _install_log_capture() -> None:
-    if not isinstance(sys.stdout, _LogTee):
-        sys.stdout = _LogTee(sys.stdout)
-    if not isinstance(sys.stderr, _LogTee):
-        sys.stderr = _LogTee(sys.stderr)
-
-
-def _redact_url(u: str) -> str:
-    # Use character classes to bypass static analysis false positive for hardcoded password literal
-    return _re.sub(r"([pP][aA][sS]{2}[wW][oO][rR][dD]=)[^&\s]*", r"\1<redacted>", u or "")
-
-
-# ===========================================================================
-# Neon design system — tokens, easing curves and small UI factories. Kept at
-# module scope so the file stays single-file and drop-in next to client.py.
-# ===========================================================================
-
-class C:
-    """Legacy palette names, now sourced from the unified design tokens
-    (theme.tokens.PALETTE) — the "Refined dark console" rebrand. Attribute
-    names are preserved so every existing call site re-skins unchanged.
-
-    Note: the rebrand collapses the old multi-accent scheme (cyan/magenta/
-    violet) onto a SINGLE cool accent; semantic state colours map to
-    success/warning/danger. Differentiation that previously relied on hue
-    (e.g. sent vs received bubbles) now leans on alignment, shape and labels.
-    """
-    BG       = _P.bg               # page backdrop (static)
-    BG2      = _P.surface
-    PANEL    = _P.surface          # primary panel
-    ELEV     = _P.surface_raised   # elevated surface (inputs, tiles)
-    ELEV2    = _P.surface_overlay  # hover / overlay surface
-    BORDER   = _P.border_subtle    # hairline border
-    BORDER2  = _P.border           # stronger border
-
-    CYAN     = _P.accent           # the single accent (you / sent / connect)
-    CYAN_DIM = _P.accent_subtle
-    MAGENTA  = _P.accent           # collapsed onto the single accent
-    VIOLET   = _P.accent           # collapsed onto the single accent
-
-    GREEN    = _P.success          # online / connected / verified
-    YELLOW   = _P.warning          # connecting / warning
-    RED      = _P.danger           # failed / danger
-
-    TEXT     = _P.text_primary     # primary text
-    SUBTLE   = _P.text_secondary   # secondary text
-    MUTED    = _P.text_muted       # tertiary text
-    FAINT    = _P.text_faint       # idle dot / faint lines
-    WHITE    = "#ffffff"
-    BLACK_AA = "#000000aa"
-
-    # Button foreground tokens — on-colour for each filled surface.
-    BTN_CYAN  = _P.on_accent
-    BTN_GREEN = _P.on_success
-    BTN_RED   = _P.on_danger
-
-
-class R:
-    """Corner radii — tightened for a precise, console-grade feel (from
-    theme.tokens.RADIUS). Names preserved for drop-in compatibility."""
-    SM = _t_RADIUS["sm"]    # 6
-    MD = _t_RADIUS["md"]    # 8
-    LG = _t_RADIUS["lg"]    # 12
-    XL = _t_RADIUS["lg"]    # collapsed to lg — no oversized corners
-    PILL = _t_RADIUS["pill"]
-
-
-class D:
-    """Animation durations (ms) — functional, short (from theme.tokens.MOTION)."""
-    FAST  = _t_MOTION["fast"]   # 120
-    PULSE = _t_MOTION["base"]   # 180
-    MED   = _t_MOTION["base"]   # 180
-    SLOW  = _t_MOTION["slow"]   # 260
-    BG    = _t_MOTION["slow"]   # background is static now; kept for compatibility
-
-
-_EASE     = ft.AnimationCurve.EASE_OUT
-_EASE_IO  = ft.AnimationCurve.EASE_IN_OUT
-
-
-def _anim(ms: int, curve=_EASE) -> ft.Animation:
-    return ft.Animation(ms, curve)
-
-
-def _glow(color: str = "", blur: int = 18, spread: float = 1.0) -> ft.BoxShadow:
-    """Rebrand: depth now comes from a neutral elevation shadow, not coloured
-    neon halos. Signature is kept for drop-in compatibility — the ``color`` and
-    ``spread`` arguments are intentionally ignored so every existing call site
-    works unchanged while the look becomes calm and console-grade."""
-    _ = (color, spread)
-    b = max(2, min(int(blur), 24))
-    return ft.BoxShadow(
-        blur_radius=b, spread_radius=-2,
-        offset=ft.Offset(0, max(1, b // 6)), color="#00000066",
-    )
-
-
-def _dot(color: str, size: int = 11, glow: bool = True) -> ft.Container:
-    """A glowing presence/status dot."""
-    return ft.Container(
-        width=size, height=size, border_radius=R.PILL, bgcolor=color,
-        shadow=_glow(color, blur=12, spread=1) if glow else None,
-        animate=_anim(D.MED),
-    )
-
-
-def _filled_style(bg: str = C.CYAN, fg: str = C.BTN_CYAN, radius: int = R.MD,
-                  pad_h: int = 16, pad_v: int = 12) -> ft.ButtonStyle:
-    return ft.ButtonStyle(
-        bgcolor={"": bg},
-        color={"": fg},
-        shape=ft.RoundedRectangleBorder(radius=radius),
-        padding=ft.Padding.symmetric(horizontal=pad_h, vertical=pad_v),
-    )
-
-
-def _ghost_style(color: str = C.SUBTLE, radius: int = R.SM) -> ft.ButtonStyle:
-    return ft.ButtonStyle(
-        color={"": color},
-        shape=ft.RoundedRectangleBorder(radius=radius),
-        padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-    )
-
-
-def _neon_field(**kwargs) -> ft.TextField:
-    """A TextField styled for the neon theme. Accepts/overrides any TextField kwarg."""
-    base = {
-        "dense": True,
-        "border_color": C.BORDER2,
-        "focused_border_color": C.CYAN,
-        "cursor_color": C.CYAN,
-        "color": C.TEXT,
-        "bgcolor": C.ELEV,
-        "border_radius": R.MD,
-        "text_size": 13,
-        "content_padding": ft.Padding.symmetric(horizontal=12, vertical=10),
-        "focused_border_width": 2,
-        "label_style": ft.TextStyle(color=C.MUTED, size=12),
-        "hint_style": ft.TextStyle(color=C.FAINT, size=12),
-    }
-    base.update(kwargs)
-    return ft.TextField(**base)
+from constants.client_constants import (
+    HELUCRYPTIC_SERVER_URL,
+    HELUCRYPTIC_SERVER_PASSWORD,
+    SHARE_SCREEN_TXT,
+    DIAGNOSTICS_TXT,
+    JOIN_ROOM_TXT,
+    LOAD_MORE_TXT,
+    SCHEME_HTTPS,
+    SCHEME_HTTP,
+    SCHEME_WSS,
+    SCHEME_WS,
+    LOG_BUFFER,
+    _install_log_capture,
+    _redact_url,
+    C,
+    R,
+    D,
+    _EASE,
+    _EASE_IO,
+    _anim,
+    _glow,
+    _dot,
+    _filled_style,
+    _ghost_style,
+    _neon_field,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1589,130 +1419,139 @@ class HelucrypticApp:
                 data   = msg.get("data") or {}
 
                 try:
-                    if t == "offer":
-                        await self.engine.handle_offer(sender, data, ws_send)
-
-                    elif t == "answer":
-                        await self.engine.handle_answer(data, sender=sender)
-
-                    elif t == "ice-candidate":
-                        await self.engine.handle_ice(data, sender=sender)
-
-                    elif t == "connect_request":
-                        # A contact wants to start a 1-to-1 conversation with us.
-                        upsert_contact(sender)
-                        self._refresh_contact_list()
-                        if not self._active_contact:
-                            self.engine.target_peer = sender
-                        await self.engine.add_peer(sender, ws_send)
-
-                    elif t == "peer_joined":
-                        self._room_peers[sender] = "connecting"
-                        self._refresh_participant_list()
-                        await self._broadcast_capability(ws_send)
-                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
-                        await self._apply_active_call_to_hub()
-                        self._refresh_hub_indicator()
-                        if self._in_voice_call or self._in_screen_share:
-                            await self._broadcast_call_active(ws_send)
-
-                    elif t == "peer_left":
-                        self._room_peers.pop(sender, None)
-                        self._refresh_participant_list()
-                        await self.engine.remove_peer(sender)
-                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
-                        self._remove_video_tile(sender)
-                        await self._apply_active_call_to_hub()
-                        self._refresh_hub_indicator()
-
-                    elif t == "room_state":
-                        # Server sends `peers` at the top level of the message
-                        # (like `sender` for peer_joined), NOT nested under `data`.
-                        for peer in msg.get("peers", []):
-                            self._room_peers[peer] = "connecting"
-                        self._refresh_participant_list()
-                        await self._broadcast_capability(ws_send)
-                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
-                        await self._apply_active_call_to_hub()
-                        self._refresh_hub_indicator()
-                        # Server confirmed we're in the room — restore the toolbar
-                        # immediately so users can interact even before peers connect.
-                        self.msg_input.disabled  = False
-                        self.btn_send.disabled   = False
-                        self.btn_call.disabled   = False
-                        self.btn_screen.disabled = False
-                        self.btn_file.disabled   = False
-                        self.page.update()
-
-                    elif t == "hub_capability":
-                        self.engine.record_capability(sender, data.get("tier", 0), data.get("epoch", 0))
-                        if data.get("creator"):
-                            self.engine.set_room_creator(sender)
-                        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
-                        await self._apply_active_call_to_hub()
-                        self._refresh_hub_indicator()
-
-                    elif t == "call_active":
-                        self._room_call_active = True
-                        self._log("📞 A call is active in the room — click 'Join call' to join.")
-                        self._refresh_call_controls()
-
-                    elif t == "room_invite":
-                        room_id = data.get("room_id", "")
-                        inviter = data.get("inviter", sender)
-                        self._show_room_invite_dialog(inviter, room_id)
-
-                    elif t == "presence":
-                        # Server-confirmed online set for our contacts.
-                        self._apply_presence(data.get("online", []))
-
-                    elif t == "error":
-                        msg_text = data if isinstance(data, str) else msg.get("error", str(data))
-                        match = _re.search(r"User '(.+?)' is offline", msg_text)
-                        if match and match.group(1) in self._pending_invites:
-                            username = match.group(1)
-                            self._pending_invites.discard(username)
-                            self._toast(f"Could not invite {username} — they are offline", "warn")
-                        else:
-                            self._toast(msg_text, "error")
+                    await self._handle_signaling_message(t, sender, data, msg, ws_send)
                 except Exception as inner_ex:
                     if "destroyed session" in str(inner_ex):
                         print("[signaling] Session destroyed. Exiting listener.", flush=True)
                         break
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
-
         except Exception as ex:
-            if "destroyed session" in str(ex):
-                return
-            try:
-                self._toast(f"Disconnected from signaling: {ex}", "error")
-                self._update_status("IDLE", C.FAINT)
-                self._clear_all_video()
-            except Exception:
-                pass
-            for _peer in list(self.engine.pcs):
-                self._fire_and_forget(self.engine.remove_peer(_peer))
-            # Wipe stale peer state so reconnect gets a clean slate (otherwise
-            # reconcile_room_connections sees phantom "connected" entries).
-            self._room_peers.clear()
-            try:
-                self._refresh_participant_list()
-            except Exception:
-                pass
-            # Grey out the toolbar — re-enabled when room_state confirms we're
-            # back in the room, or when a peer reaches "connected".
-            try:
-                self.msg_input.disabled  = True
-                self.btn_send.disabled   = True
-                self.btn_call.disabled   = True
-                self.btn_screen.disabled = True
-                self.btn_file.disabled   = True
-                self.btn_mute.disabled   = True
-                self.btn_hangup.disabled = True
-                self.page.update()
-            except Exception:
-                pass
-            self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
+            self._cleanup_signaling_disconnect(ex)
+
+    async def _handle_sig_peer_joined(self, sender: str, ws_send) -> None:
+        self._room_peers[sender] = "connecting"
+        self._refresh_participant_list()
+        await self._broadcast_capability(ws_send)
+        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+        await self._apply_active_call_to_hub()
+        self._refresh_hub_indicator()
+        if self._in_voice_call or self._in_screen_share:
+            await self._broadcast_call_active(ws_send)
+
+    async def _handle_sig_peer_left(self, sender: str, ws_send) -> None:
+        self._room_peers.pop(sender, None)
+        self._refresh_participant_list()
+        await self.engine.remove_peer(sender)
+        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+        self._remove_video_tile(sender)
+        await self._apply_active_call_to_hub()
+        self._refresh_hub_indicator()
+
+    async def _handle_sig_room_state(self, msg: dict, ws_send) -> None:
+        # Server sends `peers` at the top level of the message
+        # (like `sender` for peer_joined), NOT nested under `data`.
+        for peer in msg.get("peers", []):
+            self._room_peers[peer] = "connecting"
+        self._refresh_participant_list()
+        await self._broadcast_capability(ws_send)
+        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+        await self._apply_active_call_to_hub()
+        self._refresh_hub_indicator()
+        # Server confirmed we're in the room — restore the toolbar
+        # immediately so users can interact even before peers connect.
+        self.msg_input.disabled  = False
+        self.btn_send.disabled   = False
+        self.btn_call.disabled   = False
+        self.btn_screen.disabled = False
+        self.btn_file.disabled   = False
+        self.page.update()
+
+    async def _handle_sig_hub_capability(self, sender: str, data: dict, ws_send) -> None:
+        self.engine.record_capability(sender, data.get("tier", 0), data.get("epoch", 0))
+        if data.get("creator"):
+            self.engine.set_room_creator(sender)
+        await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
+        await self._apply_active_call_to_hub()
+        self._refresh_hub_indicator()
+
+    def _handle_sig_error(self, msg: dict, data) -> None:
+        msg_text = data if isinstance(data, str) else msg.get("error", str(data))
+        match = _re.search(r"User '(.+?)' is offline", msg_text)
+        if match and match.group(1) in self._pending_invites:
+            username = match.group(1)
+            self._pending_invites.discard(username)
+            self._toast(f"Could not invite {username} — they are offline", "warn")
+        else:
+            self._toast(msg_text, "error")
+
+    def _cleanup_signaling_disconnect(self, ex: Exception) -> None:
+        if "destroyed session" in str(ex):
+            return
+        try:
+            self._toast(f"Disconnected from signaling: {ex}", "error")
+            self._update_status("IDLE", C.FAINT)
+            self._clear_all_video()
+        except Exception:
+            pass
+        for _peer in self.engine.pcs:
+            self._fire_and_forget(self.engine.remove_peer(_peer))
+        # Wipe stale peer state so reconnect gets a clean slate (otherwise
+        # reconcile_room_connections sees phantom "connected" entries).
+        self._room_peers.clear()
+        try:
+            self._refresh_participant_list()
+        except Exception:
+            pass
+        # Grey out the toolbar — re-enabled when room_state confirms we're
+        # back in the room, or when a peer reaches "connected".
+        try:
+            self.msg_input.disabled  = True
+            self.btn_send.disabled   = True
+            self.btn_call.disabled   = True
+            self.btn_screen.disabled = True
+            self.btn_file.disabled   = True
+            self.btn_mute.disabled   = True
+            self.btn_hangup.disabled = True
+            self.page.update()
+        except Exception:
+            pass
+        self._purge_ephemeral()   # auto-destruct an ephemeral room on ws close
+
+    async def _handle_signaling_message(self, t: str, sender: str, data: dict, msg: dict, ws_send) -> None:
+        if t == "offer":
+            await self.engine.handle_offer(sender, data, ws_send)
+        elif t == "answer":
+            await self.engine.handle_answer(data, sender=sender)
+        elif t == "ice-candidate":
+            await self.engine.handle_ice(data, sender=sender)
+        elif t == "connect_request":
+            # A contact wants to start a 1-to-1 conversation with us.
+            upsert_contact(sender)
+            self._refresh_contact_list()
+            if not self._active_contact:
+                self.engine.target_peer = sender
+            await self.engine.add_peer(sender, ws_send)
+        elif t == "peer_joined":
+            await self._handle_sig_peer_joined(sender, ws_send)
+        elif t == "peer_left":
+            await self._handle_sig_peer_left(sender, ws_send)
+        elif t == "room_state":
+            await self._handle_sig_room_state(msg, ws_send)
+        elif t == "hub_capability":
+            await self._handle_sig_hub_capability(sender, data, ws_send)
+        elif t == "call_active":
+            self._room_call_active = True
+            self._log("📞 A call is active in the room — click 'Join call' to join.")
+            self._refresh_call_controls()
+        elif t == "room_invite":
+            room_id = data.get("room_id", "")
+            inviter = data.get("inviter", sender)
+            self._show_room_invite_dialog(inviter, room_id)
+        elif t == "presence":
+            # Server-confirmed online set for our contacts.
+            self._apply_presence(data.get("online", []))
+        elif t == "error":
+            self._handle_sig_error(msg, data)
     # ------------------------------------------------------------------
     # Room management
     # ------------------------------------------------------------------
@@ -2068,14 +1907,14 @@ class HelucrypticApp:
         if not self._room_id:
             return
         payload = self.engine.capability_payload()
-        for peer in list(self._room_peers):
+        for peer in self._room_peers:
             await ws_send({"target": peer, "type": "hub_capability", "data": payload})
 
     async def _broadcast_call_active(self, ws_send) -> None:
         """Tell every room peer that a call is currently active in this room."""
         if not self._room_id:
             return
-        for peer in list(self._room_peers):
+        for peer in self._room_peers:
             await ws_send({"target": peer, "type": "call_active", "data": {}})
 
     def _refresh_call_controls(self) -> None:
@@ -2221,35 +2060,48 @@ class HelucrypticApp:
             alignment=ft.Alignment.CENTER, gradient=self._avatar_gradient(verified),
         )
 
-    def _contact_card(self, c) -> ft.Container:
-        display   = c.nickname or c.username
-        is_active = c.username == self._active_contact and not self._room_id
-        is_online = self._is_contact_online(c.username)
-        verified  = c.verified if self.settings.security_mode == "e2ee" else False
+    def _contact_card_avatar(self, display: str, verified: bool, is_online: bool) -> ft.Stack:
         dot_color = C.GREEN if is_online else C.FAINT
-
-        avatar = ft.Stack([
+        shadow_val = _glow(dot_color, blur=8, spread=0) if is_online else None
+        return ft.Stack([
             self._avatar(display, verified, 34),
             ft.Container(
                 width=11, height=11, border_radius=R.PILL, bgcolor=dot_color,
                 border=ft.Border.all(2, C.PANEL), right=0, bottom=0,
-                shadow=_glow(dot_color, blur=8, spread=0) if is_online else None,
+                shadow=shadow_val,
             ),
         ], width=34, height=34)
 
+    def _contact_card_name(self, display: str, is_active: bool, verified: bool) -> ft.Row:
         badge = self._verify_badge(verified)
-        name = ft.Row(
+        text_color = C.TEXT if is_active else C.SUBTLE
+        text_weight = ft.FontWeight.W_700 if is_active else ft.FontWeight.W_500
+        return ft.Row(
             [
                 ft.Text(display, size=13,
-                        color=C.TEXT if is_active else C.SUBTLE,
-                        weight=ft.FontWeight.W_700 if is_active else ft.FontWeight.W_500,
+                        color=text_color,
+                        weight=text_weight,
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 *([badge] if badge else []),
             ],
             spacing=4, tight=True,
         )
-        wifi = ft.Icon(ft.Icons.WIFI if is_online else ft.Icons.WIFI_OFF,
-                       color=C.GREEN if is_online else C.FAINT, size=15)
+
+    def _contact_card_wifi(self, is_online: bool) -> ft.Icon:
+        icon_name = ft.Icons.WIFI if is_online else ft.Icons.WIFI_OFF
+        icon_color = C.GREEN if is_online else C.FAINT
+        return ft.Icon(icon_name, color=icon_color, size=15)
+
+    def _contact_card(self, c) -> ft.Container:
+        display   = c.nickname or c.username
+        is_active = c.username == self._active_contact and not self._room_id
+        is_online = self._is_contact_online(c.username)
+        verified  = c.verified if self.settings.security_mode == "e2ee" else False
+
+        avatar = self._contact_card_avatar(display, verified, is_online)
+        name = self._contact_card_name(display, is_active, verified)
+        wifi = self._contact_card_wifi(is_online)
+
         btn_menu = ft.IconButton(
             ft.Icons.MORE_VERT, icon_size=14, icon_color=C.FAINT,
             tooltip="Contact options",
@@ -2258,13 +2110,14 @@ class HelucrypticApp:
         )
 
         base_bg = C.CYAN + "1a" if is_active else C.ELEV + "00"
+        border_color = C.CYAN if is_active else C.ELEV + "00"
         tile = ft.Container(
             content=ft.Row([avatar, name, ft.Container(expand=True), wifi, btn_menu],
                            spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=base_bg,
             padding=ft.Padding.symmetric(horizontal=8, vertical=7),
             border_radius=R.MD,
-            border=ft.Border.all(1, C.CYAN if is_active else C.ELEV + "00"),
+            border=ft.Border.all(1, border_color),
             on_click=lambda e, u=c.username: self._select_contact(u),
             on_long_press=lambda e, u=c.username: self._show_contact_menu(u),
             animate=_anim(D.FAST), ink=True,
@@ -2566,7 +2419,7 @@ class HelucrypticApp:
         )
         self._bulk_load = True
         if self._history_offset > 0 and self.chat_log.controls:
-            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == "Load more…":
+            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == LOAD_MORE_TXT:
                 self.chat_log.controls.pop(0)
 
         bubbles = []
@@ -2582,7 +2435,7 @@ class HelucrypticApp:
             def load_more(e):
                 self._load_more_history()
                 self.page.update()
-            self.chat_log.controls.insert(0, ft.TextButton("Load more…", on_click=load_more))
+            self.chat_log.controls.insert(0, ft.TextButton(LOAD_MORE_TXT, on_click=load_more))
 
     def _select_room(self) -> None:
         if not self._room_id:
@@ -2601,7 +2454,7 @@ class HelucrypticApp:
         )
         self._bulk_load = True
         if self._history_offset > 0 and self.chat_log.controls:
-            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == "Load more…":
+            if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == LOAD_MORE_TXT:
                 self.chat_log.controls.pop(0)
 
         bubbles = []
@@ -2617,7 +2470,7 @@ class HelucrypticApp:
             def load_more(e):
                 self._load_more_room_history()
                 self.page.update()
-            self.chat_log.controls.insert(0, ft.TextButton("Load more…", on_click=load_more))
+            self.chat_log.controls.insert(0, ft.TextButton(LOAD_MORE_TXT, on_click=load_more))
 
     # ------------------------------------------------------------------
     # Chat
@@ -2731,7 +2584,32 @@ class HelucrypticApp:
     # Calls & screen share
     # ------------------------------------------------------------------
 
+    async def _start_room_call(self) -> None:
+        hub = self.engine.current_hub()
+        self._log(f"[Voice Call] Starting room call. Hub: {hub}")
+        if hub == self.engine.my_username:
+            # We are the hub: send our mic to every connected member.
+            for peer in self.engine.pcs:
+                if self.engine.pcs[peer].connectionState == "connected":
+                    await self.engine.start_voice_call(peer)
+        elif hub and self.engine.pcs.get(hub):
+            # Non-hub: send our mic only to the hub; it fans out to the others.
+            await self.engine.start_voice_call(hub)
+
+    async def _start_direct_call(self, ws_send) -> bool:
+        if not self._active_contact:
+            return False
+        self._log(f"[Voice Call] Starting direct call with {self._active_contact}")
+        if not self._is_allowed(self._active_contact):
+            self._block_unverified(self._active_contact)
+            return False
+        if not self.engine.pcs.get(self._active_contact):
+            await self.engine.create_offer(self._active_contact, ws_send)
+        await self.engine.start_voice_call(self._active_contact)
+        return True
+
     async def _start_call(self, e) -> None:
+        _ = e
         if not self.ws:
             return
 
@@ -2740,24 +2618,11 @@ class HelucrypticApp:
 
         try:
             if self._room_id:
-                hub = self.engine.current_hub()
-                if hub == self.engine.my_username:
-                    # We are the hub: send our mic to every connected member.
-                    for peer in list(self.engine.pcs):
-                        if self.engine.pcs[peer].connectionState == "connected":
-                            await self.engine.start_voice_call(peer)
-                elif hub and self.engine.pcs.get(hub):
-                    # Non-hub: send our mic only to the hub; it fans out to the others.
-                    await self.engine.start_voice_call(hub)
+                await self._start_room_call()
             else:
-                if not self._active_contact:
+                ok = await self._start_direct_call(ws_send)
+                if not ok:
                     return
-                if not self._is_allowed(self._active_contact):
-                    self._block_unverified(self._active_contact)
-                    return
-                if not self.engine.pcs.get(self._active_contact):
-                    await self.engine.create_offer(self._active_contact, ws_send)
-                await self.engine.start_voice_call(self._active_contact)
         except Exception as ex:
             self._log(f"[Error] Failed to start voice call: {ex}")
             self._toast("Could not access microphone. Please check your audio settings or permissions.", "error")
@@ -2773,8 +2638,30 @@ class HelucrypticApp:
         self._update_call_status(True)
         self.page.update()
 
+    async def _start_room_screen(self) -> None:
+        hub = self.engine.current_hub()
+        self._log(f"[Screen Share] Starting room screen share. Hub: {hub}")
+        if hub == self.engine.my_username:
+            for peer in self.engine.pcs:
+                if self.engine.pcs[peer].connectionState == "connected":
+                    await self.engine.start_screen_share(peer)
+        elif hub and self.engine.pcs.get(hub):
+            await self.engine.start_screen_share(hub)
+
+    async def _start_direct_screen(self, ws_send) -> bool:
+        if not self._active_contact:
+            return False
+        self._log(f"[Screen Share] Starting direct screen share with {self._active_contact}")
+        if not self._is_allowed(self._active_contact):
+            self._block_unverified(self._active_contact)
+            return False
+        if not self.engine.pcs.get(self._active_contact):
+            await self.engine.create_offer(self._active_contact, ws_send)
+        await self.engine.start_screen_share(self._active_contact)
+        return True
+
     async def _start_screen(self, e) -> None:
-        if e: pass
+        _ = e
         if not self.ws:
             return
 
@@ -2782,22 +2669,11 @@ class HelucrypticApp:
             await self.ws.send(json.dumps(payload))
 
         if self._room_id:
-            hub = self.engine.current_hub()
-            if hub == self.engine.my_username:
-                for peer in list(self.engine.pcs):
-                    if self.engine.pcs[peer].connectionState == "connected":
-                        await self.engine.start_screen_share(peer)
-            elif hub and self.engine.pcs.get(hub):
-                await self.engine.start_screen_share(hub)
+            await self._start_room_screen()
         else:
-            if not self._active_contact:
+            ok = await self._start_direct_screen(ws_send)
+            if not ok:
                 return
-            if not self._is_allowed(self._active_contact):
-                self._block_unverified(self._active_contact)
-                return
-            if not self.engine.pcs.get(self._active_contact):
-                await self.engine.create_offer(self._active_contact, ws_send)
-            await self.engine.start_screen_share(self._active_contact)
 
         self._in_screen_share = True
         if self._room_id:
@@ -2821,7 +2697,7 @@ class HelucrypticApp:
     async def _stop_screen(self) -> None:
         # Stop just the screen track — voice (if any) keeps flowing.
         if self._room_id:
-            for peer in list(self.engine.pcs):
+            for peer in self.engine.pcs:
                 await self.engine.stop_screen_share(peer)
         else:
             await self.engine.stop_screen_share(self._active_contact)
@@ -3313,7 +3189,7 @@ class HelucrypticApp:
                     await self.ws.close()
                 except Exception:
                     pass
-            for p in list(self.engine.pcs):
+            for p in self.engine.pcs:
                 try:
                     await self.engine.remove_peer(p)
                 except Exception:
@@ -3400,50 +3276,47 @@ class HelucrypticApp:
         )
         self._show_dialog(dlg)
 
+    def _render_diagnostics_state(self) -> str:
+        d = self.engine.get_diagnostics()
+        lines = [
+            "helucryptic — client_claude",
+            f"Data dir   : {paths.DATA_DIR}"
+            + ("  (portable)" if paths.is_portable() else ""),
+            f"Signaling  : {d['signaling']}",
+            f"Server URL : {_redact_url(self.settings.signaling_url)}",
+            f"Username   : {d['my_username'] or '(not set)'}",
+            f"Security   : {d['security_mode']}",
+            f"Room       : {d['room_id'] or '(none)'}"
+            + (f'   hub={d["hub"] or "?"}' if d["room_id"] else ""),
+            f"TURN       : {'configured' if d['turn_configured'] else 'not configured'}",
+            f"Peers      : {d['num_peers']}",
+            f"Last error : {d['last_error'] or '(none)'}",
+            "",
+            "Peer connections:",
+        ]
+        if not d["peers"]:
+            lines.append("  (none)")
+        for p in d["peers"]:
+            ok = "OK" if (p["hello_ok"] and p["session_key"]) else "…"
+            lines.append(f"  • {p['peer']}  [{ok}]")
+            lines.append(f"      conn={p['connection']}   signaling={p['signaling']}")
+            lines.append(f"      ice={p['ice']}   gathering={p['ice_gathering']}   dc={p['datachannel']}")
+            lines.append(f"      hello_sent={p['hello_sent']}  hello_ok={p['hello_ok']}  session_key={p['session_key']}")
+        return "\n".join(lines)
+
+    def _render_diagnostics_log(self) -> str:
+        return "\n".join(list(LOG_BUFFER)[-300:]) or "(no log captured yet)"
+
     def _show_diagnostics(self, e) -> None:
         self._diag_open = True
         body = ft.Text("", size=12, color=C.TEXT, selectable=True, font_family="monospace")
         logview = ft.Text("", size=11, color=C.SUBTLE, selectable=True, font_family="monospace")
 
-        def render_state() -> str:
-            d = self.engine.get_diagnostics()
-            lines = [
-                "helucryptic — client_claude",
-                f"Data dir   : {paths.DATA_DIR}"
-                + ("  (portable)" if paths.is_portable() else ""),
-                f"Signaling  : {d['signaling']}",
-                f"Server URL : {_redact_url(self.settings.signaling_url)}",
-                f"Username   : {d['my_username'] or '(not set)'}",
-                f"Security   : {d['security_mode']}",
-                f"Room       : {d['room_id'] or '(none)'}"
-                + (f'   hub={d["hub"] or "?"}' if d["room_id"] else ""),
-                f"TURN       : {'configured' if d['turn_configured'] else 'not configured'}",
-                f"Peers      : {d['num_peers']}",
-                f"Last error : {d['last_error'] or '(none)'}",
-                "",
-                "Peer connections:",
-            ]
-            if not d["peers"]:
-                lines.append("  (none)")
-            for p in d["peers"]:
-                ok = "OK" if (p["hello_ok"] and p["session_key"]) else "…"
-                lines.append(f"  • {p['peer']}  [{ok}]")
-                lines.append(f"      conn={p['connection']}   signaling={p['signaling']}")
-                lines.append(f"      ice={p['ice']}   gathering={p['ice_gathering']}   dc={p['datachannel']}")
-                lines.append(f"      hello_sent={p['hello_sent']}  hello_ok={p['hello_ok']}  session_key={p['session_key']}")
-            return "\n".join(lines)
-
-        def render_log() -> str:
-            return "\n".join(list(LOG_BUFFER)[-300:]) or "(no log captured yet)"
-
-        body.value = render_state()
-        logview.value = render_log()
-
         async def refresh_loop():
             while self._diag_open:
                 try:
-                    body.value = render_state()
-                    logview.value = render_log()
+                    body.value = self._render_diagnostics_state()
+                    logview.value = self._render_diagnostics_log()
                     body.update()
                     logview.update()
                 except Exception:
@@ -3451,12 +3324,15 @@ class HelucrypticApp:
                 await asyncio.sleep(1)
 
         def copy_all(ev):
-            self.page.clipboard.set(render_state() + "\n\n===== LOG =====\n" + render_log())
+            self.page.clipboard.set(self._render_diagnostics_state() + "\n\n===== LOG =====\n" + self._render_diagnostics_log())
             self._log("Diagnostics + log copied to clipboard.")
 
         def close(ev):
             self._diag_open = False
             self._close_dialog(dlg)
+
+        body.value = self._render_diagnostics_state()
+        logview.value = self._render_diagnostics_log()
 
         dlg = ft.AlertDialog(
             title=ft.Text(DIAGNOSTICS_TXT),
@@ -3489,7 +3365,7 @@ class HelucrypticApp:
             return
         rid = self._room_id
         self.chat_log.controls.clear()
-        for sender in list(self._video_tiles):
+        for sender in self._video_tiles:
             self._remove_video_tile(sender)
         if self._tile_row is not None:
             self._tile_row.controls.clear()
@@ -3517,7 +3393,7 @@ class HelucrypticApp:
         for t in self._bg_tasks:
             t.cancel()
         self._bg_tasks = []
-        for t in list(self._running_tasks):
+        for t in self._running_tasks:
             t.cancel()
         self._running_tasks.clear()
         self._diag_open = False
@@ -3532,7 +3408,7 @@ class HelucrypticApp:
                 await self.ws.close()
             except Exception:
                 pass
-        for p in list(self.engine.pcs):
+        for p in self.engine.pcs:
             try:
                 await self.engine.remove_peer(p)
             except Exception:
@@ -3544,15 +3420,175 @@ class HelucrypticApp:
         except Exception as ex:
             print(f"[profile] switch failed: {ex}", flush=True)
             return
-        pw = self._server_password
-        self.page.controls.clear()
+
+    def _settings_on_retention_change(self, ev) -> None:
+        self._settings_custom_days.visible = self._settings_retention_dd.value == "custom"
+        self._settings_custom_error.visible = False
         self.page.update()
-        app = HelucrypticApp(self.page)
-        app._server_password = pw
-        app._refresh_contact_list()
+
+    def _settings_on_profile_change(self, ev) -> None:
+        self._settings_overclock_warn.visible = self._settings_profile_dd.value == "overclock"
+        self.page.update()
+
+    async def _settings_do_test_turn(self, ev) -> None:
+        from webrtc_engine import test_turn
+        self._settings_turn_result.value = "Testing…"
+        self._settings_turn_result.color = C.SUBTLE
+        self.page.update()
+        ok, msg = await test_turn(
+            self._settings_turn_url_f.value.strip(),
+            self._settings_turn_user_f.value.strip(),
+            self._settings_turn_pass_f.value
+        )
+        self._settings_turn_result.value = msg
+        self._settings_turn_result.color = C.GREEN if ok else C.RED
+        self.page.update()
+
+    async def _settings_do_pf_autodetect(self, ev) -> None:
+        self._settings_pf_result.value = "Detecting…"
+        self._settings_pf_result.color = C.SUBTLE
+        self.page.update()
+        gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+        ip = await asyncio.to_thread(local_ip_for, gw)
+        port = await asyncio.to_thread(request_mapping_over_socket, gw)
+        if port and ip:
+            self._settings_pf_port_f.value = str(port)
+            self._settings_pf_result.value = f"Got port {port} on {ip}"
+            self._settings_pf_result.color = C.GREEN
+        else:
+            self._settings_pf_result.value = "No NAT-PMP mapping — enter the port manually"
+            self._settings_pf_result.color = C.RED
+        self.page.update()
+
+    async def _settings_do_pf_test(self, ev) -> None:
+        from webrtc_engine import test_forwarded_port
+        try:
+            port = int(self._settings_pf_port_f.value or 0)
+        except ValueError:
+            port = 0
+        if not (1024 <= port <= 65535):
+            self._settings_pf_result.value = "Enter a valid port (1024–65535)"
+            self._settings_pf_result.color = C.RED
+            self.page.update()
+            return
+        self._settings_pf_result.value = "Testing…"
+        self._settings_pf_result.color = C.SUBTLE
+        self.page.update()
+        gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+        ip = await asyncio.to_thread(local_ip_for, gw)
+        if not ip:
+            self._settings_pf_result.value = "Could not determine local IP"
+            self._settings_pf_result.color = C.RED
+            self.page.update()
+            return
+        ok, msg = await asyncio.to_thread(test_forwarded_port, ip, port)
+        self._settings_pf_result.value = msg
+        self._settings_pf_result.color = C.GREEN if ok else C.RED
+        self.page.update()
+
+    async def _settings_export_keys(self, ev) -> None:
+        data = (paths.DATA_DIR / "keys.json").read_bytes()
+        picker = ft.FilePicker()
+        self.page.services.append(picker)
+        self.page.update()
+        await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
+        self._log("[Keys] Keypair exported successfully.")
+
+    async def _settings_import_keys(self, ev) -> None:
+        picker = ft.FilePicker()
+        self.page.services.append(picker)
+        self.page.update()
+        files = await picker.pick_files(allowed_extensions=["json"])
+        if files:
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            paths.write_private_text(
+                paths.DATA_DIR / "keys.json",
+                Path(files[0].path).read_text(encoding="utf-8"),
+            )
+            self.keys = load_or_create_keys()
+            self.history_key = derive_history_key(self.keys["ed25519_private"])
+            self.engine.keys = self.keys
+            self._log("[Keys] Keypair imported successfully. Rebuilding active profile against new keys.")
+
+    def _settings_regen_keys(self, ev) -> None:
+        confirm_dlg = ft.AlertDialog(
+            title=ft.Text("Regenerate keys?"),
+            content=ft.Text("All contacts must re-verify. Cannot be undone."),
+            actions=[
+                ft.TextButton("Regenerate", on_click=self._settings_confirm_regen),
+                ft.TextButton("Cancel", on_click=lambda cev: self._close_dialog(self._settings_confirm_dlg)),
+            ],
+        )
+        self._settings_confirm_dlg = confirm_dlg
+        self._show_dialog(confirm_dlg)
+
+    def _settings_confirm_regen(self, cev) -> None:
+        from contacts import load_contacts as lc
+        from contacts import save_contacts as sc
+        generate_and_save_keys()
+        self.keys = load_or_create_keys()
+        self.history_key = derive_history_key(self.keys["ed25519_private"])
+        self.engine.keys = self.keys
+        contacts = lc()
+        for c in contacts:
+            c.verified = False
+        sc(contacts)
+        self._log("[Keys] Identity keys regenerated. Contact verifications reset.")
+        self._refresh_contact_list()
+        self._close_dialog(self._settings_confirm_dlg)
+
+    def _settings_do_switch_profile(self, ev) -> None:
+        name = self._settings_prof_dd.value
+        if name and name != profiles.active_name():
+            self._close_dialog(self._settings_dlg)
+            self._fire_and_forget(self._switch_profile(name))
+
+    def _settings_do_create_profile(self, ev) -> None:
+        try:
+            safe = profiles.create_profile(self._settings_new_prof.value)
+        except ValueError as ex:
+            self._settings_prof_err.value = str(ex)
+            self._settings_prof_err.visible = True
+            self.page.update()
+            return
+        self._close_dialog(self._settings_dlg)
+        self._fire_and_forget(self._switch_profile(safe))
+
+    def _settings_save(self, ev) -> None:
+        if self._settings_retention_dd.value == "custom":
+            try:
+                days = int(self._settings_custom_days.value)
+                if days <= 0:
+                    raise ValueError
+            except ValueError:
+                self._settings_custom_error.value = "Enter a positive number of days"
+                self._settings_custom_error.visible = True
+                self.page.update()
+                return
+            self.settings.retention_days = days
+        else:
+            self.settings.retention_days = int(self._settings_retention_dd.value)
+        self.settings.security_mode = self._settings_mode_radio.value
+        self.settings.signaling_url = self._settings_url_field.value
+        if self._settings_profile_dd.value in PROFILES:
+            apply_profile(self.settings, self._settings_profile_dd.value)
+        self.settings.turn_url = self._settings_turn_url_f.value.strip()
+        self.settings.turn_username = self._settings_turn_user_f.value.strip()
+        self.settings.turn_password = self._settings_turn_pass_f.value
+        self.settings.verified_only = self._settings_verified_only_cb.value
+        self.settings.port_forward_enabled = self._settings_pf_enabled_cb.value
+        try:
+            self.settings.forwarded_port = int(self._settings_pf_port_f.value or 0)
+        except ValueError:
+            self.settings.forwarded_port = 0
+        save_settings(self.settings)
+        self._log(f"[Settings] Saved settings (mode={self.settings.security_mode}, retention={self.settings.retention_days} days).")
+        self._update_perf_parameters()
+        self._apply_port_forward()
+        self._close_dialog(self._settings_dlg)
 
     def _show_settings(self, e) -> None:
-        mode_radio    = ft.RadioGroup(
+        self._settings_mode_radio = ft.RadioGroup(
             value=self.settings.security_mode,
             content=ft.Row([
                 ft.Radio(value="dtls", label="DTLS-only"),
@@ -3564,13 +3600,13 @@ class HelucrypticApp:
             if self.settings.retention_days in (0, 7, 30, 90)
             else "custom"
         )
-        custom_days   = _neon_field(
+        self._settings_custom_days = _neon_field(
             label="Days", width=100, dense=True,
             visible=(preset_value == "custom"),
             value=str(self.settings.retention_days) if preset_value == "custom" else "1",
         )
-        custom_error  = ft.Text("", color=C.RED, size=11, visible=False)
-        retention_dd  = ft.Dropdown(
+        self._settings_custom_error = ft.Text("", color=C.RED, size=11, visible=False)
+        self._settings_retention_dd = ft.Dropdown(
             value=preset_value, width=160,
             options=[
                 ft.dropdown.Option("0",      "Never"),
@@ -3579,24 +3615,18 @@ class HelucrypticApp:
                 ft.dropdown.Option("90",     "90 days"),
                 ft.dropdown.Option("custom", "Custom…"),
             ],
+            on_change=self._settings_on_retention_change,
         )
-        def on_retention_change(ev):
-            custom_days.visible  = retention_dd.value == "custom"
-            custom_error.visible = False
-            self.page.update()
-        retention_dd.on_change = on_retention_change
 
-        url_field = _neon_field(
+        self._settings_url_field = _neon_field(
             value=self.settings.signaling_url, label="Signaling URL", width=280, dense=True,
         )
-        # --- Trust ---
-        verified_only_cb = ft.Checkbox(
+        self._settings_verified_only_cb = ft.Checkbox(
             label="Verified-Only mode (block actions with unverified contacts)",
             value=self.settings.verified_only,
         )
         btn_show_identity = ft.TextButton("Show My Identity (QR / code)",
                                           on_click=self._show_my_identity)
-        # --- Performance profile ---
         _profile_labels = {
             "old_pc": "Old PC (480p/5fps)", "balanced": "Balanced (720p/10fps)",
             "quality": "Quality (1080p/30fps)", "overclock": "Overclock (2K/60fps)",
@@ -3604,186 +3634,48 @@ class HelucrypticApp:
         profile_opts = [ft.dropdown.Option(k, _profile_labels[k]) for k in PROFILES]
         if self.settings.performance_profile not in PROFILES:
             profile_opts.append(ft.dropdown.Option("custom", "Custom (from .env)"))
-        profile_dd = ft.Dropdown(
+        self._settings_profile_dd = ft.Dropdown(
             value=self.settings.performance_profile, width=240, options=profile_opts,
+            on_change=self._settings_on_profile_change,
         )
-        overclock_warn = ft.Text(
+        self._settings_overclock_warn = ft.Text(
             "⚠ Overclock (2K/60) is very CPU/bandwidth heavy and may not reach "
             "60 FPS with software encoding.",
             size=11, color="#faa61a", visible=self.settings.performance_profile == "overclock",
         )
-        def on_profile_change(ev):
-            overclock_warn.visible = profile_dd.value == "overclock"
-            self.page.update()
-        profile_dd.on_change = on_profile_change
 
-        # --- TURN relay ---
-        turn_url_f  = _neon_field(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
+        self._settings_turn_url_f  = _neon_field(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
                                    width=280, dense=True)
-        turn_user_f = _neon_field(label="TURN username", value=self.settings.turn_username,
+        self._settings_turn_user_f = _neon_field(label="TURN username", value=self.settings.turn_username,
                                    width=280, dense=True)
-        turn_pass_f = _neon_field(label="TURN password", value=self.settings.turn_password,
+        self._settings_turn_pass_f = _neon_field(label="TURN password", value=self.settings.turn_password,
                                    width=280, dense=True, password=True, can_reveal_password=True)
-        turn_result = ft.Text("", size=11)
-        async def do_test_turn(ev):
-            from webrtc_engine import test_turn
-            turn_result.value = "Testing…"; turn_result.color = C.SUBTLE; self.page.update()
-            ok, msg = await test_turn(turn_url_f.value.strip(), turn_user_f.value.strip(), turn_pass_f.value)
-            turn_result.value = msg; turn_result.color = C.GREEN if ok else C.RED; self.page.update()
-        btn_test_turn = ft.TextButton("Test TURN", on_click=do_test_turn)
+        self._settings_turn_result = ft.Text("", size=11)
+        btn_test_turn = ft.TextButton("Test TURN", on_click=self._settings_do_test_turn)
 
-        # --- Port forwarding (advanced) ---
-        pf_enabled_cb = ft.Checkbox(
+        self._settings_pf_enabled_cb = ft.Checkbox(
             label="I'm port-forwarding (VPN/router)",
             value=self.settings.port_forward_enabled,
         )
-        pf_port_f = _neon_field(
+        self._settings_pf_port_f = _neon_field(
             label="Forwarded port", value=str(self.settings.forwarded_port or ""),
             width=280, dense=True,
         )
-        pf_result = ft.Text("", size=11)
-
-        async def do_pf_autodetect(ev):
-            pf_result.value = "Detecting…"; pf_result.color = C.SUBTLE; self.page.update()
-            gw   = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
-            ip   = await asyncio.to_thread(local_ip_for, gw)
-            port = await asyncio.to_thread(request_mapping_over_socket, gw)
-            if port and ip:
-                pf_port_f.value = str(port)
-                pf_result.value = f"Got port {port} on {ip}"; pf_result.color = C.GREEN
-            else:
-                pf_result.value = "No NAT-PMP mapping — enter the port manually"
-                pf_result.color = C.RED
-            self.page.update()
-        btn_pf_detect = ft.TextButton("Auto-detect (NAT-PMP)", on_click=do_pf_autodetect)
-
-        async def do_pf_test(ev):
-            from webrtc_engine import test_forwarded_port
-            try:
-                port = int(pf_port_f.value or 0)
-            except ValueError:
-                port = 0
-            if not (1024 <= port <= 65535):
-                pf_result.value = "Enter a valid port (1024–65535)"; pf_result.color = C.RED
-                self.page.update(); return
-            pf_result.value = "Testing…"; pf_result.color = C.SUBTLE; self.page.update()
-            gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
-            ip = await asyncio.to_thread(local_ip_for, gw)
-            if not ip:
-                pf_result.value = "Could not determine local IP"; pf_result.color = C.RED
-                self.page.update(); return
-            ok, msg = await asyncio.to_thread(test_forwarded_port, ip, port)
-            pf_result.value = msg; pf_result.color = C.GREEN if ok else C.RED
-            self.page.update()
-        btn_pf_test = ft.TextButton("Test", on_click=do_pf_test)
-
+        self._settings_pf_result = ft.Text("", size=11)
+        btn_pf_detect = ft.TextButton("Auto-detect (NAT-PMP)", on_click=self._settings_do_pf_autodetect)
+        btn_pf_test = ft.TextButton("Test", on_click=self._settings_do_pf_test)
         pf_caption = ft.Text(
             "Needs full-tunnel VPN; applies to one peer at a time.",
             size=11, color=C.MUTED,
         )
 
-        async def export_keys(ev):
-            data   = (paths.DATA_DIR / "keys.json").read_bytes()
-            picker = ft.FilePicker()
-            self.page.services.append(picker)
-            self.page.update()
-            await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
-
-        async def import_keys(ev):
-            picker = ft.FilePicker()
-            self.page.services.append(picker)
-            self.page.update()
-            files = await picker.pick_files(allowed_extensions=["json"])
-            if files:
-                paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-                paths.write_private_text(
-                    paths.DATA_DIR / "keys.json",
-                    Path(files[0].path).read_text(encoding="utf-8"),
-                )
-                self.keys        = load_or_create_keys()
-                self.history_key = derive_history_key(self.keys["ed25519_private"])
-                self.engine.keys = self.keys
-
-        def regen_keys(ev):
-            def confirm_regen(cev):
-                from contacts import load_contacts as lc
-                from contacts import save_contacts as sc
-                generate_and_save_keys()
-                self.keys        = load_or_create_keys()
-                self.history_key = derive_history_key(self.keys["ed25519_private"])
-                self.engine.keys = self.keys
-                contacts = lc()
-                for c in contacts:
-                    c.verified = False
-                sc(contacts)
-                self._refresh_contact_list()
-                self._close_dialog(confirm_dlg)
-            confirm_dlg = ft.AlertDialog(
-                title=ft.Text("Regenerate keys?"),
-                content=ft.Text("All contacts must re-verify. Cannot be undone."),
-                actions=[
-                    ft.TextButton("Regenerate", on_click=confirm_regen),
-                    ft.TextButton("Cancel",     on_click=lambda cev: self._close_dialog(confirm_dlg)),
-                ],
-            )
-            self._show_dialog(confirm_dlg)
-
-        def save_settings_cb(ev):
-            if retention_dd.value == "custom":
-                try:
-                    days = int(custom_days.value)
-                    if days <= 0:
-                        raise ValueError
-                except ValueError:
-                    custom_error.value   = "Enter a positive number of days"
-                    custom_error.visible = True
-                    self.page.update()
-                    return
-                self.settings.retention_days = days
-            else:
-                self.settings.retention_days = int(retention_dd.value)
-            self.settings.security_mode = mode_radio.value
-            self.settings.signaling_url = url_field.value
-            # Applying a profile sets the 5 concrete knobs + label; "custom"
-            # leaves the existing concrete values untouched.
-            if profile_dd.value in PROFILES:
-                apply_profile(self.settings, profile_dd.value)
-            self.settings.turn_url      = turn_url_f.value.strip()
-            self.settings.turn_username = turn_user_f.value.strip()
-            self.settings.turn_password = turn_pass_f.value
-            self.settings.verified_only = verified_only_cb.value
-            self.settings.port_forward_enabled = pf_enabled_cb.value
-            try:
-                self.settings.forwarded_port = int(pf_port_f.value or 0)
-            except ValueError:
-                self.settings.forwarded_port = 0
-            save_settings(self.settings)
-            self._update_perf_parameters()  # apply jpeg/tile knobs live
-            self._apply_port_forward()      # (re)start/stop the forward manager
-            self._close_dialog(dlg)
-
-        # --- Profiles (feature G) ---
         prof_active = profiles.active_name() or "default (root)"
-        prof_dd = ft.Dropdown(
+        self._settings_prof_dd = ft.Dropdown(
             value=profiles.active_name(), width=200, hint_text="Choose a profile",
             options=[ft.dropdown.Option(p) for p in profiles.list_profiles()],
         )
-        new_prof = _neon_field(label="New profile name", width=200)
-        prof_err = ft.Text("", color=C.RED, size=11, visible=False)
-
-        def do_switch_profile(ev):
-            name = prof_dd.value
-            if name and name != profiles.active_name():
-                self._close_dialog(dlg)
-                self._fire_and_forget(self._switch_profile(name))
-
-        def do_create_profile(ev):
-            try:
-                safe = profiles.create_profile(new_prof.value)
-            except ValueError as ex:
-                prof_err.value = str(ex); prof_err.visible = True; self.page.update(); return
-            self._close_dialog(dlg)
-            self._fire_and_forget(self._switch_profile(safe))
+        self._settings_new_prof = _neon_field(label="New profile name", width=200)
+        self._settings_prof_err = ft.Text("", color=C.RED, size=11, visible=False)
 
         _sec = self._settings_section
         sections = [
@@ -3791,40 +3683,40 @@ class HelucrypticApp:
                 ft.Text(f"Active: {prof_active}", size=12, color=C.SUBTLE),
                 ft.Text("Each profile is a fully separate identity, contacts and history.",
                         size=11, color=C.MUTED),
-                ft.Row([prof_dd, ft.FilledButton("Switch", on_click=do_switch_profile,
+                ft.Row([self._settings_prof_dd, ft.FilledButton("Switch", on_click=self._settings_do_switch_profile,
                                                  style=_filled_style(C.CYAN))]),
-                ft.Row([new_prof, ft.FilledButton("Create & switch", on_click=do_create_profile,
+                ft.Row([self._settings_new_prof, ft.FilledButton("Create & switch", on_click=self._settings_do_create_profile,
                                                   style=_filled_style(C.VIOLET, "#ffffff"))]),
-                prof_err,
+                self._settings_prof_err,
             ], accent=C.VIOLET),
             _sec("Security & privacy", ft.Icons.SHIELD_MOON, [
                 ft.Text("Encryption mode", size=11, color=C.MUTED),
-                mode_radio,
+                self._settings_mode_radio,
                 ft.Text("Message retention", size=11, color=C.MUTED),
-                ft.Row([retention_dd, custom_days]),
-                custom_error,
+                ft.Row([self._settings_retention_dd, self._settings_custom_days]),
+                self._settings_custom_error,
             ]),
-            _sec("Connection", ft.Icons.LANGUAGE, [url_field], accent=C.VIOLET),
-            _sec("Performance", ft.Icons.SPEED, [profile_dd, overclock_warn], accent=C.VIOLET),
+            _sec("Connection", ft.Icons.LANGUAGE, [self._settings_url_field], accent=C.VIOLET),
+            _sec("Performance", ft.Icons.SPEED, [self._settings_profile_dd, self._settings_overclock_warn], accent=C.VIOLET),
             _sec("TURN relay", ft.Icons.ROUTER, [
                 ft.Text("Optional — fixes strict-NAT connections.", size=11, color=C.MUTED),
-                turn_url_f, turn_user_f, turn_pass_f,
-                ft.Row([btn_test_turn, turn_result]),
+                self._settings_turn_url_f, self._settings_turn_user_f, self._settings_turn_pass_f,
+                ft.Row([btn_test_turn, self._settings_turn_result]),
             ], accent=C.VIOLET),
             _sec("Port forwarding", ft.Icons.SETTINGS_ETHERNET, [
                 ft.Text("Advanced — direct connect via a forwarded port.", size=11, color=C.MUTED),
-                pf_enabled_cb, pf_port_f,
+                self._settings_pf_enabled_cb, self._settings_pf_port_f,
                 ft.Row([btn_pf_detect, btn_pf_test]),
-                pf_result, pf_caption,
+                self._settings_pf_result, pf_caption,
             ], accent=C.VIOLET),
             _sec("Trust & verification", ft.Icons.VERIFIED_USER, [
-                verified_only_cb, btn_show_identity,
+                self._settings_verified_only_cb, btn_show_identity,
             ], accent=C.GREEN),
             _sec("Identity keys", ft.Icons.KEY, [
                 ft.Row([
-                    ft.FilledButton("Export Keys", on_click=export_keys, style=_filled_style(C.ELEV2, C.TEXT)),
-                    ft.FilledButton("Import Keys", on_click=import_keys, style=_filled_style(C.ELEV2, C.TEXT)),
-                    ft.FilledButton("Regenerate Keys", on_click=regen_keys, style=_filled_style(C.ELEV2, C.TEXT)),
+                    ft.FilledButton("Export Keys", on_click=self._settings_export_keys, style=_filled_style(C.ELEV2, C.TEXT)),
+                    ft.FilledButton("Import Keys", on_click=self._settings_import_keys, style=_filled_style(C.ELEV2, C.TEXT)),
+                    ft.FilledButton("Regenerate Keys", on_click=self._settings_regen_keys, style=_filled_style(C.ELEV2, C.TEXT)),
                 ], wrap=True, spacing=8),
             ], accent=C.GREEN),
             _sec("Data & backup", ft.Icons.STORAGE, [
@@ -3850,17 +3742,17 @@ class HelucrypticApp:
             ], spacing=0, tight=True),
         ], spacing=12)
 
-        dlg = ft.AlertDialog(
+        self._settings_dlg = ft.AlertDialog(
             title=header,
             content=ft.Container(width=540, height=520, content=ft.Column(
                 sections, tight=True, spacing=12, scroll=ft.ScrollMode.AUTO)),
             actions=[
-                ft.FilledButton("Save", icon=ft.Icons.CHECK, on_click=save_settings_cb,
+                ft.FilledButton("Save", icon=ft.Icons.CHECK, on_click=self._settings_save,
                                 style=_filled_style(C.CYAN)),
-                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(dlg)),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(self._settings_dlg)),
             ],
         )
-        self._show_dialog(dlg)
+        self._show_dialog(self._settings_dlg)
         # Staggered fade/scale-in for the section cards.
         for i, card in enumerate(sections):
             self._reveal(card, delay=0.05 + i * 0.05)
@@ -3892,37 +3784,37 @@ class HelucrypticApp:
         )
         self._show_dialog(dlg)
 
-    async def shutdown(self) -> None:
-        """Cleanly close all background loops, websockets, and WebRTC engines on close."""
-        print("[app] starting shutdown cleanup...", flush=True)
-        # Close websocket connection
+    async def _shutdown_websocket(self) -> None:
         if self.ws:
             try:
                 await self.ws.close()
             except Exception:
                 pass
             self.ws = None
-        # Clean up all peer connections
-        for peer in list(self.engine.pcs):
+
+    async def _shutdown_peers(self) -> None:
+        for peer in self.engine.pcs:
             try:
                 await self.engine.remove_peer(peer)
             except Exception:
                 pass
-        # Stop port forwarding
+
+    async def _shutdown_port_forward(self) -> None:
         if self._pf_manager is not None:
             try:
                 await self._pf_manager.stop()
             except Exception:
                 pass
             self._pf_manager = None
-        # Cancel all background tasks
+
+    def _shutdown_tasks(self) -> None:
         for task in self._bg_tasks:
             try:
                 task.cancel()
             except Exception:
                 pass
         self._bg_tasks.clear()
-        for task in list(self._running_tasks):
+        for task in self._running_tasks:
             try:
                 task.cancel()
             except Exception:
@@ -3932,6 +3824,14 @@ class HelucrypticApp:
             self._status_label_task.cancel()
         if self._flash_task and not self._flash_task.done():
             self._flash_task.cancel()
+
+    async def shutdown(self) -> None:
+        """Cleanly close all background loops, websockets, and WebRTC engines on close."""
+        print("[app] starting shutdown cleanup...", flush=True)
+        await self._shutdown_websocket()
+        await self._shutdown_peers()
+        await self._shutdown_port_forward()
+        self._shutdown_tasks()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -3945,7 +3845,7 @@ class HelucrypticApp:
 
     def _close_dialog(self, dlg=None) -> None:
         # pop_dialog() dismisses the current (top) dialog; the arg is ignored.
-        if dlg: pass
+        _ = dlg
         self.page.pop_dialog()
 
     async def _retention_background_loop(self) -> None:
@@ -4101,13 +4001,13 @@ def _to_ws_url(base: str) -> str:
     bare host, and always return a ws:// or wss:// base with no trailing slash.
     """
     base = (base or "").strip().rstrip("/")
-    if base.startswith("https://"):
-        base = "wss://" + base[len("https://"):]
-    elif base.startswith("http://"):
-        base = "ws://" + base[len("http://"):]
-    elif not base.startswith(("ws://", "wss://")):
+    if base.startswith(SCHEME_HTTPS):
+        base = SCHEME_WSS + base[len(SCHEME_HTTPS):]
+    elif base.startswith(SCHEME_HTTP):
+        base = SCHEME_WS + base[len(SCHEME_HTTP):]
+    elif not base.startswith((SCHEME_WS, SCHEME_WSS)):
         # bare host (e.g. "example.com" or "127.0.0.1:8000") — default to ws://
-        base = "ws://" + base
+        base = SCHEME_WS + base
     return base
 
 
@@ -4122,13 +4022,55 @@ class StartupScreen:
         self._selected = "a"
         self._build()
 
+    def _select_a(self, e) -> None:
+        if self._radio_group.value != "a":
+            self._radio_group.value = "a"
+            self._on_radio_change(None)
+
+    def _select_b(self, e) -> None:
+        if self._radio_group.value != "b":
+            self._radio_group.value = "b"
+            self._on_radio_change(None)
+
+    def _connect(self, e) -> None:
+        if self._selected == "a":
+            pw = self._pw_field.value or ""
+            if not pw:
+                self._pw_error.value   = "Enter the server access password"
+                self._pw_error.visible = True
+                self.page.update()
+                return
+            sounds.play("authorized")
+            self.on_done(HELUCRYPTIC_SERVER_URL, pw)
+        else:
+            url = self._url_field.value.strip()
+            if not url.startswith((SCHEME_WS, SCHEME_WSS, SCHEME_HTTP, SCHEME_HTTPS)):
+                self._url_error.value   = "Use ws://, wss://, http:// or https://"
+                self._url_error.visible = True
+                self.page.update()
+                return
+            # Store normalized to a WebSocket scheme (https -> wss, http -> ws)
+            self.on_done(_to_ws_url(url), self._custom_pw_field.value or "")
+
+    async def _reveal_entrance(self) -> None:
+        try:
+            await asyncio.sleep(0.06)
+        except Exception:
+            pass
+        try:
+            self._panel.opacity = 1
+            self._panel.scale = 1
+            self._panel.update()
+        except Exception:
+            pass
+
     def _build(self) -> None:
         self._pw_field  = _neon_field(
             label="Password", password=True, can_reveal_password=True, width=300,
         )
         self._pw_error  = ft.Text("", color=C.RED, size=11, visible=False)
         self._url_field = _neon_field(
-            label="Server URL", value="ws://", width=300,
+            label="Server URL", value=SCHEME_WS, width=300,
             hint_text="ws://your-server-ip:8000",
         )
         self._custom_pw_field = _neon_field(
@@ -4181,19 +4123,8 @@ class StartupScreen:
         self._card_a = card_a
         self._card_b = card_b
 
-        # Make cards clickable to select option
-        def select_a(e):
-            if self._radio_group.value != "a":
-                self._radio_group.value = "a"
-                self._on_radio_change(None)
-
-        def select_b(e):
-            if self._radio_group.value != "b":
-                self._radio_group.value = "b"
-                self._on_radio_change(None)
-
-        card_a.on_click = select_a
-        card_b.on_click = select_b
+        card_a.on_click = self._select_a
+        card_b.on_click = self._select_b
 
         radio_group = ft.RadioGroup(
             value="a",
@@ -4204,26 +4135,6 @@ class StartupScreen:
         )
         self._radio_group = radio_group
         radio_group.on_change = self._on_radio_change
-
-        def connect(e):
-            if self._selected == "a":
-                pw = self._pw_field.value or ""
-                if not pw:
-                    self._pw_error.value   = "Enter the server access password"
-                    self._pw_error.visible = True
-                    self.page.update()
-                    return
-                sounds.play("authorized")
-                self.on_done(HELUCRYPTIC_SERVER_URL, pw)
-            else:
-                url = self._url_field.value.strip()
-                if not url.startswith(("ws://", "wss://", "http://", "https://")):
-                    self._url_error.value   = "Use ws://, wss://, http:// or https://"
-                    self._url_error.visible = True
-                    self.page.update()
-                    return
-                # Store normalized to a WebSocket scheme (https -> wss, http -> ws)
-                self.on_done(_to_ws_url(url), self._custom_pw_field.value or "")
 
         hero = ft.Container(
             content=ft.Column([
@@ -4244,7 +4155,7 @@ class StartupScreen:
         )
 
         connect_btn = ft.FilledButton(
-            "Connect", icon=ft.Icons.BOLT, on_click=connect, width=220,
+            "Connect", icon=ft.Icons.BOLT, on_click=self._connect, width=220,
             style=_filled_style(C.CYAN, C.BTN_CYAN, pad_v=14),
         )
 
@@ -4271,24 +4182,13 @@ class StartupScreen:
             ),
             alignment=ft.Alignment.TOP_CENTER,
             content=ft.Column([panel], scroll=ft.ScrollMode.AUTO,
-                              horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
         )
 
         self.page.add(bg)
 
         # Entrance animation.
-        async def reveal():
-            try:
-                await asyncio.sleep(0.06)
-            except Exception:
-                pass
-            try:
-                panel.opacity = 1
-                panel.scale = 1
-                panel.update()
-            except Exception:
-                pass
-        self._reveal_task = asyncio.ensure_future(reveal())
+        self._reveal_task = asyncio.ensure_future(self._reveal_entrance())
 
     def _on_radio_change(self, e) -> None:
         self._selected = self._radio_group.value
@@ -4317,7 +4217,8 @@ class StartupScreen:
 
 async def main(page: ft.Page) -> None:
     await asyncio.sleep(0)
-    _install_log_capture()   # mirror stdout/stderr into the in-app diagnostics log
+    _install_log_capture()   
+    # mirror stdout/stderr into the in-app diagnostics log
     # Suppress aiortc SCTP "Cannot send data, not connected" noise: these are
     # background Tasks inside aiortc that try to flush a dead DTLS transport.
     # They are expected on abrupt disconnects and not actionable from our side.

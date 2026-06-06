@@ -62,7 +62,7 @@ export class SignalHub {
     server.accept();
     try {
       server.send(JSON.stringify({ sender: "system", type: "error", data: message }));
-    } catch {}
+    } catch { }
     server.close(1008, "rejected");
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -71,12 +71,47 @@ export class SignalHub {
     // Mirrors server.py: when a password is configured (Cloudflare secret
     // HELUCRYPTIC_SERVER_PASSWORD), the client must send a matching `?password=`.
     // Empty config = open server (LAN/back-compat). Constant-time comparison.
-    const expected = (this.env && this.env.HELUCRYPTIC_SERVER_PASSWORD) || "";
+    const expected = this.env?.HELUCRYPTIC_SERVER_PASSWORD || "";
     if (!expected) return true;
     const a = new TextEncoder().encode(supplied || "");
     const b = new TextEncoder().encode(expected);
     if (a.byteLength !== b.byteLength) return false;
     return crypto.subtle.timingSafeEqual(a, b);
+  }
+
+  _parseUrlParams(request) {
+    const url = new URL(request.url);
+    const parts = url.pathname.split("/").filter(Boolean); // ["ws", "<username>"]
+    const username = decodeURIComponent(parts[1] || "");
+    const room = url.searchParams.get("room") || "";
+    const password = url.searchParams.get("password") || "";
+    return { username, room, password };
+  }
+
+  _replaceExistingUserSockets(username) {
+    for (const old of this.state.getWebSockets(`user:${username}`)) {
+      try { old.close(1000, "replaced"); } catch { }
+    }
+  }
+
+  _isRoomFull(room, username) {
+    if (!room) return false;
+    const others = new Set(this._roomMembers(room).filter((u) => u !== username));
+    return others.size >= ROOM_MAX;
+  }
+
+  _notifyRoomJoin(room, username, server) {
+    if (!room) return;
+    const existing = this._roomMembers(room).filter((u) => u !== username);
+    // Notify existing members that a new peer joined.
+    for (const ws of this.state.getWebSockets()) {
+      const a = this._attach(ws);
+      if (a.room === room && a.username !== username && ws.readyState === OPEN) {
+        ws.send(JSON.stringify({ type: "peer_joined", sender: username }));
+      }
+    }
+    // Tell the joiner who is already here.
+    server.send(JSON.stringify({ type: "room_state", peers: existing }));
   }
 
   // ---- connection handling ----------------------------------------------
@@ -86,11 +121,7 @@ export class SignalHub {
       return new Response("expected websocket", { status: 426 });
     }
 
-    const url = new URL(request.url);
-    const parts = url.pathname.split("/").filter(Boolean); // ["ws", "<username>"]
-    const username = decodeURIComponent(parts[1] || "");
-    const room = url.searchParams.get("room") || "";
-    const password = url.searchParams.get("password") || "";
+    const { username, room, password } = this._parseUrlParams(request);
 
     if (!username) return new Response("missing username", { status: 400 });
 
@@ -104,17 +135,12 @@ export class SignalHub {
     // abrupt client exits (Cloudflare may not detect a dropped TCP immediately,
     // so an old socket can still appear "open"). Closing it here is harmless if
     // it's already dead, and lets the user reconnect with the same name.
-    for (const old of this.state.getWebSockets(`user:${username}`)) {
-      try { old.close(1000, "replaced"); } catch {}
-    }
+    this._replaceExistingUserSockets(username);
 
     // Room capacity (max 4) — count only OTHER usernames so a reconnecting
     // member doesn't count against the limit.
-    if (room) {
-      const others = new Set(this._roomMembers(room).filter((u) => u !== username));
-      if (others.size >= ROOM_MAX) {
-        return this._rejectWS("Room is full (max 4 participants).");
-      }
+    if (this._isRoomFull(room, username)) {
+      return this._rejectWS("Room is full (max 4 participants).");
     }
 
     const pair = new WebSocketPair();
@@ -126,18 +152,7 @@ export class SignalHub {
     this.state.acceptWebSocket(server, tags);
     server.serializeAttachment({ username, room });
 
-    if (room) {
-      const existing = this._roomMembers(room).filter((u) => u !== username);
-      // Notify existing members that a new peer joined.
-      for (const ws of this.state.getWebSockets()) {
-        const a = this._attach(ws);
-        if (a.room === room && a.username !== username && ws.readyState === OPEN) {
-          ws.send(JSON.stringify({ type: "peer_joined", sender: username }));
-        }
-      }
-      // Tell the joiner who is already here.
-      server.send(JSON.stringify({ type: "room_state", peers: existing }));
-    }
+    this._notifyRoomJoin(room, username, server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -156,7 +171,7 @@ export class SignalHub {
     // The client sends the usernames it cares about (its local contacts)
     // and we reply with the subset that currently hold a live connection.
     if (type === "presence") {
-      const wanted = (payload.data || {}).usernames || [];
+      const wanted = payload.data?.usernames || [];
       const online = wanted.filter((u) => this._findUser(u) !== null);
       ws.send(JSON.stringify({
         sender: "system",
@@ -180,7 +195,7 @@ export class SignalHub {
 
   async webSocketClose(ws, code, reason) {
     const a = this._attach(ws);
-    try { ws.close(code, reason); } catch {}
+    try { ws.close(code, reason); } catch { }
     if (!a.room) return;
     // If this user still has another live socket (e.g. we just replaced a stale
     // one with a fresh reconnect), don't announce them as having left.

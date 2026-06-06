@@ -1,31 +1,52 @@
 import base64
 import hashlib
 import json
+import logging
+import sys
 from datetime import UTC, datetime
 
+# pyrefly: ignore [missing-import]
 import pyseto
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives import hashes
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
     NoEncryption,
     PrivateFormat,
     PublicFormat,
 )
+# pyrefly: ignore [missing-import]
 from pyseto import Key
 
 import secure_store
 from paths import DATA_DIR, harden_dir, write_private_bytes
+from constants.crypto_constants import KEYS_FILE, REQUIRED_KEY_FIELDS
+
+# Configure standard logger
+logger = logging.getLogger("helucryptic.crypto")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _formatter = logging.Formatter("[crypto] %(message)s")
+    _handler.setFormatter(_formatter)
+    logger.addHandler(_handler)
 
 
 def _keys_path():
     # Resolved per-call (not cached) so tests can monkeypatch DATA_DIR.
-    return DATA_DIR / "keys.json"
+    return DATA_DIR / KEYS_FILE
 
 
 def ensure_data_dir() -> None:
@@ -39,6 +60,7 @@ def ensure_data_dir() -> None:
 
 def generate_and_save_keys() -> dict:
     ensure_data_dir()
+    logger.info("Generating a fresh set of identity keys (X25519 and Ed25519)")
     x_priv = X25519PrivateKey.generate()
     e_priv = Ed25519PrivateKey.generate()
     keys = {
@@ -57,17 +79,20 @@ def generate_and_save_keys() -> dict:
         "created_at": datetime.now(UTC).isoformat(),
     }
     _save_keys(keys)
+    logger.info("Successfully generated and saved identity keys to %s", _keys_path())
     return keys
-
-
-_REQUIRED_KEY_FIELDS = {"x25519_private", "x25519_public", "ed25519_private", "ed25519_public"}
 
 
 def _save_keys(keys: dict) -> None:
     """Persist the identity keys, wrapped with the OS keystore where available."""
     ensure_data_dir()
-    plaintext = json.dumps(keys, indent=2).encode("utf-8")
-    write_private_bytes(_keys_path(), secure_store.protect(plaintext))
+    logger.info("Saving identity keys")
+    try:
+        plaintext = json.dumps(keys, indent=2).encode("utf-8")
+        write_private_bytes(_keys_path(), secure_store.protect(plaintext))
+    except Exception:
+        logger.exception("Failed to save identity keys")
+        raise
 
 
 def export_keys_plaintext(path=None) -> bytes:
@@ -83,16 +108,19 @@ def export_keys_plaintext(path=None) -> bytes:
 def load_or_create_keys() -> dict:
     path = _keys_path()
     if path.exists():
+        logger.info("Loading existing identity keys from %s", path)
         try:
             raw = path.read_bytes()
             keys = json.loads(secure_store.unprotect(raw))
-        except (json.JSONDecodeError, OSError, ValueError) as ex:
+        except (OSError, ValueError) as ex:
+            logger.error("Failed to read identity keys: file at %s is corrupted", path)
             raise RuntimeError(
                 f"Your key file at {path} is corrupted and could not be read ({ex}). "
                 f"Restore it from a backup/export, or delete it to generate a new "
                 f"identity (this loses your existing contacts' verification)."
             ) from ex
-        if not _REQUIRED_KEY_FIELDS.issubset(keys):
+        if not REQUIRED_KEY_FIELDS.issubset(keys):
+            logger.error("Failed to read identity keys: missing required fields in %s", path)
             raise RuntimeError(
                 f"Your key file at {path} is missing required fields. "
                 f"Restore it from a backup/export, or delete it to generate a new identity."
@@ -100,10 +128,12 @@ def load_or_create_keys() -> dict:
         # Migrate a legacy plaintext key file to the OS-wrapped format in place.
         if secure_store.available() and not secure_store.is_protected(raw):
             try:
+                logger.info("Migrating legacy plaintext key file to OS-wrapped format in place")
                 _save_keys(keys)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to migrate legacy key file to OS-wrapped format: %s", e)
         return keys
+    logger.info("Key file does not exist at %s. Creating a new identity...", path)
     return generate_and_save_keys()
 
 
@@ -195,7 +225,7 @@ def derive_history_key(ed25519_priv_b64: str) -> bytes:
 # PASETO v4 helpers
 # ---------------------------------------------------------------------------
 
-def _ed25519_signing_key(priv_b64: str, pub_b64: str) -> Key:
+def _ed25519_signing_key(priv_b64: str) -> Key:
     # pyseto v4.public: build the signing key from the raw Ed25519 private seed.
     # (Only `d` may be set for a signing key; `x` alone makes a verify key.)
     return Key.from_asymmetric_key_params(4, d=base64.b64decode(priv_b64))
@@ -206,12 +236,15 @@ def _ed25519_verify_key(pub_b64: str) -> Key:
 
 
 def paseto_sign(payload: dict, ed25519_priv_b64: str, ed25519_pub_b64: str) -> str:
-    key = _ed25519_signing_key(ed25519_priv_b64, ed25519_pub_b64)
+    logger.debug("Signing PASETO token")
+    _ = ed25519_pub_b64  # Parameter kept for signature compatibility
+    key = _ed25519_signing_key(ed25519_priv_b64)
     token = pyseto.encode(key, payload=json.dumps(payload).encode())
     return token.decode() if isinstance(token, bytes) else token
 
 
 def paseto_verify(token_str: str, ed25519_pub_b64: str) -> dict:
+    logger.debug("Verifying PASETO token")
     key = _ed25519_verify_key(ed25519_pub_b64)
     decoded = pyseto.decode(key, token_str.encode() if isinstance(token_str, str) else token_str)
     return json.loads(decoded.payload)
@@ -231,6 +264,7 @@ def issue_membership_cert(
     member_ed25519_pub_b64: str,
 ) -> str:
     """Creator-signed membership cert binding a member's identity to a room."""
+    logger.info("Issuing membership certificate for user=%s in room=%s", member_username, room_id)
     payload = {
         "r":   room_id,
         "u":   member_username,
@@ -249,26 +283,38 @@ def verify_membership_cert(
 ) -> bool:
     """True iff `cert` is a valid creator signature binding this member to this
     room (and the bound key matches the member's actual hello key)."""
+    logger.info("Verifying membership certificate for user=%s in room=%s", member_username, room_id)
     if not cert or not creator_ed25519_pub_b64:
+        logger.warning("Empty cert or missing creator key; verification failed")
         return False
     try:
         payload = paseto_verify(cert, creator_ed25519_pub_b64)
-    except Exception:
+    except Exception as e:
+        logger.warning("Membership certificate verification failed: %s", e)
         return False
-    return (
+    
+    success = (
         payload.get("r") == room_id
         and payload.get("u") == member_username
         and payload.get("e") == member_ed25519_pub_b64
     )
+    if success:
+        logger.info("Membership certificate verification succeeded for user=%s in room=%s", member_username, room_id)
+    else:
+        logger.warning("Membership certificate payload mismatch: expected (room=%s, user=%s) but got (room=%s, user=%s)",
+                       room_id, member_username, payload.get("r"), payload.get("u"))
+    return success
 
 
 def paseto_encrypt(payload: dict, symmetric_key: bytes) -> str:
+    logger.debug("Encrypting payload using PASETO v4 local")
     key = Key.new(version=4, purpose="local", key=symmetric_key)
     token = pyseto.encode(key, payload=json.dumps(payload).encode())
     return token.decode() if isinstance(token, bytes) else token
 
 
 def paseto_decrypt(token_str: str, symmetric_key: bytes) -> dict:
+    logger.debug("Decrypting token using PASETO v4 local")
     key = Key.new(version=4, purpose="local", key=symmetric_key)
     decoded = pyseto.decode(key, token_str.encode() if isinstance(token_str, str) else token_str)
     return json.loads(decoded.payload)
