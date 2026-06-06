@@ -327,6 +327,9 @@ class HelucrypticApp:
         self._session_allowed: set[str]        = set()
         # Shared access token sent to the signaling server (validated server-side).
         self._server_password: str             = HELUCRYPTIC_SERVER_PASSWORD
+        # Session token issued by the server on connect; resent on reconnect to
+        # prove we own this username slot (prevents third-party eviction).
+        self._ws_session_token: str            = ""
         # Incoming-video render throttle (per sender) + encode quality. Lower in
         # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
         self._last_tile_render: dict[str, float] = {}
@@ -1528,6 +1531,8 @@ class HelucrypticApp:
             params["room"] = room
         if self._server_password:
             params["password"] = self._server_password
+        if self._ws_session_token:
+            params["session_token"] = self._ws_session_token
         suffix = ("?" + urllib.parse.urlencode(params)) if params else ""
         base   = _to_ws_url(self.settings.signaling_url)
         url    = f"{base}/ws/{urllib.parse.quote(uname, safe='')}{suffix}"
@@ -1661,6 +1666,9 @@ class HelucrypticApp:
                         room_id = data.get("room_id", "")
                         inviter = data.get("inviter", sender)
                         self._show_room_invite_dialog(inviter, room_id)
+
+                    elif t == "session_token":
+                        self._ws_session_token = (data or {}).get("token", "")
 
                     elif t == "presence":
                         # Server-confirmed online set for our contacts.

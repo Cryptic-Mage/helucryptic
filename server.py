@@ -1,6 +1,7 @@
 import hmac
 import json
 import os
+import secrets as _secrets
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
@@ -20,6 +21,7 @@ _EXPECTED_PASSWORD = os.getenv("HELUCRYPTIC_SERVER_PASSWORD", "")
 active_connections: dict[str, WebSocket] = {}
 rooms:   dict[str, set[str]] = {}   # room_id → {username, ...}
 room_of: dict[str, str]      = {}   # username → room_id
+_session_tokens:   dict[str, str]    = {}   # username → session token (prevents impersonation)
 
 # Message types the server generates — never forward these back into the mesh
 _SERVER_TYPES = {"peer_joined", "peer_left", "room_state", "error"}
@@ -38,6 +40,7 @@ async def websocket_endpoint(
     username: str,
     room: str | None = Query(default=None),
     password: str | None = Query(default=None),
+    session_token: str | None = Query(default=None),
 ):
     # --- Access control (Pre-upgrade) ---
     if not _password_ok(password):
@@ -48,12 +51,22 @@ async def websocket_endpoint(
     await websocket.accept()
 
     if username in active_connections:
+        expected = _session_tokens.get(username, "")
+        supplied = session_token or ""
+        if not (expected and hmac.compare_digest(supplied, expected)):
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "data": "Username already in use by an active session.",
+            }))
+            await websocket.close()
+            return
         old_ws = active_connections[username]
         try:
             await old_ws.close()
         except Exception:
             pass
         active_connections.pop(username, None)
+        _session_tokens.pop(username, None)
 
     # --- Room capacity check ---
     if room:
@@ -79,7 +92,16 @@ async def websocket_endpoint(
             existing.discard(username)
             room_of.pop(username, None)
 
+    new_token = _secrets.token_hex(32)
+    _session_tokens[username] = new_token
     active_connections[username] = websocket
+
+    # Send the session token before any room messages so the client stores it
+    # and can prove ownership on reconnect.
+    await websocket.send_text(json.dumps({
+        "type": "session_token",
+        "data": {"token": new_token},
+    }))
 
     if room:
         existing_peers = list(rooms.get(room, set()))
@@ -153,20 +175,24 @@ async def websocket_endpoint(
     except WebSocketDisconnect:
         pass
     finally:
-        active_connections.pop(username, None)
-        room_id = room_of.pop(username, None)
-        if room_id and room_id in rooms:
-            rooms[room_id].discard(username)
-            if not rooms[room_id]:
-                del rooms[room_id]
-            else:
-                for peer in list(rooms[room_id]):
-                    ws = active_connections.get(peer)
-                    if ws:
-                        try:
-                            await ws.send_text(json.dumps({
-                                "type": "peer_left",
-                                "sender": username,
-                            }))
-                        except Exception:
-                            pass
+        # Guard against the reconnect race: if a new socket has already
+        # replaced this one, skip cleanup so we don't clobber the new state.
+        if active_connections.get(username) is websocket:
+            active_connections.pop(username, None)
+            _session_tokens.pop(username, None)
+            room_id = room_of.pop(username, None)
+            if room_id and room_id in rooms:
+                rooms[room_id].discard(username)
+                if not rooms[room_id]:
+                    del rooms[room_id]
+                else:
+                    for peer in list(rooms[room_id]):
+                        ws = active_connections.get(peer)
+                        if ws:
+                            try:
+                                await ws.send_text(json.dumps({
+                                    "type": "peer_left",
+                                    "sender": username,
+                                }))
+                            except Exception:
+                                pass

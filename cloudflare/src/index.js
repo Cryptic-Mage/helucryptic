@@ -26,6 +26,7 @@ export class SignalHub {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this._sessionTokens = new Map(); // username → session token (prevents impersonation)
   }
 
   // ---- helpers -----------------------------------------------------------
@@ -67,6 +68,12 @@ export class SignalHub {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  _generateToken() {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
   _passwordOk(supplied) {
     // Mirrors server.py: when a password is configured (Cloudflare secret
     // HELUCRYPTIC_SERVER_PASSWORD), the client must send a matching `?password=`.
@@ -91,6 +98,7 @@ export class SignalHub {
     const username = decodeURIComponent(parts[1] || "");
     const room = url.searchParams.get("room") || "";
     const password = url.searchParams.get("password") || "";
+    const sessionToken = url.searchParams.get("session_token") || "";
 
     if (!username) return new Response("missing username", { status: 400 });
 
@@ -99,13 +107,26 @@ export class SignalHub {
       return this._rejectWS("Invalid server access password.");
     }
 
-    // Username uniqueness: REPLACE any existing connection for this name rather
-    // than rejecting. This handles reconnects and stale/zombie sockets left by
-    // abrupt client exits (Cloudflare may not detect a dropped TCP immediately,
-    // so an old socket can still appear "open"). Closing it here is harmless if
-    // it's already dead, and lets the user reconnect with the same name.
-    for (const old of this.state.getWebSockets(`user:${username}`)) {
-      try { old.close(1000, "replaced"); } catch {}
+    // Username uniqueness: only allow eviction if the reconnecting client proves
+    // ownership via the session token issued at their last connect. This prevents
+    // any holder of the server password from impersonating an active user.
+    const existingSockets = this.state.getWebSockets(`user:${username}`);
+    if (existingSockets.length > 0) {
+      const expectedToken = this._sessionTokens.get(username) || "";
+      const enc = new TextEncoder();
+      const a = enc.encode(sessionToken);
+      const b = enc.encode(expectedToken);
+      const tokenOk =
+        expectedToken.length > 0 &&
+        a.byteLength === b.byteLength &&
+        crypto.subtle.timingSafeEqual(a, b);
+      if (!tokenOk) {
+        return this._rejectWS("Username already in use by an active session.");
+      }
+      for (const old of existingSockets) {
+        try { old.close(1000, "replaced"); } catch {}
+      }
+      this._sessionTokens.delete(username);
     }
 
     // Room capacity (max 4) — count only OTHER usernames so a reconnecting
@@ -124,7 +145,14 @@ export class SignalHub {
     const tags = [`user:${username}`];
     if (room) tags.push(`room:${room}`);
     this.state.acceptWebSocket(server, tags);
-    server.serializeAttachment({ username, room });
+
+    // Issue a new session token so the client can prove ownership on reconnect.
+    const newToken = this._generateToken();
+    this._sessionTokens.set(username, newToken);
+    // Store the token in the attachment so webSocketClose can guard against
+    // clobbering a replacement socket's state (reconnect race condition).
+    server.serializeAttachment({ username, room, token: newToken });
+    server.send(JSON.stringify({ type: "session_token", data: { token: newToken } }));
 
     if (room) {
       const existing = this._roomMembers(room).filter((u) => u !== username);
@@ -181,6 +209,11 @@ export class SignalHub {
   async webSocketClose(ws, code, reason) {
     const a = this._attach(ws);
     try { ws.close(code, reason); } catch {}
+    // Only clean up if this socket's token is still the current one — a
+    // replacement socket may have already installed a new token.
+    if (a.username && a.token && a.token === this._sessionTokens.get(a.username)) {
+      this._sessionTokens.delete(a.username);
+    }
     if (!a.room) return;
     // If this user still has another live socket (e.g. we just replaced a stale
     // one with a fresh reconnect), don't announce them as having left.
