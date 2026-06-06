@@ -9,6 +9,10 @@
   <img src="https://img.shields.io/badge/UI-Flet_(Flutter)-00C4CC?style=for-the-badge" alt="Flet UI" />
 </p>
 
+<p align="center">
+  <a href="https://cryptic-mage.github.io/helucryptic/"><strong>🌐 Visit the Live Website / Documentation</strong></a>
+</p>
+
 > **Your conversations. Nobody else's hardware.**  
 > A peer-to-peer, end-to-end encrypted desktop messenger where the server forgets you the moment you've shaken hands.
 
@@ -43,7 +47,14 @@ No message ever touches a server. No file is ever parked in a bucket. There's no
 *   **🔐 True Cryptography** – Forward-secret **X25519** ECDH key exchange deriving fresh session keys, paired with **Ed25519** signature verification and local history encryption.
 *   **🧬 Identity Verification** – Fingerprint comparisons badge verified contacts (green **✓** vs yellow **⚠**). If a verified contact's public key changes, they are instantly un-verified and flagged.
 *   **🗄️ Local Encrypted History** – SQLite history database (WAL mode enabled) encrypted with a key derived from your private identity.
-*   **🌍 Intelligent Traversal** – Traversing firewalls with STUN, TURN relays, and automatic NAT-PMP port forwarding. If just one peer has an open port, the other can tunnel through directly.
+*   **🌍 Intelligent Traversal & Port Mapping** – Traversing firewalls with STUN, TURN relays, and automatic NAT-PMP port forwarding via [PortForwardManager](natpmp.py). Includes an automatic fail-safe threshold (deactivates after 3 consecutive failures to prevent resource/log bloat on unsupported networks).
+*   **👥 Dynamic Hub Failover** – Group chats automatically elect a media-routing host (the **Hub**). If the hub peer disconnects, the remaining peers automatically elect the next-best hub and seamlessly reconnect.
+*   **🔄 Peer-Assisted History Sync** – Connect to a room after being offline and automatically sync missing message history directly from online peers over secure DataChannels, verified and merged locally into SQLite.
+*   **📁 Multi-Profile Sandboxing** – Create multiple sandboxed profiles under `~/.helucryptic/profiles/`. Hot-swap between profiles instantly in settings to change identities, contacts, and history databases without restarting the application.
+*   **🔥 Ephemeral Rooms** – Create temporary rooms that exist purely in-RAM. Message logs, session keys, and even diagnostics buffers are completely purged on leave, leaving zero trace on the disk.
+*   **🛡️ Verified-Only Access Gate** – Optional configuration that automatically blocks incoming messages/calls/file streams from unknown or unverified peers, preventing unsolicited contact.
+*   **⚡ Self-Healing Process Recovery** – The desktop client includes unhandled exception capture and automatic process-level restarting via [restart_app](client.py). If a loop crashes or a startup error occurs, the app gracefully reboots to stay online.
+*   **🌐 Serverless Signaling Option** – Fully serverless, always-on signaling backend option deployed to a Cloudflare Worker + Durable Object using the WebSocket Hibernation API for zero-cost, always-on signaling.
 
 ---
 
@@ -65,14 +76,20 @@ Explore the architecture of the codebase:
 
 | Module / File | Role |
 | :--- | :--- |
-| [main.py](file:///d:/helucryptic/main.py) | App entry point (initializes the Flet interface). |
-| [client.py](file:///d:/helucryptic/client.py) | Main Flet UI: handles chat layout, presence tracking, settings, logs capture, and UI state. |
-| [webrtc_engine.py](file:///d:/helucryptic/webrtc_engine.py) | Core engine: WebRTC peer connections, voice track mixing, screen capture, and file transfer streams. |
-| [server.py](file:///d:/helucryptic/server.py) | Fast API Signaling server: relays SDP/ICE handshake payloads and serves presence queries. |
-| [natpmp.py](file:///d:/helucryptic/natpmp.py) | Implements NAT-PMP protocols to request automatic gateway port mapping. |
-| [crypto.py](file:///d:/helucryptic/crypto.py) | Handles identity keys, PASETO token generation, X25519 agreements, and verification. |
-| [contacts.py](file:///d:/helucryptic/contacts.py) / [history.py](file:///d:/helucryptic/history.py) | SQLite local persistence engines for contact registries and encrypted message history. |
-| [sounds.py](file:///d:/helucryptic/sounds.py) | Audio feedback manager (cues connection sounds and incoming call ringing). |
+| [main.py](main.py) | App entry point (initializes the Flet interface). |
+| [client.py](client.py) | Main Flet UI: [HelucrypticApp](client.py) handles chat layout, presence tracking, settings, logs capture, and UI state. |
+| [webrtc_engine.py](webrtc_engine.py) | Core engine: [WebRTCEngine](webrtc_engine.py) manages WebRTC peer connections, voice track mixing, screen capture, and file transfer streams. |
+| [server.py](server.py) | FastAPI signaling server: [app](server.py) relays SDP/ICE handshake payloads and serves presence queries. |
+| [cloudflare/](cloudflare/) | Serverless signaling server implementation for deployment on Cloudflare Workers ([SignalHub](cloudflare/src/index.js) Durable Object). |
+| [natpmp.py](natpmp.py) | Implements NAT-PMP protocols via [PortForwardManager](natpmp.py) to request automatic gateway port mapping. |
+| [crypto.py](crypto.py) | Handles identity keys, PASETO token generation, X25519 agreements, and verification. |
+| [contacts.py](contacts.py) / [history.py](history.py) | SQLite local persistence engines for contact registries and encrypted message history. |
+| [settings.py](settings.py) | Configuration schema & manager: [load_settings](settings.py) handles DTLS vs E2EE modes, retention, TURN, and Verified-Only gating. |
+| [paths.py](paths.py) | Resolves data directory locations and active profiles. |
+| [profiles.py](profiles.py) | Manages sandboxed profile environments. |
+| [secure_store.py](secure_store.py) | OS Keystore integrations (DPAPI for Windows) to wrap private keys securely. |
+| [invites.py](invites.py) | Decentralized room invitation codec utilizing [encode_invite](invites.py). |
+| [sounds.py](sounds.py) | Audio feedback manager (cues connection sounds and incoming call ringing). |
 
 ---
 
@@ -130,6 +147,19 @@ python3 main.py
 > [!TIP]
 > **Connecting with Friends**: Create a room, click the **person+** or **link** icon next to the room header to copy a decentralized invite link (`HELU-INV1:`). When your friend pastes this invite code, their client will automatically point to the correct signaling server and join the encrypted room instantly.
 
+### 🌐 Serverless Signaling (Cloudflare Workers Deploy)
+
+Instead of hosting a local FastAPI server, you can deploy a serverless, always-on signaling hub to Cloudflare Workers:
+
+```bash
+cd cloudflare
+npm install -g wrangler     # Install wrangler CLI if needed
+wrangler login              # Log in to your Cloudflare account
+wrangler deploy             # Deploy to workers.dev
+```
+
+Once deployed, copy the generated `.workers.dev` URL, open the desktop app settings, choose **Custom Server**, and enter the URL (e.g., `https://helucryptic-signaling.<your-subdomain>.workers.dev`). For more details, see the [Cloudflare README](cloudflare/README.md).
+
 ---
 
 ## ⚙️ Configuration
@@ -142,7 +172,7 @@ cp .env.example .env
 
 ### Key Environment Variables
 
-*   `HELUCRYPTIC_SIGNALING_URL` – WebSocket target of the signaling server (e.g. `ws://127.0.0.1:8000`).
+*   `HELUCRYPTIC_SIGNALING_URL` – WebSocket target of the signaling server. Pre-configured by default to the public Cloudflare Worker (`wss://helucryptic-signaling.crypticmage00.workers.dev/`) for instant connectivity.
 *   `HELUCRYPTIC_SERVER_PASSWORD` – Access password checked by the signaling server before allowing connections.
 *   `HELUCRYPTIC_LOW_PERF_MODE` – Set to `true` to drop capture settings (ideal for low-end hardware).
 *   `HELUCRYPTIC_TURN_URL` / `_USERNAME` / `_PASSWORD` – Traversal credentials to configure optional TURN relays.
@@ -216,6 +246,9 @@ To host your own traversal infrastructure on a Linux VPS:
     sudo systemctl enable turnserver && sudo systemctl restart turnserver
     ```
 
+### 3. Testing Configurations & Diagnostics
+The project includes a robust validation test suite (`tests/`) to verify traversal parameters, including TURN credential validation and port-forwarding mappings (run via `pytest`).
+
 ---
 
 ## 📦 Standalone Executable Build
@@ -229,12 +262,13 @@ This script automates the compilation workspace and saves the portable output to
 
 ---
 
-## 🪶 Performance Optimizations
+## 🪶 Performance & Resilience Optimizations
 
 helucryptic is optimized to run smoothly on legacy devices:
 *   **Frame Repaints**: Screenshare streams update only changed layout controls rather than redrawing the Flet canvas.
 *   **Backpressure Handling**: File transfers are segmented and stream chunks directly from/to disk to avoid memory inflation.
 *   **Engine Decoupling**: SQLite operations run in WAL mode with active indexing to safeguard against disk bottlenecks.
+*   **Resilience & Self-Healing**: Dynamic unhandled loop exception interception ensures that if a background asyncio loop encounters a fatal exception, the client automatically triggers a process reboot (`restart_app()`) to recover immediately.
 
 ---
 
@@ -245,6 +279,7 @@ We value absolute honesty over marketing:
 *   **Fingerprint Verification**: Always verify peer identity badges manually out-of-band to prevent active MITM handshakes.
 *   **Group Relays**: Rooms route media streams through the elected room host (the **Hub**). While text and files are fully E2EE with the room key, the media relay is decrypted at the hub host for forwarding (requires trust in the elected hub peer).
 *   **Protected Identity**: Key pairs saved locally in `keys.json` are wrapped with Windows DPAPI on Windows, making copies unusable on another host or account.
+*   **Verified-Only Mode**: Users can toggle Verified-Only mode in settings, blocking messages/calls/files from anyone whose fingerprint has not been manually verified or explicitly whitelisted for the active session.
 
 ---
 
