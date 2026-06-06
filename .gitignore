@@ -17,5 +17,10 @@ desktop.ini
 *.venv
 *.vscode
 .ruff_cache
+.scannerwork
+.sonarqube
+.agent
+*.spec
 .scannerwork/*
-Helucryptic.spec
+.sonarqube/*
+.agent/*
