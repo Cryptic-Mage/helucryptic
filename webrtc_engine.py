@@ -154,7 +154,7 @@ def elect_hub(member_tiers: dict, creator: str) -> str:
 async def test_turn(turn_url: str, username: str = "", password: str = "") -> tuple[bool, str]:
     """Validate a TURN URL then probe for a relay candidate. Never logs creds."""
     url = (turn_url or "").strip()
-    if not (url.startswith("turn:") or url.startswith("turns:")):
+    if not url.startswith(("turn:", "turns:")):
         return (False, "URL must start with turn: or turns:")
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[
         RTCIceServer(urls=[url], username=username or None, credential=password or None)
@@ -438,6 +438,7 @@ class WebRTCEngine:
         self._forwarded:           dict[str, list]              = {}  # source_peer -> [(dest, sub, sub_id)]
         self._origin_map:          dict[str, str]               = {}  # track_id -> origin username
         self._origin_waiters:      dict[str, asyncio.Future]    = {}  # track_id -> Future waiting for origin
+        self._bg_tasks:            set                          = set()  # strong refs to fire-and-forget tasks
 
         # Shared media sources fanned out to every peer via a relay so the mic
         # is only captured once and the screen is only grabbed once, regardless
@@ -620,10 +621,18 @@ class WebRTCEngine:
     # Track-origin helpers (receiver-side SFU origin keying)
     # ------------------------------------------------------------------
 
+    def _bg(self, coro) -> "asyncio.Task":
+        """Schedule a coroutine as a background task, holding a strong reference
+        so the GC cannot collect it before it finishes (Python ≥ 3.12 risk)."""
+        t = asyncio.ensure_future(coro)
+        self._bg_tasks.add(t)
+        t.add_done_callback(self._bg_tasks.discard)
+        return t
+
     def _origin_of(self, track_id: str):
         return self._origin_map.get(track_id)
 
-    async def _handle_track_origin(self, frame: dict, peer: str) -> None:
+    def _handle_track_origin(self, frame: dict) -> None:
         tid = frame["track_id"]
         self._origin_map[tid] = frame["origin"]
         fut = self._origin_waiters.pop(tid, None)
@@ -684,8 +693,7 @@ class WebRTCEngine:
 
             # Clean up automatically when the connection fails or closes
             if state in ("closed", "failed"):
-                # Asynchronously clean up the dead peer connection
-                asyncio.ensure_future(self.remove_peer(peer))
+                self._bg(self.remove_peer(peer))
 
         @pc.on("iceconnectionstatechange")
         def on_ice_state():
@@ -708,11 +716,11 @@ class WebRTCEngine:
         @pc.on("track")
         def on_track(track):
             if track.kind == "video":
-                asyncio.ensure_future(self._render_video(track, peer))
+                self._bg(self._render_video(track, peer))
             elif track.kind == "audio":
-                asyncio.ensure_future(self._handle_incoming_audio(track, peer))
+                self._bg(self._handle_incoming_audio(track, peer))
             if self.room_id and self.current_hub() == self.my_username:
-                asyncio.ensure_future(self._relay_track_to_others(peer, track))
+                self._bg(self._relay_track_to_others(peer, track))
 
     # ------------------------------------------------------------------
     # DataChannel binding
@@ -758,7 +766,7 @@ class WebRTCEngine:
         # ALREADY be open, so the "open" event above would never fire. Run the
         # open logic immediately in that case.
         if getattr(channel, "readyState", None) == "open":
-            asyncio.ensure_future(_on_open())
+            self._bg(_on_open())
 
     # ------------------------------------------------------------------
     # PSK channel authentication (feature C)
@@ -954,7 +962,7 @@ class WebRTCEngine:
                     print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
                     if self.on_key_change:
                         self.on_key_change(peer)
-                    asyncio.create_task(self.remove_peer(peer))
+                    self._bg(self.remove_peer(peer))
                     return
                 # An UNVERIFIED (trust-on-first-use) contact re-keyed. Don't drop
                 # their frames silently — surface the change AND re-pin the new key
@@ -984,7 +992,7 @@ class WebRTCEngine:
                     if self.on_key_change:
                         self.on_key_change(peer)
                     # Tear down the peer connection immediately
-                    asyncio.create_task(self.remove_peer(peer))
+                    self._bg(self.remove_peer(peer))
                     return
 
             # SEC-03: Reject a hello whose signed timestamp is wildly stale/future.
@@ -1073,7 +1081,7 @@ class WebRTCEngine:
         self.my_membership_cert = cert
         print(f"[membership] {self.my_username}: received membership cert from {peer}", flush=True)
         # Tell everyone we're now a vouched member so they upgrade our badge.
-        for p in list(self.data_channels.keys()):
+        for p in self.data_channels:
             ch = self.data_channels.get(p)
             if ch and ch.readyState == "open":
                 mf = self._encrypt_frame_for({"__type": "membership", "cert": cert}, p)
@@ -1154,7 +1162,7 @@ class WebRTCEngine:
         await self._dispatch_frame(frame, peer)
         if (self.room_id and self.current_hub() == self.my_username
                 and frame.get("__type") in ("chat", "file_meta", "file_end")):
-            await self._relay_frame_to_others(raw, source=peer)
+            self._relay_frame_to_others(raw, source=peer)
 
     async def _handle_binary(self, data: bytes, peer: str) -> None:
         if not (self._hello_sent.get(peer) and self._peer_hello_verified.get(peer)):
@@ -1182,13 +1190,13 @@ class WebRTCEngine:
                 self.on_file_chunk(state["filename"], received, state["size"])
         if (self.room_id and self.current_hub() == self.my_username
                 and self._file_buffers.get(peer, {}).get("_current")):
-            await self._relay_frame_to_others(data, source=peer)
+            self._relay_frame_to_others(data, source=peer)
 
     async def _dispatch_frame(self, frame: dict, peer: str) -> None:
         t = frame.get("__type")
 
         if t == "track_origin":
-            await self._handle_track_origin(frame, peer)
+            self._handle_track_origin(frame)
             return
 
         if t == "group_key":
@@ -1307,10 +1315,10 @@ class WebRTCEngine:
     # Hub relay primitive
     # ------------------------------------------------------------------
 
-    async def _relay_frame_to_others(self, payload, source: str) -> None:
+    def _relay_frame_to_others(self, payload, source: str) -> None:
         """Hub relay: forward a chat/file frame (str) or binary chunk (bytes) to
         every member except the source. Ciphertext is forwarded untouched."""
-        for dest, ch in list(self.data_channels.items()):
+        for dest, ch in self.data_channels.items():
             if dest in (source, self.my_username):
                 continue  # never echo to the source or loop back to self
             if getattr(ch, "readyState", None) == "open":
@@ -1716,7 +1724,7 @@ class WebRTCEngine:
         self._is_negotiating.pop(username, None)
         self._neg_dirty.pop(username, None)
         file_states = self._file_buffers.pop(username, {})
-        for state in list(file_states.values()):
+        for state in file_states.values():
             if isinstance(state, dict):
                 self._close_file_state(state, delete=True)
         self._ice_states.pop(username, None)
@@ -1753,7 +1761,7 @@ class WebRTCEngine:
                     # the group key. Establish a fresh key and distribute it so
                     # the survivors can keep talking (and any stuck buffer flushes).
                     self.group_key = os.urandom(32)
-                    for p in list(self.pcs.keys()):
+                    for p in self.pcs:
                         if p in self.session_keys:
                             await self._send_group_key_to(p)
                 await self._flush_group_buffer()
@@ -1972,7 +1980,7 @@ class WebRTCEngine:
         # backlog.
         mix = np.zeros(frames, dtype=np.int32)
         with self._play_lock:
-            for peer in list(self._play_chunks.keys()):
+            for peer in self._play_chunks:
                 dq    = self._play_chunks[peer]
                 need  = frames
                 taken = 0
