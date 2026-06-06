@@ -154,7 +154,8 @@ class PortForwardManager:
                  publish_fn: Callable[[str, list], None],
                  clear_fn: Callable[[], None] | None = None,
                  renew_interval: int = 45,
-                 pool_size: int = 1) -> None:
+                 pool_size: int = 1,
+                 max_failures: int = 3) -> None:
         self.gateway = gateway
         self.local_ip = local_ip
         self._request_fn = request_fn
@@ -162,9 +163,11 @@ class PortForwardManager:
         self._clear_fn = clear_fn or (lambda: None)
         self._interval = renew_interval
         self.pool_size = pool_size
+        self.max_failures = max_failures
         self.current_port: int | None = None
         self.current_ports: list = []
         self._task: asyncio.Task | None = None
+        self._fail_count: int = 0
 
     async def _detect_once(self) -> None:
         logger.info("Executing NAT-PMP detection loop cycle")
@@ -174,11 +177,16 @@ class PortForwardManager:
             if p is not None:
                 ports.append(p)
         if not ports or self.local_ip is None:
-            logger.warning("NAT-PMP port mapping failed or empty")
+            self._fail_count += 1
+            logger.warning(
+                "NAT-PMP port mapping failed or empty (failure %d/%d)",
+                self._fail_count, self.max_failures,
+            )
             self.current_ports = []
             self.current_port = None
             self._clear_fn()
             return
+        self._fail_count = 0
         self.current_ports = ports
         self.current_port = ports[0]
         logger.info("Successfully mapped port pool: %s (selected default: %s)", ports, ports[0])
@@ -187,6 +195,14 @@ class PortForwardManager:
     async def _loop(self) -> None:
         while True:
             await self._detect_once()
+            if self._fail_count >= self.max_failures:
+                logger.info(
+                    "NAT-PMP: gateway %s did not respond after %d attempts — "
+                    "port forwarding unavailable on this network, stopping.",
+                    self.gateway, self.max_failures,
+                )
+                self._task = None
+                return
             await asyncio.sleep(self._interval)
 
     def start(self) -> None:
