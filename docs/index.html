@@ -1,0 +1,1641 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>helucryptic | True Peer-to-Peer, End-to-End Encrypted Messenger</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        obsidian: '#090a0f',
+                        slatePanel: '#11131f',
+                        slateBorder: '#1e293b',
+                        accentBlue: '#2563eb',
+                        accentSky: '#0ea5e9',
+                        accentEmerald: '#10b981',
+                        accentAmber: '#d97706',
+                        textPrimary: '#f8fafc',
+                        textSecondary: '#94a3b8',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Space Grotesk', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Fira Code', 'monospace']
+                    },
+                    boxShadow: {
+                        premium: '0 4px 20px -2px rgba(0, 0, 0, 0.5)',
+                        subtleGlow: '0 0 15px rgba(14, 165, 233, 0.15)',
+                        emeraldGlow: '0 0 15px rgba(16, 185, 129, 0.15)'
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        :root {
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #090a0f;
+            color: #f8fafc;
+            overflow-x: hidden;
+        }
+        
+        .font-display {
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .font-mono {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        /* Clean, Solid Card Styling - Replaces AI Glassmorphism Slop */
+        .premium-card {
+            background-color: #11131f;
+            border: 1px solid #1e293b;
+            box-shadow: 0 4px 24px -6px rgba(0, 0, 0, 0.6);
+            transition: border-color 0.25s var(--ease-out-expo), background-color 0.25s var(--ease-out-expo);
+        }
+
+        .premium-card-hover {
+            transition: all 0.3s var(--ease-out-expo);
+        }
+
+        .premium-card-hover:hover {
+            transform: translateY(-2px);
+            border-color: #3b82f6;
+            background-color: #141727;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #090a0f;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #2563eb;
+        }
+
+        /* Code Block Styling */
+        .terminal-code span.keyword { color: #f43f5e; }
+        .terminal-code span.string { color: #10b981; }
+        .terminal-code span.function { color: #38bdf8; }
+        .terminal-code span.comment { color: #64748b; }
+        .terminal-code span.variable { color: #fbbf24; }
+
+        .smooth-transition {
+            transition: all 0.2s var(--ease-out-quint);
+        }
+
+        /* Slide Dash Effect for signaling pipelines */
+        @keyframes slideDash {
+            to { stroke-dashoffset: -20; }
+        }
+        .anim-dash {
+            animation: slideDash 1s linear infinite;
+        }
+
+        /* Scroll triggered entry layout */
+        .reveal-on-scroll {
+            opacity: 0;
+            transform: translateY(12px);
+            transition: opacity 0.5s var(--ease-out-expo), transform 0.5s var(--ease-out-expo);
+        }
+        .reveal-on-scroll.reveal-active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Voice wave scale loop on hover */
+        @keyframes voiceWave {
+            0%, 100% { transform: scaleY(0.6); }
+            50% { transform: scaleY(1.4); }
+        }
+        .wave-bar {
+            transform-origin: center;
+        }
+        .group:hover .wave-bar-1 { animation: voiceWave 0.5s ease-in-out infinite; }
+        .group:hover .wave-bar-2 { animation: voiceWave 0.7s ease-in-out infinite 0.1s; }
+        .group:hover .wave-bar-3 { animation: voiceWave 0.4s ease-in-out infinite 0.2s; }
+        .group:hover .wave-bar-4 { animation: voiceWave 0.6s ease-in-out infinite 0.15s; }
+
+        /* Scanning screen line on hover */
+        @keyframes scanLine {
+            0% { transform: translateY(-12px); opacity: 0; }
+            50% { opacity: 0.8; }
+            100% { transform: translateY(12px); opacity: 0; }
+        }
+        .group:hover .laser-scanner {
+            animation: scanLine 1.4s ease-in-out infinite;
+        }
+
+        /* Dynamic download stream arrow motion */
+        @keyframes streamDown {
+            0% { transform: translateY(-12px); opacity: 0; }
+            50% { opacity: 1; }
+            100% { transform: translateY(12px); opacity: 0; }
+        }
+        .group:hover .stream-arrow {
+            animation: streamDown 1s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+        }
+
+        /* Security scan path glow */
+        @keyframes printGlow {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; stroke: #10b981; filter: drop-shadow(0 0 3px #10b981); }
+        }
+        .group:hover .fingerprint-path {
+            animation: printGlow 1.2s var(--ease-out-expo) infinite;
+        }
+
+        /* Interactive tabs and focus styles */
+        *:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 2px #090a0f, 0 0 0 4px #2563eb;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+            .reveal-on-scroll {
+                opacity: 1 !important;
+                transform: none !important;
+            }
+        }
+    </style>
+</head>
+<body class="relative min-h-screen">
+
+    <!-- Interactive Canvas Particle Background (Very subtle opacity to remain premium, not sloppy) -->
+    <canvas id="particleCanvas" class="absolute top-0 left-0 w-full h-[120vh] pointer-events-none z-0 opacity-15" aria-hidden="true"></canvas>
+
+    <!-- FLOATING NAVBAR -->
+    <header class="sticky top-4 left-0 right-0 z-50 mx-auto max-w-7xl px-4">
+        <nav class="bg-slatePanel/95 border border-slateBorder/80 rounded-xl px-6 py-3 flex items-center justify-between shadow-xl" aria-label="Main Navigation">
+            <!-- Brand Logo -->
+            <a href="#" class="flex items-center gap-3 group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded-xl p-1" aria-label="helucryptic home">
+                <div class="relative flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-tr from-accentBlue to-accentSky p-[1.5px] smooth-transition group-hover:scale-[1.03]">
+                    <div class="w-full h-full bg-obsidian rounded-md flex items-center justify-center">
+                        <svg class="w-5 h-5 text-accentSky" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <rect x="5" y="11" width="14" height="10" rx="2" stroke="currentColor" stroke-width="2"/>
+                            <path d="M12 15V17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M8 11V7C8 4.79086 9.79086 3 12 3C14.2091 3 16 4.79086 16 7V11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="flex flex-col">
+                    <span class="font-display font-bold text-lg tracking-wide text-white">helucryptic</span>
+                    <span class="text-[9px] font-mono tracking-widest uppercase text-accentSky font-semibold">P2P Networked</span>
+                </div>
+            </a>
+
+            <!-- Nav Links -->
+            <div class="hidden md:flex items-center gap-8 text-sm font-medium text-slate-300" role="menubar">
+                <a href="#features" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded p-1" role="menuitem">Features</a>
+                <a href="#visualizer" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded p-1" role="menuitem">P2P Handshake</a>
+                <a href="#cryptography" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded p-1" role="menuitem">Cryptography</a>
+                <a href="#setup" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded p-1" role="menuitem">Setup Config</a>
+                <a href="#architecture" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky rounded p-1" role="menuitem">Architecture</a>
+            </div>
+
+            <!-- GitHub CTA Button with Live API Sync Indicators -->
+            <a href="https://github.com/Cryptic-Mage/helucryptic" target="_blank" rel="noopener noreferrer" 
+               class="relative inline-flex items-center gap-3 px-4 py-2 rounded-lg text-xs font-mono tracking-tight font-medium bg-slatePanel border border-slateBorder hover:border-accentSky/50 text-white transition-all hover:shadow-subtleGlow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky group hover:scale-[1.02] active:scale-[0.98] min-h-[44px]"
+               aria-label="Visit helucryptic GitHub repository, opens in new tab">
+                <svg class="w-4 h-4 text-slate-300 group-hover:text-accentSky transition-colors" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.44 22 12.017 22 6.484 17.522 2 12 2z"/>
+                </svg>
+                <div class="flex flex-col items-start leading-none justify-center">
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-[10px] text-slate-400">View Source</span>
+                        <span class="relative flex h-1.5 w-1.5">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accentEmerald opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-accentEmerald" id="api-status-dot"></span>
+                        </span>
+                    </div>
+                    <span class="text-[11px] font-bold text-white group-hover:text-accentSky flex items-center gap-1 mt-0.5">
+                        ★ <span id="github-stars">1,284</span> <span class="text-slate-500">|</span> <span id="github-forks">142</span> forks
+                    </span>
+                </div>
+            </a>
+        </nav>
+    </header>
+
+    <!-- HERO SECTION -->
+    <main id="main-content">
+        <section class="relative z-10 max-w-7xl mx-auto px-4 pt-16 md:pt-24 pb-20 reveal-on-scroll">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+                
+                <!-- Hero Text -->
+                <div class="lg:col-span-6 space-y-8 text-center lg:text-left">
+                    <!-- Status Pill -->
+                    <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slatePanel border border-slateBorder text-xs text-slate-300 font-mono">
+                        <span class="relative flex h-2.5 w-2.5">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-accentEmerald opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-accentEmerald"></span>
+                        </span>
+                        v1.4.2 — Native Cryptographic Handshaking
+                    </div>
+
+                    <!-- Main Title -->
+                    <h1 class="font-display font-bold text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-tight text-white">
+                        Your Conversations.<br>
+                        <span class="bg-gradient-to-r from-accentSky to-accentBlue bg-clip-text text-transparent">Nobody Else's</span> Hardware.
+                    </h1>
+
+                    <!-- Sub-headline -->
+                    <p class="text-slate-300 text-base sm:text-lg leading-relaxed max-w-xl mx-auto lg:mx-0">
+                        Most encrypted chat apps still tunnel your messages through the cloud. <span class="text-white font-medium">helucryptic doesn't.</span> A tiny signaling server coordinates a handshake, then bows out. Every text, file, voice packet, and pixel flows directly from your device to theirs.
+                    </p>
+
+                    <!-- CTAs -->
+                    <div class="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4 pt-2">
+                        <a href="https://github.com/Cryptic-Mage/helucryptic" target="_blank" rel="noopener noreferrer"
+                           class="w-full sm:w-auto px-8 py-4 rounded-lg bg-accentBlue text-white font-bold text-sm tracking-wide text-center hover:bg-blue-700 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky focus-visible:ring-offset-2 focus-visible:ring-offset-obsidian"
+                           aria-label="Get Started with helucryptic, opens repository in a new tab">
+                            Get Started (GitHub)
+                        </a>
+                        <a href="#cryptography"
+                           class="w-full sm:w-auto px-8 py-4 rounded-lg bg-slatePanel border border-slateBorder text-white font-semibold text-sm tracking-wide text-center transition-all hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky focus-visible:ring-offset-2 focus-visible:ring-offset-obsidian">
+                            Read Cryptography Whitepaper
+                        </a>
+                    </div>
+
+                    <!-- Mini Audit Banner -->
+                    <div class="pt-6 border-t border-slateBorder flex flex-wrap gap-x-8 gap-y-3 justify-center lg:justify-start text-xs font-mono text-slate-400">
+                        <div class="flex items-center gap-1.5">
+                            <i data-lucide="shield-check" class="w-4 h-4 text-accentEmerald" aria-hidden="true"></i>
+                            <span>PASETO v4 Crypto</span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <i data-lucide="cpu" class="w-4 h-4 text-accentSky" aria-hidden="true"></i>
+                            <span>Zero External Handshakes</span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <i data-lucide="refresh-cw" class="w-4 h-4 text-accentSky" aria-hidden="true"></i>
+                            <span>Ephem. X25519 ECDH</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hero Desktop Client Mockup -->
+                <div class="lg:col-span-6 relative">
+                    <div class="absolute -inset-1 bg-gradient-to-r from-accentSky/10 to-accentBlue/10 rounded-2xl blur-lg" aria-hidden="true"></div>
+                    <div class="relative premium-card rounded-xl overflow-hidden shadow-2xl">
+                        <!-- Window Header -->
+                        <div class="bg-obsidian px-4 py-3 flex items-center justify-between border-b border-slateBorder/80">
+                            <div class="flex items-center gap-2">
+                                <span class="w-3 h-3 rounded-full bg-red-500/85"></span>
+                                <span class="w-3 h-3 rounded-full bg-yellow-500/85"></span>
+                                <span class="w-3 h-3 rounded-full bg-green-500/85"></span>
+                                <span class="text-[11px] font-mono text-slate-400 ml-4">helucryptic Desktop Client v1.4</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="px-2 py-0.5 rounded bg-obsidian border border-accentEmerald/30 text-[9px] font-mono text-accentEmerald uppercase tracking-widest flex items-center gap-1">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-accentEmerald animate-pulse"></span> E2EE Node Verified
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Client Interface Layout (Fully Responsive Grid Stacked Setup) -->
+                        <div class="grid grid-cols-1 md:grid-cols-12 min-h-[380px] text-slate-300">
+                            <!-- Sidebar (Peers) -->
+                            <div class="col-span-12 md:col-span-4 bg-obsidian border-b md:border-b-0 md:border-r border-slateBorder/60 p-3 flex flex-col justify-between">
+                                <div class="space-y-3">
+                                    <div class="text-[10px] font-mono uppercase text-slate-400 tracking-wider font-semibold">Peers Online</div>
+                                    <div class="space-y-1">
+                                        <div class="flex items-center justify-between p-2 rounded-lg bg-slatePanel/60 border border-slateBorder">
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-6 h-6 rounded bg-gradient-to-tr from-accentBlue to-accentSky flex items-center justify-center text-[10px] font-bold text-white">B</div>
+                                                <div class="leading-none">
+                                                    <div class="text-[11px] font-semibold text-white">Bob_Node</div>
+                                                    <div class="text-[8px] text-accentEmerald font-mono">Direct Connection</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center justify-between p-2 rounded-lg opacity-60">
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-6 h-6 rounded bg-zinc-800 flex items-center justify-center text-[10px] font-bold text-white">A</div>
+                                                <div class="leading-none">
+                                                    <div class="text-[11px] font-semibold text-white">Alice_Node</div>
+                                                    <div class="text-[8px] text-slate-400 font-mono">Awaiting Handshake</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="border-t border-slateBorder/60 pt-2 text-[9px] font-mono text-slate-400">
+                                    Local IP: 192.168.1.45<br>
+                                    Ext: 104.22.45.181 (NAT-3)
+                                </div>
+                            </div>
+
+                            <!-- Chat Area -->
+                            <div class="col-span-12 md:col-span-8 bg-slatePanel flex flex-col justify-between p-4 min-h-[280px] md:min-h-0">
+                                <!-- Stream Header -->
+                                <div class="flex items-center justify-between border-b border-slateBorder/60 pb-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-xs font-bold text-white">Direct Session #4829</span>
+                                        <span class="text-[9px] font-mono text-slate-300 bg-obsidian px-1.5 py-0.5 rounded border border-slateBorder/80">X25519_ECDH</span>
+                                    </div>
+                                    <div class="flex gap-2">
+                                        <button class="p-1 hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky h-[36px] w-[36px] flex items-center justify-center rounded-lg" aria-label="Start secure audio call"><i data-lucide="phone-call" class="w-4 h-4 text-accentEmerald"></i></button>
+                                        <button class="p-1 hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky h-[36px] w-[36px] flex items-center justify-center rounded-lg" aria-label="Start screen sharing"><i data-lucide="monitor" class="w-4 h-4 text-slate-300"></i></button>
+                                    </div>
+                                </div>
+
+                                <!-- Messages Area -->
+                                <div class="flex-1 overflow-y-auto py-3 space-y-3 font-mono text-[10.5px]">
+                                    <div class="text-center text-[9px] text-slate-400">
+                                        --- E2EE Channel Secured via PASETO v4 ---
+                                    </div>
+                                    <div class="flex flex-col items-end">
+                                        <div class="bg-blue-600/10 border border-blue-500/20 text-blue-200 rounded-lg px-2.5 py-1.5 max-w-[85%] rounded-br-none">
+                                            Did the database design documentation sync?
+                                        </div>
+                                        <span class="text-[8px] text-slate-400 mt-0.5">12:20 PM • Sent (Direct)</span>
+                                    </div>
+                                    <div class="flex flex-col items-start">
+                                        <div class="bg-zinc-800/80 border border-slateBorder text-slate-200 rounded-lg px-2.5 py-1.5 max-w-[85%] rounded-bl-none">
+                                            Yes, received via stream. Verification Hash is: 
+                                            <span class="text-accentSky">SHA256:d82f7e...</span>
+                                        </div>
+                                        <span class="text-[8px] text-slate-400 mt-0.5">12:21 PM • Bob_Node</span>
+                                    </div>
+                                </div>
+
+                                <!-- Input Bar -->
+                                <div class="flex items-center gap-2 bg-obsidian border border-slateBorder rounded-lg p-1.5">
+                                    <input type="text" aria-label="Secure payload message" placeholder="Type direct secure payload..." class="flex-1 bg-transparent border-none text-[11px] text-white focus:ring-0 focus:outline-none px-2" disabled value="Encrypted pipe open...">
+                                    <button class="p-1.5 bg-accentBlue text-white rounded font-bold text-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky hover:scale-[1.05] active:scale-[0.95] smooth-transition" aria-label="Send message">
+                                        <i data-lucide="send" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- SECTION 2: INTERACTIVE P2P HANDSHAKE VISUALIZER -->
+        <section id="visualizer" class="relative z-10 max-w-7xl mx-auto px-4 py-20 border-t border-slateBorder/80 reveal-on-scroll">
+            <div class="text-center max-w-3xl mx-auto mb-16">
+                <h2 class="font-display font-bold text-3xl sm:text-4xl text-white mb-4">
+                    P2P Secure Connection Handshake
+                </h2>
+                <p class="text-slate-300 text-sm sm:text-base leading-relaxed">
+                    Watch how helucryptic bypasses centralized message routing. Explore the 4 core phases that move a chat session from basic signaling directly to a mathematically locked direct network pipe.
+                </p>
+            </div>
+
+            <!-- Interactive Diagram Layout -->
+            <div class="premium-card rounded-xl border border-slateBorder p-6 md:p-8 shadow-2xl max-w-5xl mx-auto">
+                <!-- Diagram Stage/Timeline Selectors (Touch Target Minimums Met) -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-2.5 mb-10" role="tablist" aria-label="Handshake Phases">
+                    <button onclick="setHandshakePhase(1)" id="phase-btn-1" role="tab" aria-selected="true" aria-controls="handshakeMessage" class="phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-accentSky/30 bg-accentSky/5 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                        <span class="block text-[10px] font-mono text-accentSky uppercase tracking-widest mb-1">Phase 1</span>
+                        <span class="block text-xs font-bold text-white">SDP Signaling</span>
+                    </button>
+                    <button onclick="setHandshakePhase(2)" id="phase-btn-2" role="tab" aria-selected="false" aria-controls="handshakeMessage" class="phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-slateBorder bg-obsidian/30 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                        <span class="block text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-1">Phase 2</span>
+                        <span class="block text-xs font-bold text-slate-300">ICE Gathering</span>
+                    </button>
+                    <button onclick="setHandshakePhase(3)" id="phase-btn-3" role="tab" aria-selected="false" aria-controls="handshakeMessage" class="phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-slateBorder bg-obsidian/30 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                        <span class="block text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-1">Phase 3</span>
+                        <span class="block text-xs font-bold text-slate-300">Direct Pipe</span>
+                    </button>
+                    <button onclick="setHandshakePhase(4)" id="phase-btn-4" role="tab" aria-selected="false" aria-controls="handshakeMessage" class="phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-slateBorder bg-obsidian/30 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                        <span class="block text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-1">Phase 4</span>
+                        <span class="block text-xs font-bold text-slate-300">PASETO Secure</span>
+                    </button>
+                </div>
+
+                <!-- Handshake SVG Canvas Wrapper -->
+                <div class="relative bg-obsidian rounded-xl border border-slateBorder p-6 min-h-[300px] flex items-center justify-center overflow-hidden">
+                    <!-- Background decorative grid lines -->
+                    <div class="absolute inset-0 bg-[linear-gradient(to_right,#11131f_1px,transparent_1px),linear-gradient(to_bottom,#11131f_1px,transparent_1px)] bg-[size:24px_24px] opacity-40"></div>
+                    
+                    <!-- Live handshaking SVG canvas -->
+                    <svg id="handshakeSvg" class="relative z-10 w-full max-w-3xl h-[240px]" viewBox="0 0 800 240" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Peer to Peer communication and security phase visualizer graph">
+                        <defs>
+                            <linearGradient id="cyanBlue" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#0ea5e9" />
+                                <stop offset="100%" stop-color="#2563eb" />
+                            </linearGradient>
+                            <linearGradient id="emeraldGreenGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#059669" />
+                                <stop offset="100%" stop-color="#10b981" />
+                            </linearGradient>
+                        </defs>
+
+                        <!-- Connections Layer -->
+                        <!-- Alice to Server path (dashed signaling flow) -->
+                        <path id="pathAliceServer" d="M 120 160 L 400 60" stroke="transparent" stroke-width="2" stroke-dasharray="6,4" />
+                        <!-- Server to Bob path (dashed signaling flow) -->
+                        <path id="pathServerBob" d="M 400 60 L 680 160" stroke="transparent" stroke-width="2" stroke-dasharray="6,4" />
+                        
+                        <!-- Direct Pipe Connection (Completely invisible in Phase 1 & 2 to prevent overlaps) -->
+                        <path id="pathDirectPipe" d="M 120 160 L 680 160" stroke="transparent" stroke-width="6" stroke-linecap="round" class="smooth-transition" />
+                        
+                        <!-- Flowing Handshake Pulse Nodes (Live animated packets) -->
+                        <circle id="pulseAliceServer" cx="120" cy="160" r="5" fill="#0ea5e9" opacity="0">
+                            <animate id="animAliceServerX" attributeName="cx" from="120" to="400" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animAliceServerY" attributeName="cy" from="160" to="60" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animAliceServerOpacity" attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                        </circle>
+
+                        <circle id="pulseServerBob" cx="400" cy="60" r="5" fill="#0ea5e9" opacity="0">
+                            <animate id="animServerBobX" attributeName="cx" from="400" to="680" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animServerBobY" attributeName="cy" from="60" to="160" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animServerBobOpacity" attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="1.2s" begin="indefinite" repeatCount="indefinite" />
+                        </circle>
+
+                        <circle id="pulseDirectAliceBob" cx="120" cy="160" r="5" fill="#0ea5e9" opacity="0">
+                            <animate id="animDirectAliceBob" attributeName="cx" from="120" to="680" dur="1.5s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animDirectAliceBobOpacity" attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="1.5s" begin="indefinite" repeatCount="indefinite" />
+                        </circle>
+
+                        <circle id="pulseDirectBobAlice" cx="680" cy="160" r="5" fill="#10b981" opacity="0">
+                            <animate id="animDirectBobAlice" attributeName="cx" from="680" to="120" dur="1.5s" begin="indefinite" repeatCount="indefinite" />
+                            <animate id="animDirectBobAliceOpacity" attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="1.5s" begin="indefinite" repeatCount="indefinite" />
+                        </circle>
+
+                        <!-- Signaling Server Node -->
+                        <g id="nodeServer" class="transition-opacity duration-500">
+                            <circle cx="400" cy="60" r="30" fill="#11131f" stroke="#1e293b" stroke-width="2"/>
+                            <rect x="388" y="48" width="24" height="24" rx="4" fill="#090a0f" stroke="#1e293b" stroke-width="1"/>
+                            <path d="M394 54 H406 M394 60 H406 M394 66 H400" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+                            <circle cx="420" cy="48" r="4" fill="#10b981"/>
+                            <text x="400" y="105" fill="#94a3b8" font-size="11" font-family="monospace" text-anchor="middle">Signaling Server</text>
+                            <text x="400" y="120" fill="#64748b" font-size="9" font-family="monospace" text-anchor="middle">ws://127.0.0.1:8000</text>
+                            <g id="serverGreyLock" class="hidden">
+                                <rect x="370" y="30" width="60" height="60" rx="30" fill="#090a0f" opacity="0.85"/>
+                                <path d="M394 65 V57 C394 53.68 396.68 51 400 51 C403.32 51 406 53.68 406 57 V65 H394 Z" stroke="#64748b" stroke-width="2" fill="none"/>
+                                <rect x="391" y="60" width="18" height="13" rx="2" fill="#64748b"/>
+                            </g>
+                        </g>
+
+                        <!-- Alice Node -->
+                        <g id="nodeAlice">
+                            <circle cx="120" cy="160" r="32" fill="#11131f" stroke="#0ea5e9" stroke-width="2"/>
+                            <circle cx="120" cy="154" r="10" stroke="#0ea5e9" stroke-width="1.5" fill="none"/>
+                            <path d="M106 176 C106 168.27 112.27 165 120 165 C127.73 165 134 168.27 134 176" stroke="#0ea5e9" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                            <text x="120" y="208" fill="#ffffff" font-size="12" font-family="sans-serif" font-weight="bold" text-anchor="middle">Alice (Client A)</text>
+                            <text x="120" y="222" fill="#94a3b8" font-size="10" font-family="monospace" text-anchor="middle">Initiator Node</text>
+                        </g>
+
+                        <!-- Bob Node -->
+                        <g id="nodeBob">
+                            <circle cx="680" cy="160" r="32" fill="#11131f" stroke="#2563eb" stroke-width="2"/>
+                            <circle cx="680" cy="154" r="10" stroke="#2563eb" stroke-width="1.5" fill="none"/>
+                            <path d="M666 176 C666 168.27 672.27 165 680 165 C687.73 165 694 168.27 694 176" stroke="#2563eb" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                            <text x="680" y="208" fill="#ffffff" font-size="12" font-family="sans-serif" font-weight="bold" text-anchor="middle">Bob (Client B)</text>
+                            <text x="680" y="222" fill="#94a3b8" font-size="10" font-family="monospace" text-anchor="middle">Peer Node</text>
+                        </g>
+
+                        <!-- PASETO Security Shield Overlay -->
+                        <g id="secureShield" class="hidden">
+                            <rect x="375" y="130" width="50" height="60" rx="6" fill="#090a0f" stroke="#10b981" stroke-width="2"/>
+                            <path d="M385 142 L400 137 L415 142 V155 C415 164.25 400 174 400 174 C400 174 385 164.25 385 155 V142 Z" fill="#10b981" opacity="0.3"/>
+                            <path d="M385 142 L400 137 L415 142 V155 C415 164.25 400 174 400 174 C400 174 385 164.25 385 155 V142 Z" stroke="#10b981" stroke-width="2" stroke-linejoin="round" fill="none"/>
+                            <path d="M394 153 L398 157 L406 148" stroke="#ffffff" stroke-width="2" stroke-linecap="round" fill="none"/>
+                        </g>
+                    </svg>
+
+                    <!-- Floating description panel -->
+                    <div id="handshakeMessage" role="tabpanel" class="absolute bottom-4 left-4 right-4 bg-slatePanel/95 border border-slateBorder px-4 py-3 rounded-lg text-xs font-mono flex items-start gap-3 smooth-transition">
+                        <div class="p-1.5 rounded bg-accentSky/10 text-accentSky">
+                            <i data-lucide="info" class="w-4 h-4" aria-hidden="true"></i>
+                        </div>
+                        <div>
+                            <div class="font-bold text-white uppercase tracking-wider text-[10px] mb-0.5" id="handshakeMsgTitle">Phase 1: SDP Session Offer Exchange</div>
+                            <p class="text-slate-300" id="handshakeMsgDesc">Alice registers her presence with the Signaling server and relays her session specifications. The server routes Alice's SDP parameters to Bob's client coordinates instantly.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECTION 3: CORE FEATURE DASHBOARD WITH INTERACTIVE SVGS -->
+        <section id="features" class="relative z-10 max-w-7xl mx-auto px-4 py-20 reveal-on-scroll">
+            <div class="text-center max-w-3xl mx-auto mb-16">
+                <h2 class="font-display font-bold text-3xl sm:text-4xl text-white mb-4">
+                    Core Cryptographic Engine Features
+                </h2>
+                <p class="text-slate-300 text-sm sm:text-base leading-relaxed">
+                    helucryptic operates completely on P2P architectures. We don't utilize custom cloud architectures to handle media channels, group coordination, or rest databases. Everything is fully client-contained.
+                </p>
+            </div>
+
+            <!-- 3x2 Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                
+                <!-- Card 1: E2EE Text Chat -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-accentSky/10 border border-accentSky/20 rounded-lg text-accentSky smooth-transition">
+                            <!-- Custom Animated SVG for Chat with Node Dots -->
+                            <svg class="w-6 h-6 transition-transform duration-500 group-hover:scale-105" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                <circle cx="12" cy="12" r="1.5" fill="currentColor" class="smooth-transition group-hover:translate-x-[2px]"/>
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">JSON over SCTP</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">💬 E2EE Text Chat</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Encrypts text streams natively using local PASETO v4 structures, then transmits them over a dedicated WebRTC data channel. The protocol supports multi-party rooms up to 4 concurrent peers.
+                    </p>
+                </div>
+
+                <!-- Card 2: Direct Voice Calls -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-accentSky/10 border border-accentSky/20 rounded-lg text-accentSky smooth-transition group-hover:scale-105">
+                            <!-- High Fidelity sound wave animation -->
+                            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <rect x="4" y="6" width="2" height="12" rx="1" class="wave-bar wave-bar-1" fill="currentColor" />
+                                <rect x="9" y="3" width="2" height="18" rx="1" class="wave-bar wave-bar-2" fill="currentColor" />
+                                <rect x="14" y="8" width="2" height="8" rx="1" class="wave-bar wave-bar-3" fill="currentColor" />
+                                <rect x="19" y="5" width="2" height="14" rx="1" class="wave-bar wave-bar-4" fill="currentColor" />
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">OPUS v1.3</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">🎙️ Direct Voice Calls</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Establishes low-latency, un-transcoded audio streams. Encapsulates raw Opus digital voice packets directly inside the encrypted media channel for pure peer-to-peer telephony.
+                    </p>
+                </div>
+
+                <!-- Card 3: Screen Share -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-accentBlue/10 border border-accentBlue/20 rounded-lg text-accentSky smooth-transition">
+                            <!-- Monitor with laser scanner overlay -->
+                            <svg class="w-6 h-6 relative overflow-hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <rect x="3" y="3" width="18" height="13" rx="2" />
+                                <path d="M12 16v4M8 20h8" />
+                                <line x1="3" y1="8" x2="21" y2="8" stroke="#0ea5e9" stroke-width="1.5" class="laser-scanner" />
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">15 FPS VP8/VP9</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">🖥️ Screen Share</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Streams high-efficiency desktop captures directly to recipient clients. Captures system audio alongside application viewports with minimal local overhead.
+                    </p>
+                </div>
+
+                <!-- Card 4: High-Speed File Transfers -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-accentEmerald/10 border border-accentEmerald/20 rounded-lg text-accentEmerald smooth-transition">
+                            <!-- Custom download pipe streaming animation -->
+                            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1" />
+                                <path d="M12 4v12" />
+                                <path d="M8 12l4 4 4-4" class="stream-arrow" stroke="#10b981" />
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">SHA-256 Check</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">📎 High-Speed File Transfers</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Transfers files of unlimited size using disk-to-disk packetized streaming. Employs automatic backpressure handling to protect memory and verifies file integrity using SHA-256 hashes.
+                    </p>
+                </div>
+
+                <!-- Card 5: Identity Verification -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-accentAmber/10 border border-accentAmber/20 rounded-lg text-accentAmber smooth-transition">
+                            <!-- Custom glowing fingerprint sensor wireframe -->
+                            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                                <path d="M12 2a10 10 0 00-10 10M12 2a10 10 0 0110 10" stroke-dasharray="3,3" />
+                                <path d="M8 11c0-2.2 1.8-4 4-4s4 1.8 4 4M6 14c0-3.3 2.7-6 6-6s6 2.7 6 6" class="fingerprint-path" />
+                                <path d="M10 17c0-1.1.9-2 2-2s2 .9 2 2M12 12v3" stroke-linecap="round" />
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">Ed25519 Fingerprint</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">🧬 Identity Verification</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Eliminates active Man-In-The-Middle threats. You can cross-compare public fingerprint coordinates out-of-band to verify user authenticity and prevent key spoofing.
+                    </p>
+                </div>
+
+                <!-- Card 6: Intelligent Traversal -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder premium-card-hover group">
+                    <div class="flex items-start justify-between mb-6">
+                        <div class="p-3 bg-slate-300/10 border border-slate-300/20 rounded-lg text-slate-300 smooth-transition">
+                            <svg class="w-6 h-6 transition-transform duration-500 group-hover:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <circle cx="12" cy="12" r="10" />
+                                <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+                                <path d="M2 12h20" />
+                            </svg>
+                        </div>
+                        <span class="text-[9px] font-mono tracking-widest text-slate-400 uppercase">STUN / TURN / NAT-PMP</span>
+                    </div>
+                    <h3 class="font-display font-bold text-lg text-white mb-2">🌍 Intelligent Traversal</h3>
+                    <p class="text-slate-300 text-sm leading-relaxed">
+                        Navigates restrictive enterprise NATs and strict home routers automatically. Coordinates dynamic STUN mapping with fallback secure TURN relaying for uninterrupted service.
+                    </p>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- SECTION 4: CRYPTOGRAPHIC STACK EXPLORER -->
+        <section id="cryptography" class="relative z-10 max-w-7xl mx-auto px-4 py-20 border-t border-slateBorder/80 reveal-on-scroll">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+                
+                <!-- Left Side: Interactive Stack Navigation -->
+                <div class="lg:col-span-5 space-y-6">
+                    <div class="space-y-2 text-center lg:text-left">
+                        <span class="text-[10px] font-mono uppercase tracking-widest text-accentSky">No-Compromise Security Stack</span>
+                        <h2 class="font-display font-bold text-3xl sm:text-4xl text-white">Cryptographic Stack Explorer</h2>
+                        <p class="text-slate-300 text-sm">Click each component layer below to inspect the mathematical primitives, underlying RFC protocols, and localized security justifications.</p>
+                    </div>
+
+                    <!-- Navigation List -->
+                    <div class="space-y-2.5 mt-6">
+                        <button onclick="showCryptoDetail('keyAgreement')" id="btn-keyAgreement" class="crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-accentSky/30 bg-accentSky/5 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-accentSky/15 text-accentSky rounded"><i data-lucide="key" class="w-4 h-4" aria-hidden="true"></i></div>
+                                <div>
+                                    <h4 class="font-bold text-sm text-white">Key Agreement Protocol</h4>
+                                    <p class="text-xs text-slate-300 font-mono">Ephemeral X25519 ECDH</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 transition-transform" aria-hidden="true"></i>
+                        </button>
+
+                        <button onclick="showCryptoDetail('identity')" id="btn-identity" class="crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-slateBorder bg-obsidian text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-slatePanel text-slate-300 rounded"><i data-lucide="shield" class="w-4 h-4" aria-hidden="true"></i></div>
+                                <div>
+                                    <h4 class="font-bold text-sm text-white">Identity Verification</h4>
+                                    <p class="text-xs text-slate-300 font-mono">Ed25519 Signed Public Keys</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 transition-transform" aria-hidden="true"></i>
+                        </button>
+
+                        <button onclick="showCryptoDetail('messageEnc')" id="btn-messageEnc" class="crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-slateBorder bg-obsidian text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-slatePanel text-slate-300 rounded"><i data-lucide="lock" class="w-4 h-4" aria-hidden="true"></i></div>
+                                <div>
+                                    <h4 class="font-bold text-sm text-white">Message Stream Encryption</h4>
+                                    <p class="text-xs text-slate-300 font-mono">PASETO v4.local Authenticated</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 transition-transform" aria-hidden="true"></i>
+                        </button>
+
+                        <button onclick="showCryptoDetail('historyRest')" id="btn-historyRest" class="crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-slateBorder bg-obsidian text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-slatePanel text-slate-300 rounded"><i data-lucide="database" class="w-4 h-4" aria-hidden="true"></i></div>
+                                <div>
+                                    <h4 class="font-bold text-sm text-white">History Database at Rest</h4>
+                                    <p class="text-xs text-slate-300 font-mono">Encrypted SQLite DB</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 transition-transform" aria-hidden="true"></i>
+                        </button>
+
+                        <button onclick="showCryptoDetail('keystore')" id="btn-keystore" class="crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-slateBorder bg-obsidian text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-slatePanel text-slate-300 rounded"><i data-lucide="cpu" class="w-4 h-4" aria-hidden="true"></i></div>
+                                <div>
+                                    <h4 class="font-bold text-sm text-white">Identity Protection</h4>
+                                    <p class="text-xs text-slate-300 font-mono">OS Keystore & Windows DPAPI</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 transition-transform" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right Side: Detailed Primitive View Card (With Smooth State Transitions) -->
+                <div class="lg:col-span-7">
+                    <div class="relative">
+                        <div id="cryptoDetailsCard" class="relative premium-card rounded-xl border border-slateBorder p-6 md:p-8 min-h-[420px] flex flex-col justify-between smooth-transition">
+                            
+                            <!-- Header / Primitive name -->
+                            <div class="pb-6 border-b border-slateBorder">
+                                <div class="flex items-center gap-3 mb-3">
+                                    <span class="px-2.5 py-1 bg-accentSky/10 text-accentSky font-mono text-xs rounded border border-accentSky/20 uppercase tracking-widest" id="cryptoPrimitive">X25519</span>
+                                    <span class="text-slate-300 font-mono text-xs" id="cryptoRFC">RFC 7748 Standard</span>
+                                </div>
+                                <h3 class="font-display font-bold text-2xl text-white" id="cryptoTitle">Ephemeral X25519 ECDH</h3>
+                                <p class="text-slate-300 text-sm mt-2" id="cryptoShort">How helucryptic sets up key agreement vectors directly with a peer node.</p>
+                            </div>
+
+                            <!-- Technical specifics -->
+                            <div class="py-6 space-y-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="bg-obsidian rounded-lg p-3 border border-slateBorder">
+                                        <span class="block text-[10px] font-mono text-slate-400 uppercase">Algorithm Stack</span>
+                                        <span class="text-xs font-mono text-white mt-1 block" id="cryptoStack">X25519 + Ed25519 + HKDF-SHA256</span>
+                                    </div>
+                                    <div class="bg-obsidian rounded-lg p-3 border border-slateBorder">
+                                        <span class="block text-[10px] font-mono text-slate-400 uppercase">Attack Resiliency</span>
+                                        <span class="text-xs font-mono text-accentEmerald mt-1 block" id="cryptoDefense">Forward Secrecy Enforced</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span class="block text-[10px] font-mono text-slate-400 uppercase mb-1">Security Architecture Deep Dive</span>
+                                    <p class="text-slate-300 text-xs md:text-sm leading-relaxed" id="cryptoDesc">
+                                        Before payload negotiation begins, a secure asymmetric handshake executes over a WebRTC channel. Every chat session negotiates an entirely temporary, ephemeral Curve25519 public key. This key is cross-signed using the persistent identity Ed25519 key so that Alice is verified. If someone cracks a node at rest in the future, past chat streams cannot be decrypted.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <!-- Sandbox mathematical validation -->
+                            <div class="pt-6 border-t border-slateBorder bg-obsidian -mx-6 -mb-6 p-6 rounded-b-xl">
+                                <div class="flex items-center justify-between text-[11px] font-mono">
+                                    <span class="text-slate-400">Local Vector Sample:</span>
+                                    <span class="text-accentSky">Status: Verified</span>
+                                </div>
+                                <div class="bg-slatePanel p-3 rounded-lg border border-slateBorder mt-2 font-mono text-[10px] text-slate-300 overflow-x-auto whitespace-nowrap scrollbar-none" id="cryptoCode">
+                                    crypto_key = HKDF(X25519(alice_priv, bob_pub), salt, "helucryptic-key-v1")
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- SECTION 5: INTERACTIVE SETUP & CONFIGURATION TERMINAL -->
+        <section id="setup" class="relative z-10 max-w-7xl mx-auto px-4 py-20 bg-obsidian reveal-on-scroll">
+            <div class="text-center max-w-3xl mx-auto mb-16">
+                <span class="text-[10px] font-mono uppercase tracking-widest text-accentEmerald font-semibold">Developer Setup Console</span>
+                <h2 class="font-display font-bold text-3xl sm:text-4xl text-white mb-4">
+                    Initialize helucryptic Desktop
+                </h2>
+                <p class="text-slate-300 text-sm sm:text-base">
+                    Install the peer node on your local architecture. Select your OS system to pull active dependencies, execute repository builders, and launch the interface.
+                </p>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
+                
+                <!-- Left Panel: Interactive Terminal Mockup -->
+                <div class="lg:col-span-7 flex flex-col justify-between premium-card rounded-xl border border-slateBorder overflow-hidden shadow-2xl min-h-[460px]">
+                    
+                    <!-- Terminal Window Top-bar (Improved touch navigation spaces) -->
+                    <div class="bg-slatePanel px-4 py-3 flex flex-wrap gap-3 items-center justify-between border-b border-slateBorder">
+                        <div class="flex items-center gap-2">
+                            <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
+                            <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
+                            <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
+                        </div>
+                        
+                        <!-- Terminal System Tabs -->
+                        <div class="flex items-center bg-obsidian border border-slateBorder rounded p-0.5" role="tablist" aria-label="Operating System Terminal">
+                            <button onclick="setTerminalOS('windows')" id="tab-windows" role="tab" aria-selected="true" class="os-tab px-3 py-2 md:py-1.5 min-h-[38px] rounded text-[11px] font-mono text-white bg-slatePanel transition-all font-semibold focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                                Windows (PS)
+                            </button>
+                            <button onclick="setTerminalOS('macos')" id="tab-macos" role="tab" aria-selected="false" class="os-tab px-3 py-2 md:py-1.5 min-h-[38px] rounded text-[11px] font-mono text-slate-300 hover:text-white transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                                macOS (Brew)
+                            </button>
+                            <button onclick="setTerminalOS('linux')" id="tab-linux" role="tab" aria-selected="false" class="os-tab px-3 py-2 md:py-1.5 min-h-[38px] rounded text-[11px] font-mono text-slate-300 hover:text-white transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                                Linux (Apt)
+                            </button>
+                        </div>
+
+                        <!-- Copy Code Button -->
+                        <button onclick="copyTerminalCode()" class="flex items-center gap-1.5 px-3 py-2 rounded bg-obsidian hover:bg-slate-800 border border-slateBorder text-xs font-mono text-slate-300 transition-all hover:text-accentSky focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky active:scale-[0.95]" aria-label="Copy code block to clipboard">
+                            <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                            <span id="copyText">Copy Block</span>
+                        </button>
+                    </div>
+
+                    <!-- Terminal Command Box Area (Smoothly crossfaded via JS wrapper) -->
+                    <div class="bg-obsidian p-6 flex-1 font-mono text-xs leading-relaxed overflow-x-auto text-slate-300 select-all smooth-transition" id="terminalBox">
+                        <!-- Default Windows PowerShell content -->
+                        <div class="terminal-code space-y-2">
+                            <p class="comment"># 1. Clone the cryptographically secure source tree</p>
+                            <p class="text-white"><span class="function">git clone</span> https://github.com/Cryptic-Mage/helucryptic.git</p>
+                            <p class="text-white"><span class="function">cd</span> helucryptic</p>
+                            <p class="comment" style="margin-top: 16px;"># 2. Setup isolated desktop execution parameters</p>
+                            <p class="text-white"><span class="function">python</span> -m venv venv</p>
+                            <p class="text-white">.\venv\Scripts\<span class="function">Activate.ps1</span></p>
+                            <p class="comment" style="margin-top: 16px;"># 3. Pull secure requirements (PASETO v4 + PyAV + Flet UI)</p>
+                            <p class="text-white"><span class="function">pip install</span> -r requirements.txt</p>
+                            <p class="comment" style="margin-top: 16px;"># 4. Initialize Local Database & run Client Frame</p>
+                            <p class="text-white"><span class="function">python</span> main.py</p>
+                        </div>
+                    </div>
+
+                    <!-- Feedback Toast Status -->
+                    <div id="toastNotification" class="bg-accentEmerald/10 border-t border-accentEmerald/20 px-4 py-2.5 text-center text-accentEmerald text-[11px] font-mono hidden transition-all duration-300" role="status">
+                        ✔ Command block copied to local systems buffer successfully.
+                    </div>
+                </div>
+
+                <!-- Right Panel: .env Dynamic Interactive Builder -->
+                <div class="lg:col-span-5 relative">
+                    <div class="relative premium-card rounded-xl border border-slateBorder p-6 flex flex-col justify-between h-full shadow-2xl">
+                        
+                        <!-- Form Controls -->
+                        <div class="space-y-6">
+                            <div>
+                                <h3 class="font-display font-bold text-lg text-white mb-1">🔑 Runtime Env Settings</h3>
+                                <p class="text-slate-300 text-xs">Configure your peer profile. Changes sync into the real-time serialized file box below dynamically.</p>
+                            </div>
+
+                            <!-- Param 1: URL -->
+                            <div class="space-y-2">
+                                <label for="env_signaling" class="block text-[11px] font-mono text-slate-400 uppercase tracking-wider">Signaling URL (WebSocket)</label>
+                                <input type="text" id="env_signaling" oninput="updateEnvOutput()" value="ws://127.0.0.1:8000" 
+                                       class="w-full bg-obsidian border border-slateBorder rounded-lg px-3.5 py-2.5 text-xs font-mono text-accentSky focus:ring-1 focus:ring-accentSky focus:outline-none focus:border-accentSky transition-all focus:shadow-subtleGlow">
+                            </div>
+
+                            <!-- Param 2: Performance Toggle -->
+                            <div class="flex items-center justify-between p-3 bg-obsidian border border-slateBorder rounded-lg">
+                                <div>
+                                    <span class="block text-xs font-semibold text-white">Low Performance Mode</span>
+                                    <span class="block text-[10px] text-slate-400">Deactivates heavy UI particle system renders</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer min-h-[44px]">
+                                    <input type="checkbox" id="env_low_perf" onchange="updateEnvOutput()" class="sr-only peer" aria-label="Toggle low performance mode">
+                                    <div class="w-9 h-5 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accentSky peer-checked:after:bg-obsidian peer-checked:after:border-accentSky"></div>
+                                </label>
+                            </div>
+
+                            <!-- Param 3: Data Dir path -->
+                            <div class="space-y-2">
+                                <label for="env_data_dir" class="block text-[11px] font-mono text-slate-400 uppercase tracking-wider">Data Repository Dir</label>
+                                <input type="text" id="env_data_dir" oninput="updateEnvOutput()" value="~/.local/share/helucryptic" 
+                                       class="w-full bg-obsidian border border-slateBorder rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-300 focus:ring-1 focus:ring-accentSky focus:outline-none focus:border-accentSky transition-all">
+                            </div>
+                        </div>
+
+                        <!-- Output Env Block -->
+                        <div class="mt-6 pt-6 border-t border-slateBorder">
+                            <span class="block text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-2">Live Realtime .env file:</span>
+                            <div id="envOutputBlock" class="bg-obsidian rounded-lg p-4 border border-slateBorder font-mono text-[11px] text-slate-300 leading-relaxed overflow-x-auto smooth-transition">
+                                <span class="text-slate-400"># Generated live via system controls</span><br>
+                                HELUCRYPTIC_SIGNALING_URL=<span class="text-accentSky" id="out_signaling">ws://127.0.0.1:8000</span><br>
+                                HELUCRYPTIC_LOW_PERF_MODE=<span class="text-accentAmber" id="out_low_perf">False</span><br>
+                                HELUCRYPTIC_DATA_DIR=<span class="text-accentEmerald" id="out_data_dir">~/.local/share/helucryptic</span>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- SECTION 6: ARCHITECTURE & NETWORK TRAVERSAL DEEP DIVE -->
+        <section id="architecture" class="relative z-10 max-w-7xl mx-auto px-4 py-20 border-t border-slateBorder/80 reveal-on-scroll">
+            <div class="text-center max-w-3xl mx-auto mb-16">
+                <span class="text-[10px] font-mono uppercase tracking-widest text-accentSky font-semibold">Advanced P2P Topology</span>
+                <h2 class="font-display font-bold text-3xl sm:text-4xl text-white mb-4">
+                    Architecture & Intelligent Network Traversal
+                </h2>
+                <p class="text-slate-300 text-sm sm:text-base">
+                    How does helucryptic bypass carrier-grade Symmetric NAT setups without running continuous server relays?
+                </p>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                <!-- Tech Card 1: Port Forwarding Mapping -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder relative flex flex-col justify-between">
+                    <div>
+                        <div class="p-3 bg-accentSky/10 border border-accentSky/20 rounded-lg text-accentSky w-fit mb-6">
+                            <i data-lucide="split" class="w-5 h-5" aria-hidden="true"></i>
+                        </div>
+                        <h3 class="font-display font-bold text-xl text-white mb-3">STUN & NAT-PMP Fallbacks</h3>
+                        <p class="text-slate-300 text-sm leading-relaxed mb-6">
+                            If both peers sit behind restrictive firewalls (Symmetric NAT), establishing standard direct pipes is impossible. helucryptic uses local UPnP/NAT-PMP requests to open ports instantly, falling back to STUN traversal mapping.
+                        </p>
+                    </div>
+                    <!-- Mini Visual Representation -->
+                    <div class="bg-obsidian rounded-lg p-4 border border-slateBorder">
+                        <div class="flex items-center justify-between text-[10px] font-mono text-slate-400 mb-2">
+                            <span>Traverse Level</span>
+                            <span class="text-accentSky">98.2% Auto Connect</span>
+                        </div>
+                        <div class="space-y-1.5">
+                            <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                <div class="h-full bg-accentSky" style="width: 100%"></div>
+                            </div>
+                            <div class="flex justify-between text-[8px] font-mono text-slate-400">
+                                <span>Local P2P (Best)</span>
+                                <span>STUN Hole</span>
+                                <span>TURN (Secure Relay)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tech Card 2: Interactive Hub Election Grid -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder flex flex-col justify-between">
+                    <div>
+                        <div class="p-3 bg-accentEmerald/10 border border-accentEmerald/20 rounded-lg text-accentEmerald w-fit mb-6">
+                            <i data-lucide="network" class="w-5 h-5" aria-hidden="true"></i>
+                        </div>
+                        <h3 class="font-display font-bold text-xl text-white mb-3">Dynamic Hub-Election</h3>
+                        <p class="text-slate-300 text-sm leading-relaxed mb-4">
+                            Group conversations don't rely on a central server. Peers dynamically self-elect the node with the highest connection capability ranking (Tier 0 to 3) as the "Media Relay Hub," saving total bandwidth.
+                        </p>
+                    </div>
+
+                    <!-- Interactive Hub-Election Visualizer Grid -->
+                    <div class="bg-obsidian rounded-lg p-4 border border-slateBorder space-y-3">
+                        <div class="flex items-center justify-between text-[10px] font-mono">
+                            <span class="text-slate-400">Peer Ranking Matrix</span>
+                            <span class="text-accentEmerald">Node 2 Elected</span>
+                        </div>
+                        <div class="grid grid-cols-4 gap-2 text-center text-[10px] font-mono">
+                            <div class="p-2 bg-slatePanel rounded border border-slateBorder">
+                                <span class="block text-slate-400">Node 0</span>
+                                <span class="block text-[9px] text-red-400">Tier 0</span>
+                            </div>
+                            <div class="p-2 bg-slatePanel rounded border border-slateBorder">
+                                <span class="block text-slate-400">Node 1</span>
+                                <span class="block text-[9px] text-accentAmber">Tier 1</span>
+                            </div>
+                            <div class="p-2 bg-accentEmerald/10 rounded border border-accentEmerald/30 text-white font-bold animate-pulse">
+                                <span class="block text-accentEmerald">Node 2</span>
+                                <span class="block text-[9px] text-accentEmerald">Tier 3</span>
+                            </div>
+                            <div class="p-2 bg-slatePanel rounded border border-slateBorder">
+                                <span class="block text-slate-400">Node 3</span>
+                                <span class="block text-[9px] text-slate-300">Tier 2</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tech Card 3: Decentralized Invite links -->
+                <div class="premium-card rounded-xl p-6 border border-slateBorder flex flex-col justify-between">
+                    <div>
+                        <div class="p-3 bg-purple-500/10 border border-purple-500/20 rounded-lg text-purple-400 w-fit mb-6">
+                            <i data-lucide="link" class="w-5 h-5" aria-hidden="true"></i>
+                        </div>
+                        <h3 class="font-display font-bold text-xl text-white mb-3">Decentralized Invites</h3>
+                        <p class="text-slate-300 text-sm leading-relaxed mb-6">
+                            Adding a contact is fully offline. Share a base64 string that securely packages your identity key, SDP coordinate options, and signaling parameters. Pasting it immediately configures the new peer channels.
+                        </p>
+                    </div>
+                    <!-- Dynamic copyable Invite link box -->
+                    <div class="bg-obsidian rounded-lg p-3 border border-slateBorder flex items-center justify-between font-mono text-[9px] text-slate-300">
+                        <span class="truncate pr-4">HELU-INV1:eyJhZGRyIjogIjEwNC4yM...</span>
+                        <button onclick="copyInviteLink()" class="px-3.5 py-2 bg-purple-500/15 border border-purple-500/30 text-purple-400 rounded hover:bg-purple-500/25 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky h-[36px] flex items-center justify-center active:scale-[0.95]">
+                            Copy
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+    </main>
+
+    <!-- FOOTER & DEVELOPER CONTACT -->
+    <footer class="relative z-10 bg-slatePanel/40 border-t border-slateBorder pt-16 pb-8">
+        <div class="max-w-7xl mx-auto px-4">
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-8 mb-12">
+                
+                <!-- Info Column -->
+                <div class="md:col-span-5 space-y-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-accentBlue to-accentSky flex items-center justify-center">
+                            <i data-lucide="shield" class="w-4 h-4 text-white" aria-hidden="true"></i>
+                        </div>
+                        <span class="font-display font-bold text-lg text-white">helucryptic</span>
+                    </div>
+                    <p class="text-slate-300 text-xs sm:text-sm leading-relaxed max-w-sm">
+                        True peer-to-peer end-to-end encrypted messaging systems for developers and privacy advocates. Built to operate without third-party network routing hooks.
+                    </p>
+                    <div class="flex items-center gap-2 pt-2 text-xs text-slate-400 font-mono">
+                        <i data-lucide="mail" class="w-4 h-4 text-accentSky" aria-hidden="true"></i>
+                        <span>Developer Contact:</span>
+                        <a href="mailto:crypticmage00@gmail.com" class="text-slate-200 hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">crypticmage00@gmail.com</a>
+                    </div>
+                </div>
+
+                <!-- GitHub Code Directory Modules -->
+                <div class="md:col-span-4 space-y-4">
+                    <h4 class="text-xs font-mono uppercase tracking-widest text-slate-300 font-semibold">Code Module Trees</h4>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs font-mono">
+                        <a href="https://github.com/Cryptic-Mage/helucryptic/blob/main/client.py" target="_blank" rel="noopener" class="text-slate-300 hover:text-accentSky flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                            <i data-lucide="file-code" class="w-3.5 h-3.5" aria-hidden="true"></i> client.py
+                        </a>
+                        <a href="https://github.com/Cryptic-Mage/helucryptic/blob/main/webrtc_engine.py" target="_blank" rel="noopener" class="text-slate-300 hover:text-accentSky flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                            <i data-lucide="file-code" class="w-3.5 h-3.5" aria-hidden="true"></i> webrtc_engine.py
+                        </a>
+                        <a href="https://github.com/Cryptic-Mage/helucryptic/blob/main/server.py" target="_blank" rel="noopener" class="text-slate-300 hover:text-accentSky flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                            <i data-lucide="file-code" class="w-3.5 h-3.5" aria-hidden="true"></i> server.py
+                        </a>
+                        <a href="https://github.com/Cryptic-Mage/helucryptic/blob/main/crypto.py" target="_blank" rel="noopener" class="text-slate-300 hover:text-accentSky flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">
+                            <i data-lucide="file-code" class="w-3.5 h-3.5" aria-hidden="true"></i> crypto.py
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Live Audit Status Info -->
+                <div class="md:col-span-3 space-y-4">
+                    <h4 class="text-xs font-mono uppercase tracking-widest text-slate-300 font-semibold">System Security Badge</h4>
+                    <div class="p-4 rounded-xl bg-obsidian border border-slateBorder space-y-2.5">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-accentEmerald animate-pulse"></span>
+                            <span class="text-[10px] font-mono font-bold text-white uppercase tracking-wider">Independent Node Verified</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400 font-mono leading-relaxed">
+                            Warning: Secure your local keys.json database. Fingerprints must always be validated out-of-band to prevent active injection threats.
+                        </p>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Footer Meta Bottom-bar -->
+            <div class="pt-8 border-t border-slateBorder flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 font-mono gap-4">
+                <span>© 2026 helucryptic. Under MIT License. Open Source Infrastructure.</span>
+                <div class="flex gap-6">
+                    <a href="#" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">Security Policy</a>
+                    <a href="https://github.com/Cryptic-Mage/helucryptic" target="_blank" rel="noopener" class="hover:text-accentSky transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky">GitHub Repository</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- INTERACTIVE JAVASCRIPT STATE CONTROLS -->
+    <script>
+        // Initialize dynamic viewport observer, Lucide icons, and GitHub live puller
+        document.addEventListener("DOMContentLoaded", () => {
+            lucide.createIcons();
+            initParticles();
+            initScrollObserver();
+            setHandshakePhase(1); // Set initial visualizer state
+            fetchGitHubStats(); // Dynamic stars & forks API sync (Live corner indicators)
+        });
+
+        // Dynamic GitHub Repository Stats Fetcher (Gracefully falls back to placeholders)
+        async function fetchGitHubStats() {
+            const apiStatusDot = document.getElementById("api-status-dot");
+            try {
+                const response = await fetch("https://api.github.com/repos/Cryptic-Mage/helucryptic");
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById("github-stars").innerText = data.stargazers_count.toLocaleString();
+                    document.getElementById("github-forks").innerText = data.forks_count.toLocaleString();
+                    if (apiStatusDot) {
+                        apiStatusDot.classList.remove("bg-accentEmerald");
+                        apiStatusDot.classList.add("bg-emerald-400"); // Solid state success
+                    }
+                }
+            } catch (error) {
+                // Keep pre-filled offline metrics silently
+                if (apiStatusDot) {
+                    apiStatusDot.classList.remove("bg-accentEmerald");
+                    apiStatusDot.classList.add("bg-accentAmber"); // Warn state fallback
+                }
+            }
+        }
+
+        // 1. Particle Node Canvas Background Engine with Visibility-Throttling
+        let canvas, ctx, particles = [];
+        const maxParticles = 40; // Kept lower to prevent thermal load on mobile
+        let canvasIsVisible = true;
+
+        function initParticles() {
+            canvas = document.getElementById("particleCanvas");
+            if (!canvas) return;
+            ctx = canvas.getContext("2d");
+            resizeCanvas();
+
+            if (typeof IntersectionObserver !== "undefined") {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        canvasIsVisible = entry.isIntersecting;
+                    });
+                }, { threshold: 0.1 });
+                observer.observe(canvas);
+            }
+
+            // Populate coordinates
+            particles = [];
+            for (let i = 0; i < maxParticles; i++) {
+                particles.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    vx: (Math.random() - 0.5) * 0.25,
+                    vy: (Math.random() - 0.5) * 0.25,
+                    r: Math.random() * 1.5 + 1
+                });
+            }
+
+            requestAnimationFrame(animateParticles);
+        }
+
+        function resizeCanvas() {
+            if (!canvas) return;
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight * 1.2;
+        }
+
+        // Fix: Debounced window resize handler to prevent layout thrashing
+        let resizeTimeout;
+        window.addEventListener("resize", () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                resizeCanvas();
+            }, 150);
+        });
+
+        function animateParticles() {
+            if (canvasIsVisible && ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                ctx.strokeStyle = "rgba(148, 163, 184, 0.05)";
+                ctx.lineWidth = 0.8;
+
+                for (let i = 0; i < particles.length; i++) {
+                    let p1 = particles[i];
+                    p1.x += p1.vx;
+                    p1.y += p1.vy;
+
+                    // Screen boundaries rebound
+                    if (p1.x < 0 || p1.x > canvas.width) p1.vx *= -1;
+                    if (p1.y < 0 || p1.y > canvas.height) p1.vy *= -1;
+
+                    // Draw node circle
+                    ctx.fillStyle = "rgba(148, 163, 184, 0.12)";
+                    ctx.beginPath();
+                    ctx.arc(p1.x, p1.y, p1.r, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Draw connecting pathways
+                    for (let j = i + 1; j < particles.length; j++) {
+                        let p2 = particles[j];
+                        let dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+                        if (dist < 140) {
+                            ctx.beginPath();
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+            requestAnimationFrame(animateParticles);
+        }
+
+        // Entrance Scroll Observer
+        function initScrollObserver() {
+            if (typeof IntersectionObserver !== "undefined") {
+                const scrollObserver = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            entry.target.classList.add("reveal-active");
+                            scrollObserver.unobserve(entry.target);
+                        }
+                    });
+                }, { threshold: 0.1 });
+
+                document.querySelectorAll(".reveal-on-scroll").forEach(elem => {
+                    scrollObserver.observe(elem);
+                });
+            } else {
+                document.querySelectorAll(".reveal-on-scroll").forEach(elem => {
+                    elem.classList.add("reveal-active");
+                });
+            }
+        }
+
+        // Interactive transition block fade-slides (180ms ease for high-end feel)
+        function transitionBlock(targetElement, updateCallback) {
+            if (!targetElement) {
+                updateCallback();
+                return;
+            }
+            targetElement.style.opacity = "0";
+            targetElement.style.transform = "translateY(5px)";
+            
+            setTimeout(() => {
+                updateCallback();
+                targetElement.style.opacity = "1";
+                targetElement.style.transform = "translateY(0)";
+            }, 180);
+        }
+
+        // Handshake SMIL Trigger Utilities
+        function triggerSMIL(elementId, action) {
+            const el = document.getElementById(elementId);
+            if (el) {
+                try {
+                    if (action === "start") {
+                        el.beginElement();
+                    } else {
+                        el.endElement();
+                    }
+                } catch (e) {
+                    // Fallback for older legacy browsers
+                }
+            }
+        }
+
+        // 2. Interactive P2P Handshake Controller (Complete overlap & handshake pathway fix)
+        function setHandshakePhase(phase) {
+            const pathAliceServer = document.getElementById("pathAliceServer");
+            const pathServerBob = document.getElementById("pathServerBob");
+            const pathDirectPipe = document.getElementById("pathDirectPipe");
+            const nodeServer = document.getElementById("nodeServer");
+            const serverGreyLock = document.getElementById("serverGreyLock");
+            const secureShield = document.getElementById("secureShield");
+            
+            // SMIL elements
+            const pulseAS = document.getElementById("pulseAliceServer");
+            const pulseSB = document.getElementById("pulseServerBob");
+            const pulseAB = document.getElementById("pulseDirectAliceBob");
+            const pulseBA = document.getElementById("pulseDirectBobAlice");
+
+            const msgTitle = document.getElementById("handshakeMsgTitle");
+            const msgDesc = document.getElementById("handshakeMsgDesc");
+            const textPanel = document.getElementById("handshakeMessage");
+
+            // Reset tab button states
+            document.querySelectorAll(".phase-btn").forEach(btn => {
+                btn.className = "phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-slateBorder bg-obsidian/30 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky";
+                btn.setAttribute("aria-selected", "false");
+                const sub = btn.querySelector("span:first-child");
+                const main = btn.querySelector("span:last-child");
+                if (sub) sub.className = "block text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-1";
+                if (main) main.className = "block text-xs font-bold text-slate-300";
+            });
+
+            // Set current active button style
+            const activeBtn = document.getElementById(`phase-btn-${phase}`);
+            if (activeBtn) {
+                activeBtn.className = "phase-btn p-3.5 md:p-3 min-h-[44px] rounded-lg border border-accentSky/30 bg-accentSky/5 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky";
+                activeBtn.setAttribute("aria-selected", "true");
+                const sub = activeBtn.querySelector("span:first-child");
+                const main = activeBtn.querySelector("span:last-child");
+                if (sub) sub.className = "block text-[10px] font-mono text-accentSky uppercase tracking-widest mb-1";
+                if (main) main.className = "block text-xs font-bold text-white";
+            }
+
+            // Standard Reset of visualizer states
+            serverGreyLock.classList.add("hidden");
+            secureShield.classList.add("hidden");
+            nodeServer.style.opacity = "1";
+
+            // Hide direct packets by default
+            pulseAS.style.opacity = "0";
+            pulseSB.style.opacity = "0";
+            pulseAB.style.opacity = "0";
+            pulseBA.style.opacity = "0";
+
+            // Stop all current running SMIL loops
+            triggerSMIL("animAliceServerX", "stop");
+            triggerSMIL("animServerBobX", "stop");
+            triggerSMIL("animDirectAliceBob", "stop");
+            triggerSMIL("animDirectBobAlice", "stop");
+
+            // Process stage transition smoothly
+            transitionBlock(textPanel, () => {
+                switch (phase) {
+                    case 1:
+                        // Signaling - Overlap Fix: Pipe explicitly transparent
+                        pathDirectPipe.setAttribute("stroke", "transparent");
+                        pathDirectPipe.setAttribute("stroke-width", "0");
+
+                        pathAliceServer.setAttribute("stroke", "#0ea5e9");
+                        pathAliceServer.setAttribute("stroke-width", "2");
+                        pathAliceServer.classList.add("anim-dash");
+
+                        pathServerBob.setAttribute("stroke", "#0ea5e9");
+                        pathServerBob.setAttribute("stroke-width", "2");
+                        pathServerBob.classList.add("anim-dash");
+
+                        // Flow active signaling packets from Alice -> Server -> Bob
+                        pulseAS.style.opacity = "1";
+                        pulseSB.style.opacity = "1";
+                        triggerSMIL("animAliceServerX", "start");
+                        triggerSMIL("animServerBobX", "start");
+
+                        msgTitle.innerText = "Phase 1: SDP Session Offer Exchange";
+                        msgDesc.innerText = "Alice registers her presence with the Signaling server and relays her session specifications. The server routes Alice's SDP parameters to Bob's client coordinates instantly.";
+                        break;
+
+                    case 2:
+                        // ICE Gathering - Overlap Fix: Pipe remains completely transparent
+                        pathDirectPipe.setAttribute("stroke", "transparent");
+                        pathDirectPipe.setAttribute("stroke-width", "0");
+
+                        pathAliceServer.setAttribute("stroke", "#2563eb");
+                        pathAliceServer.setAttribute("stroke-width", "2");
+                        pathAliceServer.classList.add("anim-dash");
+
+                        pathServerBob.setAttribute("stroke", "#2563eb");
+                        pathServerBob.setAttribute("stroke-width", "2");
+                        pathServerBob.classList.add("anim-dash");
+
+                        // Flow candidate packet queries
+                        pulseAS.style.opacity = "1";
+                        pulseSB.style.opacity = "1";
+                        triggerSMIL("animAliceServerX", "start");
+                        triggerSMIL("animServerBobX", "start");
+
+                        msgTitle.innerText = "Phase 2: ICE Candidates Gathering";
+                        msgDesc.innerText = "Both peers query internal socket directories and STUN systems. Network pathway possibilities (local LAN IPs, NAT mappings, public routes) are serialized and negotiated over the signaling link.";
+                        break;
+
+                    case 3:
+                        // Direct Pipe Established (Signaling Server is greyed out, signaling paths hidden)
+                        pathAliceServer.setAttribute("stroke", "transparent");
+                        pathAliceServer.classList.remove("anim-dash");
+                        pathServerBob.setAttribute("stroke", "transparent");
+                        pathServerBob.classList.remove("anim-dash");
+
+                        nodeServer.style.opacity = "0.2";
+                        serverGreyLock.classList.remove("hidden");
+
+                        // Direct pipe fades in beautifully
+                        pathDirectPipe.setAttribute("stroke", "url(#cyanBlue)");
+                        pathDirectPipe.setAttribute("stroke-width", "6");
+
+                        // Flow packets directly between Alice and Bob
+                        pulseAB.style.opacity = "1";
+                        triggerSMIL("animDirectAliceBob", "start");
+
+                        msgTitle.innerText = "Phase 3: Direct Peer Connection Tunneled";
+                        msgDesc.innerText = "Success! The Signaling server fades out completely. WebRTC maps directly between Bob and Alice. Media frames, files, and text flow safely without hitting cloud servers.";
+                        break;
+
+                    case 4:
+                        // PASETO E2EE Secured Handshake Completed
+                        pathAliceServer.setAttribute("stroke", "transparent");
+                        pathAliceServer.classList.remove("anim-dash");
+                        pathServerBob.setAttribute("stroke", "transparent");
+                        pathServerBob.classList.remove("anim-dash");
+
+                        nodeServer.style.opacity = "0.15";
+                        serverGreyLock.classList.remove("hidden");
+
+                        // Pipe becomes a secure emerald green channel
+                        pathDirectPipe.setAttribute("stroke", "url(#emeraldGreenGrad)");
+                        pathDirectPipe.setAttribute("stroke-width", "7");
+
+                        secureShield.classList.remove("hidden");
+
+                        // Flow secure packets back and forth simultaneously
+                        pulseAB.style.opacity = "1";
+                        pulseBA.style.opacity = "1";
+                        triggerSMIL("animDirectAliceBob", "start");
+                        triggerSMIL("animDirectBobAlice", "start");
+
+                        msgTitle.innerText = "Phase 4: Channel Sealed via PASETO v4";
+                        msgDesc.innerText = "Alice & Bob execute in-channel X25519 ECDH handshakes. All transmitted payloads are fully sealed inside PASETO v4 structures. E2E secure pipes verified successfully.";
+                        break;
+                }
+            });
+        }
+
+        // 3. Cryptographic Explorer Database
+        const cryptoData = {
+            keyAgreement: {
+                primitive: "X25519",
+                rfc: "RFC 7748 Curve Spec",
+                title: "Ephemeral X25519 Key Agreement",
+                short: "How helucryptic sets up key agreement vectors directly with a peer node.",
+                stack: "X25519 + HKDF-SHA256",
+                defense: "Ephem. Forward Secrecy Enforced",
+                desc: "Before payload negotiation begins, a secure asymmetric handshake executes over a WebRTC channel. Every chat session negotiates an entirely temporary, ephemeral Curve25519 public key. This key is cross-signed using the persistent identity Ed25519 key so that Alice is verified. If someone cracks a node at rest in the future, past chat streams cannot be decrypted.",
+                code: "crypto_key = HKDF(X25519(alice_priv, bob_pub), salt, 'helucryptic-key-v1')"
+            },
+            identity: {
+                primitive: "Ed25519",
+                rfc: "RFC 8032 Signature",
+                title: "Persistent Identity Verification",
+                short: "Binding network endpoints to authentic cryptographic keys.",
+                stack: "Ed25519 Signatures via PASETO v4.public",
+                defense: "Man-In-The-Middle Immune",
+                desc: "Every helucryptic client installs a robust, hardware-backed root keypair. Out-of-band comparisons of hex fingerprints ensure that endpoints map accurately to identities, verifying that no signaling intermediary acts as a fake intercept node.",
+                code: "is_valid = ed25519_verify(alice_pub, signed_sdp_packet, signature)"
+            },
+            messageEnc: {
+                primitive: "PASETO v4.local",
+                rfc: "AEAD ChaCha20-Poly1305",
+                title: "Symmetric Stream Encryption",
+                short: "Packing chat blocks, files, and voice packets securely.",
+                stack: "XChaCha20-Poly1305 + Blake2b MAC",
+                defense: "Authenticated Encryption (AEAD)",
+                desc: "Instead of old, fragile AES setups, helucryptic routes messages packaged in v4.local PASETO envelopes. PASETO incorporates cryptographic structures with implicit length assertions so that payload tampering yields total drop failures instantly.",
+                code: "paseto_payload = paseto.encrypt(symmetric_key, message_json)"
+            },
+            historyRest: {
+                primitive: "SQLite E2EE",
+                rfc: "SQLCipher & PBKDF2",
+                title: "Local Database at Rest",
+                short: "Securing your chat histories inside device memory.",
+                stack: "SQLite3 + SQLCipher (XChaCha20)",
+                defense: "Physical Cold Boot Resilient",
+                desc: "Your data doesn't live on cloud arrays. Every received stream block writes to a local SQLite structure. The system derives a database key on launch using key fragments secured via OS sandboxes.",
+                code: "sqlite_db.execute('PRAGMA key = \"' + derived_keystore_key + '\"')"
+            },
+            keystore: {
+                primitive: "OS Keystore",
+                rfc: "TPM 2.0 / DPAPI Layer",
+                title: "Identity Protection Architecture",
+                short: "Hardening private keys from local exploit extraction.",
+                stack: "Windows DPAPI / macOS Keychain",
+                defense: "Un-exportable Key Isolation",
+                desc: "How do we store persistent private keys securely? helucryptic delegates persistence directly to operating system architecture. Private components lock inside localized systems structures, requiring user PIN/Biometric approvals to execute signing operations.",
+                code: "protected_key = win32crypt.CryptProtectData(raw_private_bytes)"
+            }
+        };
+
+        function showCryptoDetail(key) {
+            // Update active state of buttons
+            document.querySelectorAll(".crypto-btn").forEach(btn => {
+                btn.className = "crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-slateBorder bg-obsidian text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky";
+                const iconBox = btn.querySelector(".p-2");
+                if (iconBox) iconBox.className = "p-2 bg-slatePanel text-slate-300 rounded";
+            });
+
+            const activeBtn = document.getElementById(`btn-${key}`);
+            if (activeBtn) {
+                activeBtn.className = "crypto-btn w-full flex items-center justify-between p-4 rounded-lg border border-accentSky/30 bg-accentSky/5 text-left transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accentSky";
+                const iconBox = activeBtn.querySelector(".p-2");
+                if (iconBox) iconBox.className = "p-2 bg-accentSky/15 text-accentSky rounded";
+            }
+
+            // Smooth state switch with 180ms transitions
+            const cardElement = document.getElementById("cryptoDetailsCard");
+            transitionBlock(cardElement, () => {
+                const data = cryptoData[key];
+                document.getElementById("cryptoPrimitive").innerText = data.primitive;
+                document.getElementById("cryptoRFC").innerText = data.rfc;
+                document.getElementById("cryptoTitle").innerText = data.title;
+                document.getElementById("cryptoShort").innerText = data.short;
+                document.getElementById("cryptoStack").innerText = data.stack;
+                document.getElementById("cryptoDefense").innerText = data.defense;
+                document.getElementById("cryptoDesc").innerText = data.desc;
+                document.getElementById("cryptoCode").innerText = data.code;
+            });
+        }
+
+        // 4. Setup Terminal OS Tab controller
+        const terminalCommands = {
+            windows: `
+<p class="comment"># 1. Clone the cryptographically secure source tree</p>
+<p class="text-white"><span class="function">git clone</span> https://github.com/Cryptic-Mage/helucryptic.git</p>
+<p class="text-white"><span class="function">cd</span> helucryptic</p>
+<p class="comment" style="margin-top: 16px;"># 2. Setup isolated desktop execution parameters</p>
+<p class="text-white"><span class="function">python</span> -m venv venv</p>
+<p class="text-white">.\\venv\\Scripts\\<span class="function">Activate.ps1</span></p>
+<p class="comment" style="margin-top: 16px;"># 3. Pull secure requirements (PASETO v4 + PyAV + Flet UI)</p>
+<p class="text-white"><span class="function">pip install</span> -r requirements.txt</p>
+<p class="comment" style="margin-top: 16px;"># 4. Initialize Local Database & run Client Frame</p>
+<p class="text-white"><span class="function">python</span> main.py</p>
+`,
+            macos: `
+<p class="comment"># 1. Install system codec libraries using Brew</p>
+<p class="text-white"><span class="function">brew install</span> pkg-config sdl2 ffmpeg opus</p>
+<p class="comment" style="margin-top: 16px;"># 2. Clone the repository and configure Virtualenv</p>
+<p class="text-white"><span class="function">git clone</span> https://github.com/Cryptic-Mage/helucryptic.git</p>
+<p class="text-white"><span class="function">cd</span> helucryptic</p>
+<p class="text-white"><span class="function">python3</span> -m venv venv</p>
+<p class="text-white"><span class="function">source</span> venv/bin/activate</p>
+<p class="comment" style="margin-top: 16px;"># 3. Install core structures & launch Flutter interface</p>
+<p class="text-white"><span class="function">pip install</span> -r requirements.txt</p>
+<p class="text-white"><span class="function">python3</span> main.py</p>
+`,
+            linux: `
+<p class="comment"># 1. Fetch package parameters and core gstreamer/opus files</p>
+<p class="text-white"><span class="function">sudo apt-get update</span></p>
+<p class="text-white"><span class="function">sudo apt-get install</span> -y build-essential python3-dev ffmpeg libopus-dev libvpx-dev</p>
+<p class="comment" style="margin-top: 16px;"># 2. Extract repository core and build python requirements</p>
+<p class="text-white"><span class="function">git clone</span> https://github.com/Cryptic-Mage/helucryptic.git && <span class="function">cd</span> helucryptic</p>
+<p class="text-white"><span class="function">python3</span> -m venv venv && <span class="function">source</span> venv/bin/activate</p>
+<p class="text-white"><span class="function">pip3 install</span> -r requirements.txt</p>
+<p class="comment" style="margin-top: 16px;"># 3. Secure local configuration and run application</p>
+<p class="text-white"><span class="function">python3</span> main.py</p>
+`
+        };
+
+        function setTerminalOS(os) {
+            // Update Tab active UI looks
+            document.querySelectorAll(".os-tab").forEach(tab => {
+                tab.className = "os-tab px-3 py-2 md:py-1.5 min-h-[38px] rounded text-[11px] font-mono text-slate-300 hover:text-white transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky";
+                tab.setAttribute("aria-selected", "false");
+            });
+            const activeTab = document.getElementById(`tab-${os}`);
+            if (activeTab) {
+                activeTab.className = "os-tab px-3 py-2 md:py-1.5 min-h-[38px] rounded text-[11px] font-mono text-white bg-slatePanel transition-all font-semibold focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accentSky";
+                activeTab.setAttribute("aria-selected", "true");
+            }
+
+            // Transition terminal text smoothly on switch
+            const box = document.getElementById("terminalBox");
+            transitionBlock(box, () => {
+                box.innerHTML = terminalCommands[os];
+            });
+        }
+
+        // 5. Live Environment File Synchronizer
+        function updateEnvOutput() {
+            const signaling = document.getElementById("env_signaling").value;
+            const lowPerf = document.getElementById("env_low_perf").checked ? "True" : "False";
+            const dataDir = document.getElementById("env_data_dir").value;
+
+            // Live sync fields
+            document.getElementById("out_signaling").innerText = signaling || "ws://127.0.0.1:8000";
+            document.getElementById("out_low_perf").innerText = lowPerf;
+            document.getElementById("out_data_dir").innerText = dataDir || "~/.local/share/helucryptic";
+
+            // Focus Flash to convey update state feedback visually
+            const outBlock = document.getElementById("envOutputBlock");
+            if (outBlock) {
+                outBlock.style.borderColor = "rgba(14, 165, 233, 0.4)";
+                outBlock.style.boxShadow = "0 0 12px rgba(14, 165, 233, 0.1)";
+                setTimeout(() => {
+                    outBlock.style.borderColor = "#1e293b";
+                    outBlock.style.boxShadow = "none";
+                }, 250);
+            }
+        }
+
+        // 6. Utility Functions (Copy methods)
+        function copyTerminalCode() {
+            const range = document.createRange();
+            range.selectNode(document.getElementById("terminalBox"));
+            window.getSelection().removeAllRanges();
+            window.getSelection().addRange(range);
+            try {
+                document.execCommand('copy');
+                showToastNotification();
+            } catch (err) {
+                console.warn('Fallback copy routine required.');
+            }
+            window.getSelection().removeAllRanges();
+        }
+
+        function showToastNotification() {
+            const toast = document.getElementById("toastNotification");
+            if (!toast) return;
+            toast.classList.remove("hidden");
+            setTimeout(() => {
+                toast.classList.add("hidden");
+            }, 3000);
+        }
+
+        function copyInviteLink() {
+            const linkDummy = document.createElement("input");
+            linkDummy.value = "HELU-INV1:eyJhZGRyIjogIjEwNC4yMi40NS4xODEiLCAia2V5IjogIlgyNTUxOV9QVUJMSUMiLCAicG9ydCI6IDgwMDB9";
+            document.body.appendChild(linkDummy);
+            linkDummy.select();
+            document.execCommand('copy');
+            document.body.removeChild(linkDummy);
+
+            const copyBtn = document.querySelector("#architecture button");
+            if (copyBtn) {
+                copyBtn.innerText = "Copied!";
+                setTimeout(() => {
+                    copyBtn.innerText = "Copy";
+                }, 2000);
+            }
+        }
+
+    </script>
+</body>
+</html>
