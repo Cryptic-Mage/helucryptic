@@ -245,7 +245,7 @@ class ScreenShareTrack(VideoStreamTrack):
         super().__init__()
         self._sct     = None
         self._monitor = None
-        self._last_ts = 0.0
+        self._last_ts: float | None = None
         self._logged  = False
         self._max_w   = max_width  or config.SCREEN_MAX_WIDTH
         self._max_h   = max_height or config.SCREEN_MAX_HEIGHT
@@ -297,7 +297,7 @@ class ScreenShareTrack(VideoStreamTrack):
         loop     = asyncio.get_event_loop()
         now      = loop.time()
         interval = 1.0 / self.target_fps
-        if self._last_ts == 0.0:
+        if self._last_ts is None:
             self._last_ts = now
         else:
             elapsed = now - self._last_ts
@@ -1766,7 +1766,7 @@ class WebRTCEngine:
                             await self._send_group_key_to(p)
                 await self._flush_group_buffer()
 
-    async def reconcile_room_connections(self, members: list, ws_send) -> None:
+    async def reconcile_room_connections(self, _members: list, ws_send) -> None:
         """Star topology: non-hub connects only to the hub; the hub waits for offers."""
         self._send_ws = ws_send
         hub = self.current_hub()

@@ -2781,8 +2781,7 @@ class HelucrypticApp:
         self._update_call_status(True)
         self.page.update()
 
-    async def _start_screen(self, e) -> None:
-        if e: pass
+    async def _start_screen(self, _e=None) -> None:
         if not self.ws:
             return
 

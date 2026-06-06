@@ -33,20 +33,20 @@ def _dpapi(data: bytes, encrypt: bool) -> bytes:
     import ctypes
     from ctypes import wintypes
 
-    class DATA_BLOB(ctypes.Structure):
+    class _DataBlob(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD),
                     ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-    def _to_blob(b: bytes) -> "DATA_BLOB":
+    def _to_blob(b: bytes) -> "_DataBlob":
         buf = ctypes.create_string_buffer(b, len(b))
-        return DATA_BLOB(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        return _DataBlob(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
 
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
     fn = crypt32.CryptProtectData if encrypt else crypt32.CryptUnprotectData
 
     blob_in = _to_blob(data)
-    blob_out = DATA_BLOB()
+    blob_out = _DataBlob()
     # CRYPTPROTECT_UI_FORBIDDEN = 0x1 — never pop a UI prompt (we run headless).
     if not fn(ctypes.byref(blob_in), None, None, None, None, 0x1, ctypes.byref(blob_out)):
         raise OSError("DPAPI operation failed (CryptProtect/UnprotectData)")
