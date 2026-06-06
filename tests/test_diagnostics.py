@@ -1,3 +1,4 @@
+import pytest
 import webrtc_engine as W
 
 
@@ -88,3 +89,66 @@ def test_get_diagnostics_peer_details():
     assert peer_info["hello_ok"] is True
     assert peer_info["session_key"] is True
 
+
+def test_diagnostics_ui_rendering(monkeypatch):
+    pytest.importorskip("flet")
+    import client
+    import flet as ft
+
+    class FakeClipboard:
+        def set(self, text):
+            pass
+
+    class FakePage:
+        def __init__(self):
+            self.clipboard = FakeClipboard()
+
+    class FakeApp:
+        def __init__(self):
+            self.page = FakePage()
+            self._diag_open = False
+
+        def _render_diagnostics_state(self):
+            return "fake diagnostics state"
+
+        def _render_diagnostics_log(self):
+            return "fake logs"
+
+        def _log(self, text):
+            pass
+
+        def _close_dialog(self, dlg):
+            pass
+
+        def _show_dialog(self, dlg):
+            self.dialog = dlg
+
+        def _fire_and_forget(self, coro):
+            pass
+
+        async def _set_clipboard(self, text):
+            pass
+
+
+    app = FakeApp()
+    client.HelucrypticApp._show_diagnostics(app, None)
+
+    assert app._diag_open is True
+    assert isinstance(app.dialog, ft.AlertDialog)
+    col = app.dialog.content.content
+    assert isinstance(col, ft.Column)
+    assert len(col.controls) == 3
+    
+    # Verify the first section (Peer info) is a scrollable container with expand=True
+    top_container = col.controls[0]
+    assert isinstance(top_container, ft.Container)
+    assert top_container.expand is True
+    assert isinstance(top_container.content, ft.Column)
+    assert top_container.content.scroll == ft.ScrollMode.AUTO
+
+    # Verify the second section (Logs) is a scrollable container with expand=True
+    bottom_container = col.controls[2]
+    assert isinstance(bottom_container, ft.Container)
+    assert bottom_container.expand is True
+    assert isinstance(bottom_container.content, ft.Column)
+    assert bottom_container.content.scroll == ft.ScrollMode.AUTO

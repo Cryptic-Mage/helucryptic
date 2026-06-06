@@ -87,3 +87,42 @@ def test_load_partial_or_unknown_fields():
     # Unspecified fields use default values
     assert s.retention_days == 30
     assert s.push_to_talk_key == "space"
+
+
+def test_settings_ui_rendering(monkeypatch):
+    pytest.importorskip("flet")
+    import client
+    import flet as ft
+    from settings import Settings
+
+    class FakeApp:
+        settings = Settings()
+        def _settings_on_retention_change(self, ev): pass
+        def _settings_on_profile_change(self, ev): pass
+        def _settings_do_test_turn(self, ev): pass
+        def _settings_do_pf_autodetect(self, ev): pass
+        def _settings_do_pf_test(self, ev): pass
+        def _settings_export_keys(self, ev): pass
+        def _settings_import_keys(self, ev): pass
+        def _settings_regen_keys(self, ev): pass
+        def _settings_do_switch_profile(self, ev): pass
+        def _settings_do_create_profile(self, ev): pass
+        def _settings_save(self, ev): pass
+        def _close_dialog(self, dlg): pass
+        def _show_dialog(self, dlg): pass
+        def _reveal(self, card, delay=0): pass
+        def _show_my_identity(self, ev): pass
+        def _show_backup(self, ev): pass
+        def _show_restore(self, ev): pass
+        def _show_wipe(self, ev): pass
+        
+        # Bind the real method from client.HelucrypticApp
+        _settings_section = client.HelucrypticApp._settings_section
+
+    app = FakeApp()
+    client.HelucrypticApp._show_settings(app, None)
+    
+    assert isinstance(app._settings_dlg, ft.AlertDialog)
+    assert app._settings_retention_dd.value == "30"
+    assert app._settings_profile_dd.value == "balanced"
+

@@ -439,10 +439,10 @@ class HelucrypticApp:
             style=_filled_style(C.ELEV2, C.TEXT, radius=R.MD, pad_h=0, pad_v=10),
         )
 
-        def _copy_room_code(e):
+        async def _copy_room_code(e):
             if self._room_id:
-                # Flet 0.85: clipboard is a service accessed via page.clipboard.set()
-                self.page.clipboard.set(self._room_id)
+                # Flet 0.85: clipboard is a service accessed via ft.Clipboard()
+                await self._set_clipboard(self._room_id)
                 self._log(f"Room code {self._room_id} copied.")
 
         self.room_code_label  = ft.Text("", size=12, color=C.CYAN, selectable=False,
@@ -1482,10 +1482,15 @@ class HelucrypticApp:
     def _handle_sig_error(self, msg: dict, data) -> None:
         msg_text = data if isinstance(data, str) else msg.get("error", str(data))
         match = _re.search(r"User '(.+?)' is offline", msg_text)
-        if match and match.group(1) in self._pending_invites:
+        if match:
             username = match.group(1)
-            self._pending_invites.discard(username)
-            self._toast(f"Could not invite {username} — they are offline", "warn")
+            if username in self.engine.pcs:
+                self._fire_and_forget(self.engine.remove_peer(username))
+            if username in self._pending_invites:
+                self._pending_invites.discard(username)
+                self._toast(f"Could not invite {username} — they are offline", "warn")
+            else:
+                self._toast(msg_text, "warn")
         else:
             self._toast(msg_text, "error")
 
@@ -1724,7 +1729,7 @@ class HelucrypticApp:
         out = _neon_field(value="", read_only=True, multiline=True, min_lines=2,
                            max_lines=4, width=380, text_size=11, visible=False)
 
-        def generate(ev):
+        async def generate(ev):
             pw = self._server_password if incl_pw.value else None
             try:
                 code = invites.encode_invite(
@@ -1736,7 +1741,7 @@ class HelucrypticApp:
                 out.value = f"Error: {ex}"; out.visible = True; self.page.update(); return
             out.value = code
             out.visible = True
-            self.page.clipboard.set(code)
+            await self._set_clipboard(code)
             self._log("Invite link copied to clipboard.")
             self.page.update()
 
@@ -3286,11 +3291,12 @@ class HelucrypticApp:
 
     def _render_diagnostics_state(self) -> str:
         d = self.engine.get_diagnostics()
+        ws_status = "connected" if (self.ws and self.ws.open) else "disconnected"
         lines = [
             "helucryptic — client_claude",
             f"Data dir   : {paths.DATA_DIR}"
             + ("  (portable)" if paths.is_portable() else ""),
-            f"Signaling  : {d['signaling']}",
+            f"Signaling  : {ws_status}",
             f"Server URL : {_redact_url(self.settings.signaling_url)}",
             f"Username   : {d['my_username'] or '(not set)'}",
             f"Security   : {d['security_mode']}",
@@ -3331,8 +3337,8 @@ class HelucrypticApp:
                     break
                 await asyncio.sleep(1)
 
-        def copy_all(ev):
-            self.page.clipboard.set(self._render_diagnostics_state() + "\n\n===== LOG =====\n" + self._render_diagnostics_log())
+        async def copy_all(ev):
+            await self._set_clipboard(self._render_diagnostics_state() + "\n\n===== LOG =====\n" + self._render_diagnostics_log())
             self._log("Diagnostics + log copied to clipboard.")
 
         def close(ev):
@@ -3346,7 +3352,9 @@ class HelucrypticApp:
             title=ft.Text(DIAGNOSTICS_TXT),
             content=ft.Container(width=560, height=460, content=ft.Column([
                 ft.Container(
-                    content=body, padding=ft.Padding.all(10),
+                    expand=True,
+                    content=ft.Column([body], scroll=ft.ScrollMode.AUTO, expand=True),
+                    padding=ft.Padding.all(10),
                     bgcolor=C.ELEV, border_radius=R.MD, border=ft.Border.all(1, C.BORDER),
                 ),
                 ft.Text("Live log (newest last) — captured for .exe builds:",
@@ -3623,7 +3631,7 @@ class HelucrypticApp:
                 ft.dropdown.Option("90",     "90 days"),
                 ft.dropdown.Option("custom", "Custom…"),
             ],
-            on_change=self._settings_on_retention_change,
+            on_select=self._settings_on_retention_change,
         )
 
         self._settings_url_field = _neon_field(
@@ -3644,7 +3652,7 @@ class HelucrypticApp:
             profile_opts.append(ft.dropdown.Option("custom", "Custom (from .env)"))
         self._settings_profile_dd = ft.Dropdown(
             value=self.settings.performance_profile, width=240, options=profile_opts,
-            on_change=self._settings_on_profile_change,
+            on_select=self._settings_on_profile_change,
         )
         self._settings_overclock_warn = ft.Text(
             "⚠ Overclock (2K/60) is very CPU/bandwidth heavy and may not reach "
@@ -3755,6 +3763,8 @@ class HelucrypticApp:
             content=ft.Container(width=540, height=520, content=ft.Column(
                 sections, tight=True, spacing=12, scroll=ft.ScrollMode.AUTO)),
             actions=[
+                ft.TextButton("Restart App", on_click=lambda ev: restart_app(),
+                              style=ft.ButtonStyle(color=C.YELLOW)),
                 ft.FilledButton("Save", icon=ft.Icons.CHECK, on_click=self._settings_save,
                                 style=_filled_style(C.CYAN)),
                 ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(self._settings_dlg)),
@@ -3879,8 +3889,13 @@ class HelucrypticApp:
         """Set the status pill from an HONEST summary of the given peer states
         (mesh-aware: e.g. '2/3 connected'), replacing last-peer-wins."""
         s = summarize_peer_states(states, group=group)
-        color = getattr(C, self._STATUS_COLORS.get(s["level"], "FAINT"))
-        self._update_status(s["label"], color)
+        level = s["level"]
+        label = s["label"]
+        color = getattr(C, self._STATUS_COLORS.get(level, "FAINT"))
+        if level in ("disconnected", "idle") and self.ws and self.ws.open:
+            label = "SIGNALING"
+            color = C.YELLOW
+        self._update_status(label, color)
 
     def _update_status(self, label: str, color: str) -> None:
         self.status_dot.bgcolor      = color
@@ -3995,6 +4010,15 @@ class HelucrypticApp:
         except Exception:
             # Fallback: never silently drop a message the user needs to see.
             self._log(text)
+
+    async def _set_clipboard(self, text: str) -> None:
+        clipboard = ft.Clipboard()
+        self.page.services.append(clipboard)
+        self.page.update()
+        await clipboard.set(text)
+        self.page.services.remove(clipboard)
+        self.page.update()
+
 
 
 def generate_room_code() -> str:
@@ -4219,9 +4243,13 @@ class StartupScreen:
         self.page.update()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+def restart_app() -> None:
+    """Restarts the current Python process."""
+    import os
+    import sys
+    print("[app] Restarting process...", flush=True)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 async def main(page: ft.Page) -> None:
     await asyncio.sleep(0)
@@ -4236,6 +4264,22 @@ async def main(page: ft.Page) -> None:
         if isinstance(exc, ConnectionError) and "Cannot send data" in str(exc):
             return
         lp.default_exception_handler(ctx)
+        if exc is not None:
+            import sys
+            ignore_types = (
+                asyncio.CancelledError,
+                KeyboardInterrupt,
+                SystemExit,
+                ConnectionError,
+            )
+            try:
+                from websockets.exceptions import ConnectionClosed
+                ignore_types += (ConnectionClosed,)
+            except ImportError:
+                pass
+            if not isinstance(exc, ignore_types) and "--dev" not in sys.argv:
+                print(f"[app] Unhandled loop exception: {exc}. Auto-restarting...", flush=True)
+                restart_app()
     _loop.set_exception_handler(_sctp_filter)
     page.title         = "helucryptic"
     # Apply the unified "Refined dark console" theme: dark Material ColorScheme
@@ -4274,4 +4318,12 @@ async def main(page: ft.Page) -> None:
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    import sys
+    try:
+        ft.app(target=main)
+    except Exception as e:
+        if "--dev" not in sys.argv:
+            print(f"[app] Unhandled startup exception: {e}. Auto-restarting...", flush=True)
+            restart_app()
+        else:
+            raise

@@ -146,3 +146,247 @@ async def test_startup_screen_connect_validation_b():
     assert done_called == [("ws://localhost:8000", "custom_pw")]
 
 
+def test_offline_peer_cleanup_on_signaling_error(monkeypatch):
+    import client
+
+    class FakeEngine:
+        def __init__(self):
+            self.pcs = {"pika": "some_pc"}
+            self.removed_peers = []
+
+        async def remove_peer(self, username):
+            self.removed_peers.append(username)
+            self.pcs.pop(username, None)
+
+    class FakeApp:
+        def __init__(self):
+            self.engine = FakeEngine()
+            self._pending_invites = set()
+            self.toasts = []
+
+        def _fire_and_forget(self, coro):
+            import asyncio
+            asyncio.run(coro)
+
+        def _toast(self, msg, level):
+            self.toasts.append((msg, level))
+
+    app = FakeApp()
+    client.HelucrypticApp._handle_sig_error(app, {}, "User 'pika' is offline.")
+
+    assert "pika" not in app.engine.pcs
+    assert app.engine.removed_peers == ["pika"]
+    assert app.toasts == [("User 'pika' is offline.", "warn")]
+
+
+def test_apply_aggregate_status_retains_signaling_when_ws_open(monkeypatch):
+    import client
+
+    class FakeWS:
+        open = True
+
+    class FakeApp:
+        def __init__(self):
+            self.ws = FakeWS()
+            self.status_dot = type("Dot", (object,), {"bgcolor": ""})()
+            self.status_label = type("Label", (object,), {"value": "", "color": ""})()
+            self.engine = type("Engine", (object,), {"signaling_status": ""})()
+            self._motion_ok = False
+            self._STATUS_COLORS = {
+                "idle":         "FAINT",
+                "connecting":   "YELLOW",
+                "connected":    "GREEN",
+                "partial":      "YELLOW",
+                "disconnected": "RED",
+            }
+
+        def _update_status(self, label: str, color: str) -> None:
+            self.status_dot.bgcolor = color
+            self.status_label.value = label
+            self.status_label.color = color
+            self.engine.signaling_status = label.lower()
+
+        _apply_aggregate_status = client.HelucrypticApp._apply_aggregate_status
+
+    app = FakeApp()
+    app._apply_aggregate_status({"pika": "closed"}, group=False)
+    
+    assert app.status_label.value == "SIGNALING"
+    assert app.status_dot.bgcolor == client.C.YELLOW
+
+
+def test_restart_app(monkeypatch):
+    import os
+    import sys
+    
+    exec_args = []
+    def fake_execv(executable, args):
+        exec_args.append((executable, args))
+        
+    monkeypatch.setattr(os, "execv", fake_execv)
+    
+    client.restart_app()
+    
+    assert len(exec_args) == 1
+    assert exec_args[0][0] == sys.executable
+    assert exec_args[0][1] == [sys.executable] + sys.argv
+
+
+@pytest.mark.asyncio
+async def test_sctp_filter_unhandled_exception(monkeypatch):
+    import sys
+    
+    captured_handler = None
+    default_handler_calls = 0
+    class FakeLoop:
+        def set_exception_handler(self, handler):
+            nonlocal captured_handler
+            captured_handler = handler
+        def default_exception_handler(self, ctx):
+            nonlocal default_handler_calls
+            default_handler_calls += 1
+
+    monkeypatch.setattr(client.asyncio, "get_event_loop", lambda: FakeLoop())
+    monkeypatch.setattr(client, "_install_log_capture", lambda: None)
+    monkeypatch.setattr(client, "flet_theme", type("FakeTheme", (object,), {"apply": lambda *a, **kw: None})())
+    monkeypatch.setattr(client, "load_settings", lambda: type("FakeSettings", (object,), {"signaling_url": ""})())
+    monkeypatch.setattr(client, "StartupScreen", lambda page, on_done: None)
+    
+    class FakePage:
+        class FakeWindow:
+            width = 1180
+            height = 760
+            min_width = 940
+            min_height = 600
+            icon = None
+        window = FakeWindow()
+        title = ""
+        padding = 0
+        controls = []
+        def update(self):
+            pass
+            
+    page = FakePage()
+    await client.main(page)
+    
+    assert captured_handler is not None
+
+    # Mock restart_app
+    restart_calls = 0
+    def fake_restart():
+        nonlocal restart_calls
+        restart_calls += 1
+    monkeypatch.setattr(client, "restart_app", fake_restart)
+
+    # 1. Unhandled exception, --dev NOT in sys.argv
+    monkeypatch.setattr(sys, "argv", ["client.py"])
+    ctx = {"exception": ValueError("test error")}
+    captured_handler(FakeLoop(), ctx)
+    assert restart_calls == 1
+    assert default_handler_calls == 1
+
+    # 2. Unhandled exception, --dev IS in sys.argv
+    restart_calls = 0
+    default_handler_calls = 0
+    monkeypatch.setattr(sys, "argv", ["client.py", "--dev"])
+    ctx = {"exception": ValueError("test error")}
+    captured_handler(FakeLoop(), ctx)
+    assert restart_calls == 0
+    assert default_handler_calls == 1
+
+    # 3. Ignored exceptions, --dev NOT in sys.argv
+    for exc_class in [asyncio.CancelledError, KeyboardInterrupt, SystemExit, ConnectionError]:
+        restart_calls = 0
+        default_handler_calls = 0
+        monkeypatch.setattr(sys, "argv", ["client.py"])
+        ctx = {"exception": exc_class("test ignored")}
+        captured_handler(FakeLoop(), ctx)
+        assert restart_calls == 0
+        assert default_handler_calls == 1
+
+    # 4. ConnectionError with "Cannot send data" message
+    restart_calls = 0
+    default_handler_calls = 0
+    monkeypatch.setattr(sys, "argv", ["client.py"])
+    ctx = {"exception": ConnectionError("Cannot send data")}
+    captured_handler(FakeLoop(), ctx)
+    assert restart_calls == 0
+    assert default_handler_calls == 0
+
+
+def test_entry_point_exception_handling_non_dev(monkeypatch):
+    import sys
+    import flet as ft
+    
+    def fake_app(target):
+        raise RuntimeError("Startup fail")
+    monkeypatch.setattr(ft, "app", fake_app)
+    
+    restart_calls = 0
+    def fake_restart():
+        nonlocal restart_calls
+        restart_calls += 1
+    monkeypatch.setattr(client, "restart_app", fake_restart)
+    
+    monkeypatch.setattr(sys, "argv", ["client.py"])
+    
+    code = """
+try:
+    ft.app(target=main)
+except Exception as e:
+    if "--dev" not in sys.argv:
+        restart_app()
+    else:
+        raise
+"""
+    globals_dict = {
+        "ft": ft,
+        "main": client.main,
+        "sys": sys,
+        "restart_app": client.restart_app
+    }
+    exec(code, globals_dict)
+    
+    assert restart_calls == 1
+
+
+def test_entry_point_exception_handling_dev(monkeypatch):
+    import sys
+    import flet as ft
+    
+    def fake_app(target):
+        raise RuntimeError("Startup fail")
+    monkeypatch.setattr(ft, "app", fake_app)
+    
+    restart_calls = 0
+    def fake_restart():
+        nonlocal restart_calls
+        restart_calls += 1
+    monkeypatch.setattr(client, "restart_app", fake_restart)
+    
+    monkeypatch.setattr(sys, "argv", ["client.py", "--dev"])
+    
+    code = """
+try:
+    ft.app(target=main)
+except Exception as e:
+    if "--dev" not in sys.argv:
+        restart_app()
+    else:
+        raise
+"""
+    globals_dict = {
+        "ft": ft,
+        "main": client.main,
+        "sys": sys,
+        "restart_app": client.restart_app
+    }
+    with pytest.raises(RuntimeError, match="Startup fail"):
+        exec(code, globals_dict)
+        
+    assert restart_calls == 0
+
+
+
+
+
