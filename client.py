@@ -76,6 +76,7 @@ from natpmp import (
     PROTON_GATEWAY,
     PortForwardManager,
     discover_gateway,
+    discover_gateway_candidates,
     local_ip_for,
     request_mapping_over_socket,
 )
@@ -116,6 +117,22 @@ from constants.client_constants import (
     _ghost_style,
     _neon_field,
 )
+
+
+# ---------------------------------------------------------------------------
+# Startup helpers
+# ---------------------------------------------------------------------------
+
+def _cleanup_stale_recv_files() -> None:
+    """Remove any helucryptic-recv-*.part files left by a previous crash or
+    interrupted file transfer, so they don't accumulate in the OS temp dir."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir())
+    for stale in tmp.glob("helucryptic-recv-*.part"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +177,11 @@ class HelucrypticApp:
         # Session token issued by the server on connect; resent on reconnect to
         # prove we own this username slot (prevents third-party eviction).
         self._ws_session_token: str            = ""
+        # Server-reflected NAT coordinates (from session_token handshake).
+        self._reflected_host: str              = ""
+        self._reflected_port: int              = 0
+        # Prevents overlapping auto-reconnect attempts after an unexpected drop.
+        self._ws_reconnect_active: bool        = False
         # Incoming-video render throttle (per sender) + encode quality. Lower in
         # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
         self._last_tile_render: dict[str, float] = {}
@@ -189,6 +211,7 @@ class HelucrypticApp:
         self._running_tasks: set[asyncio.Task] = set()
 
         init_db()
+        _cleanup_stale_recv_files()
         run_retention_policy(self.settings.retention_days)
         self._build_ui()
         self._wire_engine_callbacks()
@@ -214,16 +237,22 @@ class HelucrypticApp:
             self._fire_and_forget(self._start_port_forward())
 
     async def _start_port_forward(self) -> None:
-        gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+        primary_gw = await asyncio.to_thread(discover_gateway)
+        # Build an ordered candidate list (.1 first, then .254 and .2 for
+        # non-standard subnets, then PROTON_GATEWAY as a final fallback).
+        candidates = discover_gateway_candidates(primary_gw)
+        gw = candidates[0]
         ip = await asyncio.to_thread(local_ip_for, gw)
 
         async def request_fn(gateway: str):
-            # Prefer a live NAT-PMP mapping; fall back to the manually typed
-            # port (e.g. a router forward with no NAT-PMP).
-            port = await asyncio.to_thread(request_mapping_over_socket, gateway)
-            if port is None:
-                port = self.settings.forwarded_port or None
-            return port
+            # Try each candidate in order; stop at the first successful mapping.
+            for candidate in candidates:
+                port = await asyncio.to_thread(request_mapping_over_socket, candidate)
+                if port is not None:
+                    return port
+            # No NAT-PMP response from any gateway — fall back to the manually
+            # configured port (e.g. a static router forward without NAT-PMP).
+            return self.settings.forwarded_port or None
 
         self._pf_manager = PortForwardManager(
             gateway=gw, local_ip=ip,
@@ -1127,6 +1156,9 @@ class HelucrypticApp:
                 if was_hub:
                     self.engine.forget_peer_capability(peer)
                     self._log(f"🛰 Relay hub {peer} dropped — re-electing a new hub…")
+                # Reconcile topology for ANY failed peer (not just the hub) so a
+                # broken spoke can be rebuilt without waiting for the hub to change.
+                if self.ws:
                     self._fire_and_forget(self._on_topology_changed())
             else:
                 self._room_peers[peer] = state
@@ -1141,13 +1173,18 @@ class HelucrypticApp:
                 self._update_chat_header_contact(peer)
             self._apply_aggregate_status({peer: state}, group=False)
         if state == "connected":
-            self.msg_input.disabled  = False
-            self.btn_send.disabled   = False
-            self.btn_call.disabled   = False
-            self.btn_screen.disabled = False
-            self.btn_file.disabled   = False
-            self.page.update()
+            # In room mode only re-enable buttons for peers that are actually
+            # part of the room topology; ignore stray 1-to-1 state changes.
+            if not self._room_id or peer in self._room_peers:
+                self.msg_input.disabled  = False
+                self.btn_send.disabled   = False
+                self.btn_call.disabled   = False
+                self.btn_screen.disabled = False
+                self.btn_file.disabled   = False
+                self.page.update()
         elif state in ("failed", "disconnected", "closed"):
+            # Disable only when no room peer is in 'connected' state.
+            # 'connecting' entries are not usable channels and must not count.
             if not any(s == "connected" for s in self._room_peers.values()):
                 self.msg_input.disabled  = True
                 self.btn_send.disabled   = True
@@ -1413,6 +1450,11 @@ class HelucrypticApp:
         async def ws_send(payload: dict):
             await self.ws.send(json.dumps(payload))
 
+        # Keep the engine's send reference current so renegotiation after a
+        # WebRTC failure can still reach the live WebSocket.
+        self.engine._send_ws = ws_send
+        _dropped_unexpectedly = False
+
         try:
             async for raw in self.ws:
                 try:
@@ -1432,6 +1474,41 @@ class HelucrypticApp:
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
         except Exception as ex:
             self._cleanup_signaling_disconnect(ex)
+            _dropped_unexpectedly = True
+        finally:
+            if _dropped_unexpectedly and self._room_id and not self._ws_reconnect_active:
+                self._fire_and_forget(self._ws_reconnect_loop())
+
+    async def _ws_reconnect_loop(self) -> None:
+        """Reconnect to the signaling server after an unexpected drop.
+        Backs off exponentially (2 s → 4 s → … → 30 s) and exits as soon as
+        either the connection is restored or the room is cleared."""
+        if self._ws_reconnect_active:
+            return
+        self._ws_reconnect_active = True
+        delay = 2.0
+        try:
+            while self._room_id:
+                await asyncio.sleep(delay)
+                # Another path (user action or parallel loop) already reconnected.
+                if self.ws is not None:
+                    try:
+                        if not self.ws.closed:
+                            return
+                    except Exception:
+                        pass
+                uname = self.username_input.value.strip()
+                if not uname:
+                    return
+                self._log(f"[Reconnect] Re-joining room {self._room_id}…")
+                try:
+                    await self._connect_signaling(None, room=self._room_id)
+                    return  # success — new listener takes over
+                except Exception as ex:
+                    self._toast(f"Reconnect failed ({type(ex).__name__}), retrying…", "warn")
+                    delay = min(delay * 2, 30.0)
+        finally:
+            self._ws_reconnect_active = False
 
     async def _handle_sig_peer_joined(self, sender: str, ws_send) -> None:
         self._room_peers[sender] = "connecting"
@@ -1561,6 +1638,14 @@ class HelucrypticApp:
             self._show_room_invite_dialog(inviter, room_id)
         elif t == "session_token":
             self._ws_session_token = (data or {}).get("token", "")
+            self._reflected_host = str((data or {}).get("reflected_host") or "")
+            self._reflected_port = int((data or {}).get("reflected_port") or 0)
+            if self._reflected_host:
+                print(f"[nat] server reflects us as {self._reflected_host}:{self._reflected_port}",
+                      flush=True)
+                self.engine.set_reflected_host(self._reflected_host)
+                if self._room_id:
+                    self._fire_and_forget(self._broadcast_capability(ws_send))
         elif t == "presence":
             # Server-confirmed online set for our contacts.
             self._apply_presence(data.get("online", []))
@@ -3464,9 +3549,15 @@ class HelucrypticApp:
         self._settings_pf_result.value = "Detecting…"
         self._settings_pf_result.color = C.SUBTLE
         self.page.update()
-        gw = await asyncio.to_thread(discover_gateway) or PROTON_GATEWAY
+        primary = await asyncio.to_thread(discover_gateway)
+        candidates = discover_gateway_candidates(primary)
+        gw = candidates[0]
         ip = await asyncio.to_thread(local_ip_for, gw)
-        port = await asyncio.to_thread(request_mapping_over_socket, gw)
+        port = None
+        for candidate in candidates:
+            port = await asyncio.to_thread(request_mapping_over_socket, candidate)
+            if port is not None:
+                break
         if port and ip:
             self._settings_pf_port_f.value = str(port)
             self._settings_pf_result.value = f"Got port {port} on {ip}"

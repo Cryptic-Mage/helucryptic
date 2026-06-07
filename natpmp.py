@@ -104,6 +104,33 @@ def discover_gateway() -> str | None:
     return gw
 
 
+def discover_gateway_candidates(primary: str | None = None) -> list[str]:
+    """Return an ordered list of gateway addresses to probe for NAT-PMP.
+
+    Starts from *primary* (or the result of ``discover_gateway()`` if omitted),
+    then appends the two other common last-octet assignments (.254, .2) so
+    non-standard subnets succeed without manual configuration.
+    ``PROTON_GATEWAY`` is appended as a final fallback.
+    """
+    base = primary if primary is not None else discover_gateway()
+    if not base:
+        return [PROTON_GATEWAY]
+    parts = base.split(".")
+    if len(parts) != 4:
+        return [base, PROTON_GATEWAY]
+    prefix = ".".join(parts[:3])
+    seen: set[str] = {base}
+    candidates: list[str] = [base]
+    for suffix in ("1", "254", "2"):
+        alt = f"{prefix}.{suffix}"
+        if alt not in seen:
+            seen.add(alt)
+            candidates.append(alt)
+    if PROTON_GATEWAY not in seen:
+        candidates.append(PROTON_GATEWAY)
+    return candidates
+
+
 def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> int | None:
     """Request UDP+TCP NAT-PMP maps; return the assigned external port.
 

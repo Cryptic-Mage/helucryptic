@@ -22,14 +22,35 @@ export default {
   },
 };
 
+// Sliding-window rate limiting constants (mirrors server.py).
+const MSG_WINDOW_MS = 10_000;  // 10 s
+const MSG_MAX       = 100;     // max signaling messages per user per window
+
 export class SignalHub {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this._sessionTokens = new Map(); // username → session token (prevents impersonation)
+    this._msgTimes      = new Map(); // username → number[] (message timestamps, ms)
   }
 
   // ---- helpers -----------------------------------------------------------
+
+  _msgRateOk(username) {
+    const now = Date.now();
+    let times = this._msgTimes.get(username);
+    if (!times) { times = []; this._msgTimes.set(username, times); }
+    // Evict entries outside the window.
+    const cutoff = now - MSG_WINDOW_MS;
+    while (times.length && times[0] < cutoff) times.shift();
+    if (times.length >= MSG_MAX) return false;
+    times.push(now);
+    return true;
+  }
+
+  _msgRateCleanup(username) {
+    this._msgTimes.delete(username);
+  }
 
   _attach(ws) {
     try {
@@ -83,7 +104,7 @@ export class SignalHub {
     const a = new TextEncoder().encode(supplied || "");
     const b = new TextEncoder().encode(expected);
     if (a.byteLength !== b.byteLength) return false;
-    return crypto.subtle.timingSafeEqual(a, b);
+    return crypto.timingSafeEqual(a, b);
   }
 
   _parseUrlParams(request) {
@@ -106,7 +127,7 @@ export class SignalHub {
     const tokenOk =
       expectedToken.length > 0 &&
       a.byteLength === b.byteLength &&
-      crypto.subtle.timingSafeEqual(a, b);
+      crypto.timingSafeEqual(a, b);
     if (!tokenOk) return this._rejectWS("Username already in use by an active session.");
     for (const old of existingSockets) {
       try { old.close(1000, "replaced"); } catch {}
@@ -163,7 +184,13 @@ export class SignalHub {
     const newToken = this._generateToken();
     this._sessionTokens.set(username, newToken);
     server.serializeAttachment({ username, room, token: newToken });
-    server.send(JSON.stringify({ type: "session_token", data: { token: newToken } }));
+    // CF-Connecting-IP is the client's real IP as seen by Cloudflare.
+    // Port is not accessible in Workers (CF terminates TLS as a proxy).
+    const reflectedHost = request.headers.get("CF-Connecting-IP") || null;
+    server.send(JSON.stringify({
+      type: "session_token",
+      data: { token: newToken, reflected_host: reflectedHost, reflected_port: null },
+    }));
 
     this._notifyRoomJoin(room, username, server);
 
@@ -177,6 +204,13 @@ export class SignalHub {
     } catch {
       return;
     }
+
+    const me = this._attach(ws);
+    if (me.username && !this._msgRateOk(me.username)) {
+      // Drop the packet silently — same behaviour as server.py.
+      return;
+    }
+
     const target = payload.target;
     const type = payload.type;
 
@@ -197,7 +231,18 @@ export class SignalHub {
     if (!target || !type) return;
     if (SERVER_TYPES.has(type)) return; // never relay server-generated types
 
-    const me = this._attach(ws);
+    // Room isolation: sender in a room may only signal peers in that same room.
+    if (me.room) {
+      const targetWsForRoom = this._findUser(target);
+      if (targetWsForRoom) {
+        const ta = this._attach(targetWsForRoom);
+        if (ta.room !== me.room) {
+          ws.send(JSON.stringify({ sender: "system", type: "error", data: `User '${target}' is not in your room.` }));
+          return;
+        }
+      }
+    }
+
     const targetWs = this._findUser(target);
     if (!targetWs) {
       ws.send(JSON.stringify({ sender: "system", type: "error", data: `User '${target}' is offline.` }));
@@ -213,6 +258,7 @@ export class SignalHub {
     // replacement socket may have already installed a new token.
     if (a.username && a.token && a.token === this._sessionTokens.get(a.username)) {
       this._sessionTokens.delete(a.username);
+      this._msgRateCleanup(a.username);
     }
     if (!a.room) return;
     // If this user still has another live socket (e.g. we just replaced a stale

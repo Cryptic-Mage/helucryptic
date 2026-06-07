@@ -127,13 +127,13 @@ def install_forward_patch(loop) -> None:
 # Hub-election helpers (pure, deterministic — no I/O)
 # ---------------------------------------------------------------------------
 
-def reachability_tier(settings, current_port=None) -> int:
-    """0=behind NAT, 1=TURN reachable, 2=directly reachable (forwarded port)."""
+def reachability_tier(settings, current_port=None, reflected_host=None) -> int:
+    """0=behind NAT  1=has public address (STUN/TURN/reflected)  2=forwarded port."""
     if (current_port and current_port > 0) or (
             getattr(settings, "port_forward_enabled", False)
             and getattr(settings, "forwarded_port", 0)):
         return 2
-    if getattr(settings, "turn_url", ""):
+    if getattr(settings, "turn_url", "") or reflected_host:
         return 1
     return 0
 
@@ -466,6 +466,7 @@ class WebRTCEngine:
         self._cap_epoch:         dict[str, int] = {}
         self._my_epoch:          int            = 0   # bumped in client before each hub_capability broadcast
         self._room_creator_name: str | None  = None
+        self._reflected_host:    str          = ""   # public IP reflected by signaling server
 
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
@@ -599,10 +600,14 @@ class WebRTCEngine:
         self._cap_tier.pop(peer, None)
         self._cap_epoch.pop(peer, None)
 
+    def set_reflected_host(self, host: str) -> None:
+        """Store the server-reflected public IP for use in hub-election tier calculation."""
+        self._reflected_host = host or ""
+
     def _my_tier(self) -> int:
         """Return this engine's own reachability tier using current module-global state."""
         cur = _forward_port if _forward_active else None
-        return reachability_tier(self.settings, current_port=cur)
+        return reachability_tier(self.settings, current_port=cur, reflected_host=self._reflected_host or None)
 
     def capability_payload(self) -> dict:
         """Build this peer's hub-election capability announcement (bumps epoch)."""
@@ -691,9 +696,17 @@ class WebRTCEngine:
             if self.on_state_change:
                 self.on_state_change(peer, state)
 
-            # Clean up automatically when the connection fails or closes
-            if state in ("closed", "failed"):
+            if state == "failed":
+                # Signaling may still be alive — attempt self-healing renegotiation
+                # before giving up. Only fall back to remove_peer when there is no
+                # send channel (signaling is also gone).
+                if self._send_ws is not None:
+                    self._bg(self._heal_peer(peer))
+                else:
+                    self._bg(self.remove_peer(peer))
+            elif state == "closed":
                 self._bg(self.remove_peer(peer))
+            # "disconnected": ICE has its own recovery timers; do not intervene
 
         @pc.on("iceconnectionstatechange")
         def on_ice_state():
@@ -836,7 +849,13 @@ class WebRTCEngine:
                     pass
         elif kind == "psk_response":
             # Verify the peer's proof over OUR nonce (constant-time).
-            expected = self._psk_proof(self._psk_my_nonce.get(peer, ""))
+            # Reject responses when no challenge is pending — prevents replay
+            # against an absent/empty nonce which would produce a predictable hash.
+            nonce = self._psk_my_nonce.get(peer, "")
+            if not nonce:
+                print(f"[psk] {self.my_username}: unexpected psk_response from {peer} — no pending challenge", flush=True)
+                return
+            expected = self._psk_proof(nonce)
             if hmac.compare_digest(expected, str(frame.get("proof", ""))):
                 if not self._psk_authed.get(peer):
                     self._psk_authed[peer] = True
@@ -935,6 +954,12 @@ class WebRTCEngine:
                 verify_pub = claimed_pub
                 if verify_pub is None:
                     return
+                # First-contact TOFU: notify the user so they can verify the
+                # fingerprint out-of-band. A MITM on the first connection is
+                # otherwise undetectable until the contact is manually verified.
+                print(f"[crypto] TOFU: first-contact key pinning for {peer} — verify fingerprint out-of-band.", flush=True)
+                if self.on_key_change:
+                    self.on_key_change(peer)
 
             try:
                 payload = paseto_verify(frame["token"], verify_pub)
@@ -1756,6 +1781,7 @@ class WebRTCEngine:
             remaining = sorted(list(self.pcs.keys()) + [self.my_username])
             if remaining and remaining[0] == self.my_username:
                 self.is_room_creator = True
+                self._room_creator_name = self.my_username
                 if self.group_key is None:
                     # Orphaned: the original creator left before we ever received
                     # the group key. Establish a fresh key and distribute it so
@@ -1765,6 +1791,28 @@ class WebRTCEngine:
                         if p in self.session_keys:
                             await self._send_group_key_to(p)
                 await self._flush_group_buffer()
+
+    async def _heal_peer(self, peer: str) -> None:
+        """Remove a failed PC, then re-initiate the connection over the still-live
+        signaling channel. For rooms, topology reconciliation takes over once the
+        client's on_state_change callback fires; for 1-to-1 we call add_peer directly."""
+        print(f"[rtc] {self.my_username}: self-healing {peer}", flush=True)
+        await self.remove_peer(peer)
+        if self._send_ws is None or peer in self.pcs:
+            return
+        # Brief pause so both sides complete their remove_peer paths before
+        # either side re-initiates (avoids an immediate glare on re-entry).
+        await asyncio.sleep(1.0)
+        if peer in self.pcs:
+            return
+        if not self.room_id:
+            try:
+                await self.add_peer(peer, self._send_ws)
+                print(f"[rtc] {self.my_username}: re-initiated connection to {peer}", flush=True)
+            except Exception as ex:
+                print(f"[rtc] {self.my_username}: heal re-add failed for {peer}: {ex}", flush=True)
+        # Room case: on_state_change already fired → client's _on_topology_changed
+        # will call reconcile_room_connections, which handles hub reconnection.
 
     async def _prune_dead_non_hub_peers(self, hub: str) -> None:
         for peer in list(self.pcs.keys()):

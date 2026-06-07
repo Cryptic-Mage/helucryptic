@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import secrets as _secrets
+import time
+from collections import deque
 
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
@@ -29,6 +31,38 @@ active_connections: dict[str, WebSocket] = {}
 rooms:   dict[str, set[str]] = {}   # room_id → {username, ...}
 room_of: dict[str, str]      = {}   # username → room_id
 _session_tokens:   dict[str, str]    = {}   # username → session token (prevents impersonation)
+
+# --- Rate limiting (token-bucket, in-memory) --------------------------------
+# Connection rate: max 20 new WS connections per IP per 60 s.
+_conn_times: dict[str, deque] = {}
+_CONN_WINDOW = 60.0
+_CONN_MAX    = 20
+# Message rate: max 100 signaling messages per username per 10 s.
+_msg_times: dict[str, deque] = {}
+_MSG_WINDOW = 10.0
+_MSG_MAX    = 100
+
+
+def _conn_rate_ok(ip: str) -> bool:
+    now = time.monotonic()
+    dq  = _conn_times.setdefault(ip, deque())
+    while dq and dq[0] < now - _CONN_WINDOW:
+        dq.popleft()
+    if len(dq) >= _CONN_MAX:
+        return False
+    dq.append(now)
+    return True
+
+
+def _msg_rate_ok(username: str) -> bool:
+    now = time.monotonic()
+    dq  = _msg_times.setdefault(username, deque())
+    while dq and dq[0] < now - _MSG_WINDOW:
+        dq.popleft()
+    if len(dq) >= _MSG_MAX:
+        return False
+    dq.append(now)
+    return True
 
 
 def _password_ok(supplied: str | None) -> bool:
@@ -116,6 +150,9 @@ async def _handle_room_joining(websocket: WebSocket, username: str, room: str) -
 
 
 async def _handle_websocket_message(websocket: WebSocket, username: str, payload: dict) -> None:
+    if not _msg_rate_ok(username):
+        logger.warning("Message rate limit exceeded for '%s' — dropping packet", username)
+        return
     msg_type = payload.get("type")
 
     # --- Presence query (directed at the server, not a peer) ---
@@ -141,6 +178,23 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
     # Never forward server-generated types
     if msg_type in SERVER_TYPES:
         logger.warning("User '%s' tried to forge server message type '%s'", username, msg_type)
+        return
+
+    # Room isolation: a sender in a room may only signal peers in that same room.
+    sender_room = room_of.get(username)
+    if sender_room and room_of.get(target) != sender_room:
+        logger.warning(
+            "Cross-room message blocked: '%s' (room %s) → '%s' (room %s)",
+            username, sender_room, target, room_of.get(target),
+        )
+        try:
+            await websocket.send_text(json.dumps({
+                "sender": "system",
+                "type": "error",
+                "data": f"User '{target}' is not in your room.",
+            }))
+        except Exception:
+            pass
         return
 
     if target not in active_connections:
@@ -224,6 +278,15 @@ async def _verify_and_update_session(
             pass
         active_connections.pop(username, None)
         _session_tokens.pop(username, None)
+        # Evict stale room membership so capacity counts and peer_left fan-out
+        # are correct even when the reconnect has no ?room= parameter.
+        old_room = room_of.pop(username, None)
+        if old_room and old_room in rooms:
+            rooms[old_room].discard(username)
+            if not rooms[old_room]:
+                del rooms[old_room]
+            else:
+                await _notify_peer_left(old_room, username)
     return True
 
 
@@ -232,9 +295,14 @@ async def _establish_connection_session(websocket: WebSocket, username: str) -> 
     _session_tokens[username] = new_token
     active_connections[username] = websocket
 
+    client = websocket.client
     await websocket.send_text(json.dumps({
         "type": "session_token",
-        "data": {"token": new_token},
+        "data": {
+            "token": new_token,
+            "reflected_host": client.host if client else None,
+            "reflected_port": client.port if client else None,
+        },
     }))
     return new_token
 
@@ -262,6 +330,7 @@ async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
     # replaced this one, skip cleanup so we don't clobber the new state.
     if active_connections.get(username) is not websocket:
         return
+    _msg_times.pop(username, None)
     active_connections.pop(username, None)
     _session_tokens.pop(username, None)
     room_id = room_of.pop(username, None)
@@ -282,6 +351,13 @@ async def websocket_endpoint(
     password: str | None = Query(default=None),
     session_token: str | None = Query(default=None),
 ):
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    if not _conn_rate_ok(client_ip):
+        logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
+        await websocket.send_denial_response(
+            Response(status_code=429, content="Too many connection attempts — slow down."))
+        return
+
     logger.info("Incoming connection request from '%s'", username)
 
     if not await _authenticate_and_accept_connection(websocket, username, password):
