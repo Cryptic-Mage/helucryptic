@@ -152,8 +152,8 @@ canvas,img,svg{display:block}
   padding:9px 13px;border-radius:13px;
   border:1px solid var(--border);
   background:color-mix(in srgb,var(--bg) 82%,transparent);
-  backdrop-filter:blur(20px) saturate(160%);
-  -webkit-backdrop-filter:blur(20px) saturate(160%);
+  backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
   pointer-events:all;transition:background .3s;
 }
 .nav__brand{display:flex;align-items:center;gap:9px}
@@ -1543,15 +1543,25 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
     display:none;position:fixed;inset:0;z-index:9999;
     background:#000;opacity:0;
     transition:opacity 0.4s ease;
-  ">
+  " role="dialog" aria-label="Intro video">
     <video id="lock-video" style="
       position:absolute;inset:0;
       width:100%;height:100%;
-      object-fit:cover;
+      object-fit:contain;
       display:block;
-    ">
+    " playsinline webkit-playsinline>
       <source src="assets/hello_git.mp4" type="video/mp4">
     </video>
+    <!-- Tap anywhere to close on mobile -->
+    <button id="video-close-btn" aria-label="Close video" style="
+      position:absolute;top:16px;right:16px;
+      width:38px;height:38px;border-radius:50%;
+      background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);
+      display:flex;align-items:center;justify-content:center;
+      color:#fff;cursor:pointer;z-index:10;
+    ">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
   </div>
 
   <!-- FOOTER -->
@@ -2215,24 +2225,19 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
   const archSection = $('#protocol');
   let lastScroll = -1;
 
-  function archLoop() {
-    requestAnimationFrame(archLoop);
-    const y = window.scrollY;
-    if (y === lastScroll) return;
-    lastScroll = y;
-    updateScrollProgress();
-    // Lazy-init: if archCtx was never set (or canvas reset to default 300×150), try now
-    if (!archCtx) initArchCanvas();
-    renderArch(sceneProgress(archSection));
-  }
-
   // ================================================================
   // INIT
   // ================================================================
 
   document.addEventListener('DOMContentLoaded', () => {
-    archLoop();
-    window.addEventListener('scroll', updateScrollProgress, { passive: true });
+    updateScrollProgress();
+    if (!archCtx) initArchCanvas();
+    renderArch(0);
+    window.addEventListener('scroll', () => {
+      updateScrollProgress();
+      if (!archCtx) initArchCanvas();
+      renderArch(sceneProgress(archSection));
+    }, { passive: true });
   });
 
   // Init canvas after layout has stabilised (double rAF ensures a full paint cycle)
@@ -2406,7 +2411,7 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
         modal.style.opacity = '1';
       }));
       video.currentTime = 0;
-      video.play();
+      video.play().catch(() => {});
     }
 
     function closeModal() {
@@ -2436,6 +2441,10 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && modal.style.display !== 'none') closeModal();
     });
+
+    // Close button (visible on mobile)
+    const closeBtn = $('#video-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', closeModal);
 
     video.addEventListener('ended', function() {
       closeModal();
@@ -2552,7 +2561,7 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     let W, H, nodes = [], raf;
-    const NODE_COUNT = 55, MAX_DIST = 130;
+    const NODE_COUNT = 30, MAX_DIST = 110;
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -2567,7 +2576,11 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
       }));
     }
 
-    function frame() {
+    let lastFrame = 0;
+    function frame(ts) {
+      raf = requestAnimationFrame(frame);
+      if (ts - lastFrame < 33) return;
+      lastFrame = ts;
       ctx.clearRect(0, 0, W, H);
       const dark = document.documentElement.getAttribute('data-theme') !== 'light';
       const nodeColor = dark ? 'rgba(201,169,110,' : 'rgba(160,120,60,';
@@ -2602,11 +2615,10 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
         ctx.fill();
       });
 
-      raf = requestAnimationFrame(frame);
     }
 
     resize();
-    frame();
+    requestAnimationFrame(frame);
 
     let _resizeTimer;
     window.addEventListener('resize', () => {
