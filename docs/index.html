@@ -961,6 +961,98 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
 
 /* Scramble — prevent layout shift on load */
 .hero-headline{word-break:break-word;min-height:1em}
+
+/* ================================================================
+   HANDSHAKE DEMO OVERLAY
+================================================================ */
+#hs-overlay{
+  position:fixed;inset:0;z-index:8000;
+  background:rgba(9,9,9,0.93);
+  display:none;flex-direction:column;
+  align-items:center;justify-content:center;gap:0;
+  opacity:0;transition:opacity 0.6s ease;
+}
+[data-theme="light"] #hs-overlay{background:rgba(10,15,30,0.94)}
+#hs-canvas{display:block;width:100%;max-width:640px;height:300px}
+#hs-text{
+  text-align:center;margin-top:20px;
+  width:100%;max-width:560px;padding:0 24px;
+}
+#hs-status{
+  font-family:var(--f-dis);font-weight:700;
+  font-size:clamp(1rem,3vw,1.35rem);
+  color:#f0f0ee;letter-spacing:-.02em;margin-bottom:7px;
+  transition:opacity 0.25s ease;
+}
+#hs-sub{
+  font-family:var(--f-mno);font-size:10.5px;
+  color:rgba(148,148,144,0.8);letter-spacing:.04em;
+  transition:opacity 0.25s ease;
+}
+#hs-phase-dots{
+  display:flex;gap:7px;justify-content:center;margin-top:18px;
+}
+.hs-dot{
+  width:6px;height:6px;border-radius:50%;
+  background:rgba(255,255,255,0.12);
+  transition:background 0.35s ease,transform 0.35s ease;
+}
+.hs-dot.done{background:var(--green)}
+.hs-dot.active{background:var(--gold);transform:scale(1.4)}
+#hs-skip{
+  position:absolute;bottom:22px;right:22px;
+  font-family:var(--f-mno);font-size:9.5px;
+  color:rgba(255,255,255,0.25);background:none;border:none;
+  cursor:pointer;transition:color .2s;padding:6px 10px;
+}
+#hs-skip:hover{color:rgba(255,255,255,0.55)}
+
+/* ================================================================
+   P2P STATUS BADGE
+================================================================ */
+#p2p-badge{
+  position:fixed;bottom:20px;right:20px;z-index:700;
+  background:var(--s1);border:1px solid var(--border);
+  border-radius:11px;padding:13px 16px 13px 14px;
+  display:none;flex-direction:column;gap:9px;
+  min-width:220px;
+  box-shadow:0 4px 28px rgba(0,0,0,0.35);
+  opacity:0;transform:translateY(10px);
+  transition:opacity 0.4s ease,transform 0.4s ease;
+}
+#p2p-badge.visible{opacity:1;transform:translateY(0)}
+.p2p-badge-title{
+  font-family:var(--f-mno);font-size:7.5px;
+  text-transform:uppercase;letter-spacing:.15em;
+  color:var(--t2);opacity:.55;margin-bottom:1px;
+}
+.p2p-badge-row{display:flex;align-items:center;gap:9px}
+.p2p-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.p2p-dot--off{background:rgba(148,148,144,0.3)}
+.p2p-dot--on{
+  background:var(--green);
+  box-shadow:0 0 7px var(--green);
+  animation:p2p-pulse 2s ease-in-out infinite;
+}
+@keyframes p2p-pulse{
+  0%,100%{opacity:1;box-shadow:0 0 7px var(--green)}
+  50%{opacity:.55;box-shadow:0 0 14px var(--green)}
+}
+.p2p-badge-label strong{
+  display:block;font-family:var(--f-mno);font-size:11px;
+  font-weight:600;color:var(--text);margin-bottom:1px;
+}
+.p2p-badge-label span{
+  font-family:var(--f-mno);font-size:8.5px;color:var(--t2);opacity:.6;
+}
+#p2p-badge-x{
+  position:absolute;top:9px;right:9px;
+  width:18px;height:18px;background:none;border:none;
+  color:var(--t2);opacity:.4;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:opacity .2s;
+}
+#p2p-badge-x:hover{opacity:.9}
   </style>
 </head>
 <body>
@@ -1538,30 +1630,61 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
 
   </main>
 
+  <!-- HANDSHAKE DEMO OVERLAY (fires after 30s on page) -->
+  <div id="hs-overlay" role="dialog" aria-label="helucryptic connection demo" aria-modal="true">
+    <canvas id="hs-canvas" aria-hidden="true"></canvas>
+    <div id="hs-text">
+      <div id="hs-status">Discovering peers…</div>
+      <div id="hs-sub">Connecting to signaling server</div>
+      <div id="hs-phase-dots">
+        <div class="hs-dot active"></div>
+        <div class="hs-dot"></div>
+        <div class="hs-dot"></div>
+        <div class="hs-dot"></div>
+        <div class="hs-dot"></div>
+        <div class="hs-dot"></div>
+      </div>
+    </div>
+    <button id="hs-skip" onclick="window._hsSkip&&window._hsSkip()">skip · esc</button>
+  </div>
+
+  <!-- P2P STATUS BADGE (persists after demo) -->
+  <div id="p2p-badge" role="status" aria-live="polite">
+    <button id="p2p-badge-x" aria-label="Dismiss">
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div class="p2p-badge-title">Connection Status</div>
+    <div class="p2p-badge-row">
+      <div class="p2p-dot p2p-dot--off"></div>
+      <div class="p2p-badge-label">
+        <strong>server.py</strong>
+        <span>Disconnected · session complete</span>
+      </div>
+    </div>
+    <div class="p2p-badge-row">
+      <div class="p2p-dot p2p-dot--on"></div>
+      <div class="p2p-badge-label">
+        <strong>P2P · End-to-End Encrypted</strong>
+        <span>PASETO v4 · XChaCha20-Poly1305</span>
+      </div>
+    </div>
+  </div>
+
   <!-- VIDEO FULLSCREEN TAKEOVER -->
   <div id="video-modal" style="
     display:none;position:fixed;inset:0;z-index:9999;
     background:#000;opacity:0;
     transition:opacity 0.4s ease;
+    cursor:pointer;
   " role="dialog" aria-label="Intro video">
     <video id="lock-video" style="
       position:absolute;inset:0;
       width:100%;height:100%;
-      object-fit:contain;
+      object-fit:cover;
       display:block;
-    " playsinline webkit-playsinline>
+    " playsinline webkit-playsinline preload="auto">
       <source src="assets/hello_git.mp4" type="video/mp4">
     </video>
-    <!-- Tap anywhere to close on mobile -->
-    <button id="video-close-btn" aria-label="Close video" style="
-      position:absolute;top:16px;right:16px;
-      width:38px;height:38px;border-radius:50%;
-      background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);
-      display:flex;align-items:center;justify-content:center;
-      color:#fff;cursor:pointer;z-index:10;
-    ">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-    </button>
   </div>
 
   <!-- FOOTER -->
@@ -2442,9 +2565,8 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
       if (e.key === 'Escape' && modal.style.display !== 'none') closeModal();
     });
 
-    // Close button (visible on mobile)
-    const closeBtn = $('#video-close-btn');
-    if (closeBtn) closeBtn.addEventListener('click', closeModal);
+    // Tap anywhere on the modal to dismiss
+    modal.addEventListener('click', closeModal);
 
     video.addEventListener('ended', function() {
       closeModal();
@@ -2768,6 +2890,233 @@ footer{background:var(--s1);border-top:1px solid var(--border);padding:40px 24px
       }
     });
   });
+
+  // ================================================================
+  // 30-SECOND HANDSHAKE DEMO
+  // ================================================================
+  (function() {
+    const PHASES = [
+      { t: 0,    status: 'Discovering peers…',         sub: 'Connecting to signaling server' },
+      { t: 2.2,  status: 'Routing the handshake',          sub: 'SDP offer + answer via server.py' },
+      { t: 5.5,  status: 'ICE candidate exchange',         sub: 'Gathering direct network paths' },
+      { t: 8.5,  status: 'Server stepping aside…',    sub: 'Direct UDP path found — relay no longer needed' },
+      { t: 11.0, status: 'Deriving session key',           sub: 'X25519 ECDH · HKDF-SHA256' },
+      { t: 13.5, status: 'End-to-end encrypted.',          sub: 'PASETO v4 · XChaCha20-Poly1305 AEAD · Zero server retention' },
+    ];
+    const TOTAL = 17;
+    let hsRaf = null, hsSkipped = false, lastPhase = -1;
+
+    function getPhase(t) {
+      let p = 0;
+      for (let i = 0; i < PHASES.length; i++) if (t >= PHASES[i].t) p = i;
+      return p;
+    }
+
+    function drawLaptop(ctx, x, y, alpha, label, sub, color) {
+      if (alpha < 0.01) return;
+      ctx.save(); ctx.globalAlpha = alpha;
+      // Screen body
+      ctx.fillStyle = 'rgba(9,9,9,0.88)'; ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.roundRect(x-22, y-30, 44, 30, 3); ctx.fill(); ctx.stroke();
+      // Terminal dots inside screen
+      ctx.globalAlpha = alpha * 0.65; ctx.fillStyle = color;
+      [-10,0,10].forEach(ox => { ctx.beginPath(); ctx.arc(x+ox, y-15, 2, 0, Math.PI*2); ctx.fill(); });
+      // Base
+      ctx.globalAlpha = alpha; ctx.fillStyle = color+'22'; ctx.strokeStyle = color; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(x-26,y); ctx.lineTo(x+26,y); ctx.lineTo(x+22,y+6); ctx.lineTo(x-22,y+6); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      // Labels
+      ctx.fillStyle = '#f0f0ee'; ctx.font='600 10px "Plus Jakarta Sans",system-ui,sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='top'; ctx.globalAlpha = alpha * 0.9;
+      ctx.fillText(label, x, y+10);
+      ctx.fillStyle='#949490'; ctx.font='9px "JetBrains Mono",monospace';
+      ctx.globalAlpha = alpha * 0.5; ctx.fillText(sub, x, y+22);
+      ctx.restore();
+    }
+
+    function drawServerBox(ctx, x, y, alpha, dimmed) {
+      if (alpha < 0.01) return;
+      ctx.save(); ctx.globalAlpha = alpha;
+      const color = dimmed ? '#555553' : '#c9a96e';
+      for (let i = 2; i >= 0; i--) {
+        const sy = y + i*9 - 14;
+        ctx.fillStyle = dimmed?'rgba(30,30,30,0.9)':'rgba(9,9,9,0.9)';
+        ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.roundRect(x-18, sy, 36, 7, 1.5); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = dimmed ? '#444' : (i===2 ? '#4ade80' : '#c9a96e');
+        ctx.globalAlpha = alpha*(dimmed?0.25:0.75);
+        ctx.beginPath(); ctx.arc(x+11, sy+3.5, 2, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha = alpha;
+      }
+      ctx.fillStyle = color; ctx.font='9px "JetBrains Mono",monospace';
+      ctx.textAlign='center'; ctx.textBaseline='top';
+      ctx.globalAlpha = alpha*(dimmed?0.4:0.75);
+      ctx.fillText('server.py', x, y+13);
+      if (dimmed) {
+        ctx.fillStyle='#f87171'; ctx.font='600 8px "JetBrains Mono",monospace';
+        ctx.globalAlpha = alpha*0.8;
+        ctx.fillText('disconnected', x, y+25);
+      }
+      ctx.restore();
+    }
+
+    function startDemo() {
+      const overlay = document.getElementById('hs-overlay');
+      const canvas  = document.getElementById('hs-canvas');
+      if (!overlay || !canvas || hsSkipped) return;
+
+      overlay.style.display = 'flex';
+      requestAnimationFrame(() => requestAnimationFrame(() => { overlay.style.opacity = '1'; }));
+      document.addEventListener('keydown', onHsKey);
+
+      const dpr = window.devicePixelRatio || 1;
+      const CW = Math.min(overlay.getBoundingClientRect().width, 640), CH = 300;
+      canvas.width = CW*dpr; canvas.height = CH*dpr;
+      canvas.style.width = CW+'px'; canvas.style.height = CH+'px';
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+
+      let start = null;
+
+      function tick(ts) {
+        if (!start) start = ts;
+        const t = (ts - start) / 1000;
+        const phase = getPhase(t);
+
+        // Update phase text
+        if (phase !== lastPhase) {
+          lastPhase = phase;
+          const sEl = document.getElementById('hs-status');
+          const dEl = document.getElementById('hs-sub');
+          if (sEl) { sEl.style.opacity='0'; setTimeout(() => { sEl.textContent=PHASES[phase].status; sEl.style.opacity='1'; }, 200); }
+          if (dEl) { dEl.style.opacity='0'; setTimeout(() => { dEl.textContent=PHASES[phase].sub; dEl.style.opacity='1'; }, 200); }
+          document.querySelectorAll('.hs-dot').forEach((d,i) => {
+            d.classList.remove('active','done');
+            if (i < phase) d.classList.add('done');
+            if (i === phase) d.classList.add('active');
+          });
+        }
+
+        ctx.clearRect(0, 0, CW, CH);
+
+        // Layout positions
+        const mobile = CW < 480;
+        const aX = mobile ? CW*0.16 : CW*0.14;   // Alice
+        const bX = mobile ? CW*0.84 : CW*0.86;   // Bob
+        const nY = mobile ? CH*0.58 : CH*0.62;   // laptops Y
+        const sX = CW*0.5, sY = mobile ? CH*0.12 : CH*0.10; // server
+
+        const cA='#a78bfa', cB='#c4b5fd', cP='#c9a96e', cK='#4ade80';
+
+        // — Server appearance
+        const srvIn  = Math.min(1, t/1.0);
+        const srvDim = Math.min(1, Math.max(0, (t-PHASES[3].t)/1.8));
+        const srvAlpha = Math.max(0.18, srvIn*(1-srvDim*0.75));
+        drawServerBox(ctx, sX, sY, srvAlpha, phase>=3 && srvDim>0.5);
+
+        // — Signaling lines + packets (phases 1-2)
+        if (phase >= 1 && phase < 3) {
+          const a = Math.min(1, (t-PHASES[1].t)/0.6);
+          ctx.save(); ctx.globalAlpha=a*0.32; ctx.strokeStyle=cP; ctx.lineWidth=1;
+          ctx.setLineDash([4,4]);
+          ctx.beginPath(); ctx.moveTo(aX,nY-32); ctx.lineTo(sX,sY+30); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(bX,nY-32); ctx.lineTo(sX,sY+30); ctx.stroke();
+          ctx.setLineDash([]); ctx.restore();
+
+          const pt = ((t-PHASES[1].t)*0.55)%1;
+          // A→S
+          const ax1=aX+(sX-aX)*Math.min(pt*2,1), ay1=(nY-32)+((sY+30)-(nY-32))*Math.min(pt*2,1);
+          if (pt<0.5) { ctx.save(); ctx.globalAlpha=a*0.9; ctx.fillStyle=cP; ctx.shadowColor=cP; ctx.shadowBlur=6; ctx.beginPath(); ctx.arc(ax1,ay1,4,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+          // S→B
+          const pt2=Math.max(0,(pt-0.5)*2);
+          const bx2=sX+(bX-sX)*pt2, by2=(sY+30)+(nY-32-(sY+30))*pt2;
+          if (pt>=0.5) { ctx.save(); ctx.globalAlpha=a*0.75; ctx.fillStyle=cB; ctx.beginPath(); ctx.arc(bx2,by2,3.5,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+        }
+
+        // — Direct connection line forming (phase 2+)
+        const connProg = Math.min(1, Math.max(0, (t-PHASES[2].t)/2.8));
+        if (connProg > 0) {
+          const lineColor = phase >= 4 ? cK : cP;
+          const lineAlpha = phase >= 4 ? 0.82 : 0.55;
+          const midX = (aX+bX)/2;
+          ctx.save();
+          if (phase>=4) { ctx.shadowColor=cK; ctx.shadowBlur=10; }
+          ctx.globalAlpha = lineAlpha;
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = phase>=4 ? 2.2 : 1.6;
+          ctx.beginPath();
+          ctx.moveTo(aX, nY); ctx.lineTo(aX+(midX-aX)*Math.min(1,connProg*2), nY);
+          ctx.moveTo(bX, nY); ctx.lineTo(bX-(bX-midX)*Math.min(1,connProg*2), nY);
+          ctx.stroke();
+          ctx.restore();
+
+          // Packets on direct line
+          if (phase >= 3 && connProg >= 0.55) {
+            const pc = phase>=4?cK:cP;
+            const pt = ((t-PHASES[3].t)*0.65)%1;
+            [pt, (pt+0.5)%1].forEach((p,i) => {
+              ctx.save(); ctx.globalAlpha=i===0?0.9:0.55;
+              ctx.fillStyle=pc; ctx.shadowColor=pc; ctx.shadowBlur=6;
+              ctx.beginPath(); ctx.arc(aX+(bX-aX)*p, nY, i===0?4:3, 0, Math.PI*2); ctx.fill();
+              ctx.restore();
+            });
+          }
+        }
+
+        // — Lock + PASETO label (phase 5)
+        if (phase >= 5) {
+          const la = Math.min(1, (t-PHASES[5].t)/0.9);
+          const lx = CW/2, ly = nY-36;
+          ctx.save(); ctx.globalAlpha=la;
+          ctx.fillStyle='rgba(9,9,9,0.92)'; ctx.strokeStyle=cK; ctx.lineWidth=1.5;
+          ctx.beginPath(); ctx.roundRect(lx-9,ly,18,13,2); ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(lx,ly,6,Math.PI,0); ctx.stroke();
+          ctx.fillStyle=cK; ctx.beginPath(); ctx.arc(lx,ly+6.5,2.5,0,Math.PI*2); ctx.fill();
+          ctx.fillStyle=cK; ctx.font='500 9px "JetBrains Mono",monospace';
+          ctx.textAlign='center'; ctx.textBaseline='bottom';
+          ctx.globalAlpha=la*0.72;
+          ctx.fillText('PASETO v4 · XChaCha20-Poly1305', lx, ly-6);
+          ctx.restore();
+        }
+
+        // — Laptops (always drawn last / on top)
+        const aA = Math.min(1, t/0.9);
+        const bA = Math.min(1, Math.max(0,(t-0.35)/0.9));
+        drawLaptop(ctx, aX, nY, aA, 'This Machine', 'client.py', cA);
+        drawLaptop(ctx, bX, nY, bA, 'Remote Peer',  'client.py', cB);
+
+        if (t < TOTAL && !hsSkipped) hsRaf = requestAnimationFrame(tick);
+        else finishDemo();
+      }
+
+      hsRaf = requestAnimationFrame(tick);
+    }
+
+    function finishDemo() {
+      hsSkipped = true;
+      if (hsRaf) { cancelAnimationFrame(hsRaf); hsRaf = null; }
+      document.removeEventListener('keydown', onHsKey);
+      const ov = document.getElementById('hs-overlay');
+      if (ov) { ov.style.opacity='0'; setTimeout(()=>{ ov.style.display='none'; }, 600); }
+      showBadge();
+    }
+
+    function showBadge() {
+      const b = document.getElementById('p2p-badge');
+      if (!b) return;
+      b.style.display = 'flex';
+      requestAnimationFrame(()=>requestAnimationFrame(()=>b.classList.add('visible')));
+      const x = document.getElementById('p2p-badge-x');
+      if (x) x.addEventListener('click', ()=>{ b.classList.remove('visible'); setTimeout(()=>b.style.display='none',400); });
+    }
+
+    function onHsKey(e) { if (e.key==='Escape') finishDemo(); }
+    window._hsSkip = finishDemo;
+
+    // Trigger 30s after page load; expose for manual testing
+    setTimeout(startDemo, 30000);
+    window.triggerHandshakeDemo = startDemo;
+  })();
 
   </script>
 </body>
