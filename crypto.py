@@ -105,6 +105,34 @@ def export_keys_plaintext(path=None) -> bytes:
     return secure_store.unprotect(raw)
 
 
+def import_keys_plaintext(data: bytes) -> dict:
+    """Validate an exported keys file and install it as the active identity.
+
+    Accepts plaintext JSON (the portable export format) or a DPAPI blob from
+    THIS machine. Raises ValueError on anything malformed, BEFORE touching the
+    live key file — a failed import leaves the current identity intact.
+    """
+    try:
+        plain = secure_store.unprotect(data)
+        keys = json.loads(plain)
+    except Exception as ex:
+        raise ValueError(
+            "Not a valid helucryptic keys file (it may be a DPAPI-wrapped export "
+            "from another machine — re-export with the current app version)"
+        ) from ex
+    if not isinstance(keys, dict) or not REQUIRED_KEY_FIELDS.issubset(keys):
+        raise ValueError("Keys file is missing required fields")
+    for field in REQUIRED_KEY_FIELDS:
+        try:
+            if len(base64.b64decode(keys[field])) != 32:
+                raise ValueError
+        except Exception:
+            raise ValueError(f"Keys file field {field!r} is not a valid 32-byte key")
+    _save_keys(keys)
+    logger.info("Imported identity keys")
+    return keys
+
+
 def load_or_create_keys() -> dict:
     path = _keys_path()
     if path.exists():

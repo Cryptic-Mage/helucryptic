@@ -24,3 +24,5 @@ desktop.ini
 .scannerwork/*
 .sonarqube/*
 .agent/*
+docs/
+.superpowers/*

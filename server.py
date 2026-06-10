@@ -2,6 +2,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets as _secrets
 import time
 from collections import deque
@@ -63,6 +64,17 @@ def _msg_rate_ok(username: str) -> bool:
         return False
     dq.append(now)
     return True
+
+
+# Usernames are routing keys AND display identities — constrain them so a user
+# can't register an empty/whitespace/oversized name or impersonate the reserved
+# "system" sender used for server-generated messages.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,32}$")
+_RESERVED_USERNAMES = {"system"}
+
+
+def _username_ok(username: str) -> bool:
+    return bool(_USERNAME_RE.match(username)) and username.strip().lower() not in _RESERVED_USERNAMES
 
 
 def _password_ok(supplied: str | None) -> bool:
@@ -181,8 +193,10 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
         return
 
     # Room isolation: a sender in a room may only signal peers in that same room.
+    # Exception: "room_invite" exists precisely to reach a contact who is NOT in
+    # the room yet — blocking it here broke the invite-contacts feature.
     sender_room = room_of.get(username)
-    if sender_room and room_of.get(target) != sender_room:
+    if msg_type != "room_invite" and sender_room and room_of.get(target) != sender_room:
         logger.warning(
             "Cross-room message blocked: '%s' (room %s) → '%s' (room %s)",
             username, sender_room, target, room_of.get(target),
@@ -356,6 +370,12 @@ async def websocket_endpoint(
         logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
         await websocket.send_denial_response(
             Response(status_code=429, content="Too many connection attempts — slow down."))
+        return
+
+    if not _username_ok(username):
+        logger.warning("Rejecting invalid username %r from IP '%s'", username[:64], client_ip)
+        await websocket.send_denial_response(
+            Response(status_code=400, content="Invalid username (1-32 chars: letters, digits, space, _ . -)."))
         return
 
     logger.info("Incoming connection request from '%s'", username)

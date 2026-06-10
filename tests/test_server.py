@@ -63,7 +63,9 @@ class UvicornThread(threading.Thread):
 @pytest.mark.asyncio
 async def test_password_auth():
     port = get_free_port()
-    with patch_password("CrypticKodu"):
+    # NOTE: use a dummy value here — never the real server password (this file
+    # is committed to git; the real one lives only in .env, which is ignored).
+    with patch_password("test-password-123"):
         thread = UvicornThread(server.app, port)
         thread.start()
         # Wait for server to start
@@ -90,7 +92,7 @@ async def test_password_auth():
                     pass
 
             # 3. Connecting with correct password should succeed
-            async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=CrypticKodu") as ws:
+            async with websockets.connect(f"ws://127.0.0.1:{port}/ws/alice?password=test-password-123") as ws:
                 await ws.send(json.dumps({"target": "system", "type": "ping"}))
 
         finally:

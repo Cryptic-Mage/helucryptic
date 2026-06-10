@@ -1434,21 +1434,34 @@ class HelucrypticApp:
             except Exception:
                 pass
         try:
-            self.ws = await websockets.connect(url)
+            # Explicit keepalive: ping every 20 s, declare the link dead after
+            # 15 s of silence — detects half-open connections (sleep/VPN drop)
+            # quickly so the auto-reconnect loop can kick in.
+            self.ws = await websockets.connect(
+                url, ping_interval=20, ping_timeout=15,
+                close_timeout=5, open_timeout=15,
+            )
             self._update_status("SIGNALING", C.YELLOW)
             self._toast(f"Connected as “{uname}”" + (f" in {room}" if room else ""), "success")
             print(f"[connect] websocket OPEN to {safe_url}", flush=True)
             sounds.play("reactivated")
             self._fire_and_forget(self._signaling_listener())
             self._fire_and_forget(self._query_presence())   # immediate presence refresh
+            # Probe NAT behaviour once per connect (best-effort, off the UI
+            # thread). Result feeds symmetric-NAT port prediction + diagnostics.
+            self._fire_and_forget(self.engine.detect_nat())
         except Exception as ex:
             self.engine.last_error = f"signaling: {type(ex).__name__}"
             self._toast(f"Cannot reach server: {ex}", "error")
             print(f"[connect] FAILED: {type(ex).__name__}: {ex}", flush=True)
 
     async def _signaling_listener(self) -> None:
+        # Bind to THIS socket: if _connect_signaling replaces self.ws while we
+        # run, this listener must not clean up / reconnect over the new session.
+        ws = self.ws
+
         async def ws_send(payload: dict):
-            await self.ws.send(json.dumps(payload))
+            await ws.send(json.dumps(payload))
 
         # Keep the engine's send reference current so renegotiation after a
         # WebRTC failure can still reach the live WebSocket.
@@ -1456,7 +1469,7 @@ class HelucrypticApp:
         _dropped_unexpectedly = False
 
         try:
-            async for raw in self.ws:
+            async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except Exception:
@@ -1473,22 +1486,32 @@ class HelucrypticApp:
                         break
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
         except Exception as ex:
+            if self.ws is not ws:
+                # A newer connection already took over — this is the OLD socket
+                # closing; don't tear down the fresh session's state.
+                return
             self._cleanup_signaling_disconnect(ex)
             _dropped_unexpectedly = True
         finally:
-            if _dropped_unexpectedly and self._room_id and not self._ws_reconnect_active:
+            # Auto-reconnect after an unexpected drop — for rooms AND 1-to-1
+            # sessions (previously only rooms recovered; a 1-to-1 chat went
+            # silently dead until the user clicked Connect again).
+            if (_dropped_unexpectedly and self.ws is ws
+                    and (self._room_id or self.engine.my_username)
+                    and not self._ws_reconnect_active):
                 self._fire_and_forget(self._ws_reconnect_loop())
 
     async def _ws_reconnect_loop(self) -> None:
         """Reconnect to the signaling server after an unexpected drop.
-        Backs off exponentially (2 s → 4 s → … → 30 s) and exits as soon as
-        either the connection is restored or the room is cleared."""
+        Backs off exponentially (2 s → 4 s → … → 30 s) and exits as soon as the
+        connection is restored. Works for rooms (re-joins the room) and for
+        plain 1-to-1 sessions (re-registers the username)."""
         if self._ws_reconnect_active:
             return
         self._ws_reconnect_active = True
         delay = 2.0
         try:
-            while self._room_id:
+            while True:
                 await asyncio.sleep(delay)
                 # Another path (user action or parallel loop) already reconnected.
                 if self.ws is not None:
@@ -1500,10 +1523,20 @@ class HelucrypticApp:
                 uname = self.username_input.value.strip()
                 if not uname:
                     return
-                self._log(f"[Reconnect] Re-joining room {self._room_id}…")
+                target = f"room {self._room_id}" if self._room_id else "signaling"
+                self._log(f"[Reconnect] Re-joining {target}…")
                 try:
                     await self._connect_signaling(None, room=self._room_id)
-                    return  # success — new listener takes over
+                    # _connect_signaling swallows connect errors, so confirm the
+                    # socket is actually live before declaring success.
+                    ok = False
+                    try:
+                        ok = self.ws is not None and not self.ws.closed
+                    except Exception:
+                        ok = self.ws is not None
+                    if ok:
+                        return  # success — new listener takes over
+                    delay = min(delay * 2, 30.0)
                 except Exception as ex:
                     self._toast(f"Reconnect failed ({type(ex).__name__}), retrying…", "warn")
                     delay = min(delay * 2, 30.0)
@@ -2628,9 +2661,16 @@ class HelucrypticApp:
         self.file_progress.visible = True
         self.file_progress.value   = 0
         self.page.update()
-        await self.engine.send_file(files[0].path, target=peer)
-        self.file_progress.visible = False
-        self.page.update()
+        try:
+            await self.engine.send_file(files[0].path, target=peer)
+            self._log(f"[File sent] {Path(files[0].path).name}")
+        except (RuntimeError, OSError) as ex:
+            # Surface the failure instead of letting it bubble to the loop
+            # exception handler (which auto-restarts the whole app).
+            self._toast(f"File send failed: {ex}", "error")
+        finally:
+            self.file_progress.visible = False
+            self.page.update()
 
     async def _choose_file_target(self):
         """Return the peer username to send a file to, or None if cancelled."""
@@ -3388,6 +3428,9 @@ class HelucrypticApp:
             f"Room       : {d['room_id'] or '(none)'}"
             + (f'   hub={d["hub"] or "?"}' if d["room_id"] else ""),
             f"TURN       : {'configured' if d['turn_configured'] else 'not configured'}",
+            f"NAT type   : {d.get('nat_type', '(not probed)')}"
+            + (f"  ({d['nat_summary']})" if d.get('nat_summary') else ""),
+            f"Predicted  : {d.get('predicted_srflx') or '(none)'}",
             f"Peers      : {d['num_peers']}",
             f"Last error : {d['last_error'] or '(none)'}",
             "",
@@ -3401,6 +3444,7 @@ class HelucrypticApp:
             lines.append(f"      conn={p['connection']}   signaling={p['signaling']}")
             lines.append(f"      ice={p['ice']}   gathering={p['ice_gathering']}   dc={p['datachannel']}")
             lines.append(f"      hello_sent={p['hello_sent']}  hello_ok={p['hello_ok']}  session_key={p['session_key']}")
+            lines.append(f"      rtt={p.get('rtt_ms', 0)}ms   outbox={p.get('outbox', 0)} queued")
         return "\n".join(lines)
 
     def _render_diagnostics_log(self) -> str:
@@ -3466,7 +3510,9 @@ class HelucrypticApp:
             return
         rid = self._room_id
         self.chat_log.controls.clear()
-        for sender in self._video_tiles:
+        # Iterate over a snapshot: _remove_video_tile mutates _video_tiles,
+        # which raised "dict changed size during iteration" mid-purge.
+        for sender in list(self._video_tiles):
             self._remove_video_tile(sender)
         if self._tile_row is not None:
             self._tile_row.controls.clear()
@@ -3521,6 +3567,22 @@ class HelucrypticApp:
         except Exception as ex:
             print(f"[profile] switch failed: {ex}", flush=True)
             return
+        # Actually REBUILD the app against the new profile's keys/contacts/
+        # history. Previously this method stopped here, leaving a dead UI
+        # (all loops cancelled, ws closed) until the process was restarted.
+        try:
+            self.page.controls.clear()
+            self.page.update()
+        except Exception:
+            pass
+        new_app = HelucrypticApp(self.page)
+        new_app._server_password = self._server_password
+        new_app._refresh_contact_list()
+
+        async def _handle_disconnect(e):
+            await new_app.shutdown()
+        self.page.on_disconnect = _handle_disconnect
+        print(f"[profile] switched to '{name}' — app rebuilt in-process", flush=True)
 
     def _settings_on_retention_change(self, ev) -> None:
         self._settings_custom_days.visible = self._settings_retention_dd.value == "custom"
@@ -3594,12 +3656,23 @@ class HelucrypticApp:
         self.page.update()
 
     async def _settings_export_keys(self, ev) -> None:
-        data = (paths.DATA_DIR / "keys.json").read_bytes()
+        # Export the PLAINTEXT identity JSON (DPAPI-unwrapped): the on-disk
+        # keys.json is machine-bound on Windows, so exporting it raw produced a
+        # file that could never be imported anywhere — including after an OS
+        # reinstall on the same PC.
+        from crypto import export_keys_plaintext
+        try:
+            data = export_keys_plaintext()
+        except Exception as ex:
+            self._toast(f"Could not export keys: {ex}", "error")
+            return
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
-        self._log("[Keys] Keypair exported successfully.")
+        dest = await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
+        if dest:
+            self._log("[Keys] Keypair exported as plaintext JSON — store it somewhere safe "
+                      "(anyone with this file owns your identity).")
 
     async def _settings_import_keys(self, ev) -> None:
         picker = ft.FilePicker()
@@ -3607,11 +3680,12 @@ class HelucrypticApp:
         self.page.update()
         files = await picker.pick_files(allowed_extensions=["json"])
         if files:
-            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-            paths.write_private_text(
-                paths.DATA_DIR / "keys.json",
-                Path(files[0].path).read_text(encoding="utf-8"),
-            )
+            from crypto import import_keys_plaintext
+            try:
+                import_keys_plaintext(Path(files[0].path).read_bytes())
+            except (ValueError, OSError) as ex:
+                self._toast(f"Key import failed: {ex}", "error")
+                return
             self.keys = load_or_create_keys()
             self.history_key = derive_history_key(self.keys["ed25519_private"])
             self.engine.keys = self.keys

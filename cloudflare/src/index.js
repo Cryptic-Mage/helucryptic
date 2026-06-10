@@ -166,6 +166,12 @@ export class SignalHub {
     const { username, room, password, sessionToken } = this._parseUrlParams(request);
 
     if (!username) return new Response("missing username", { status: 400 });
+    // Mirror server.py: constrain usernames (routing keys + display identity)
+    // and reserve "system" so server-generated messages can't be impersonated.
+    if (!/^[A-Za-z0-9 _.\-]{1,32}$/.test(username) ||
+        username.trim().toLowerCase() === "system") {
+      return new Response("invalid username", { status: 400 });
+    }
     if (!this._passwordOk(password)) return this._rejectWS("Invalid server access password.");
 
     const evictionError = this._evictOrRejectExisting(username, sessionToken);
@@ -232,7 +238,9 @@ export class SignalHub {
     if (SERVER_TYPES.has(type)) return; // never relay server-generated types
 
     // Room isolation: sender in a room may only signal peers in that same room.
-    if (me.room) {
+    // Exception: "room_invite" exists to reach a contact who is NOT in the room
+    // yet — blocking it here broke the invite-contacts feature (see server.py).
+    if (me.room && type !== "room_invite") {
       const targetWsForRoom = this._findUser(target);
       if (targetWsForRoom) {
         const ta = this._attach(targetWsForRoom);
