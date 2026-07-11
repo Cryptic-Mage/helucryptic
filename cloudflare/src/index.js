@@ -112,6 +112,23 @@ export class SignalHub {
     return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   }
 
+  // Workers expose timingSafeEqual on crypto.subtle (a non-standard CF
+  // extension) — NOT on crypto itself. `crypto.timingSafeEqual(...)` throws a
+  // TypeError, which turned a CORRECT password into an HTTP 500 on connect
+  // (wrong-length passwords short-circuited earlier and were politely
+  // rejected). Falls back to a manual constant-time comparison for safety.
+  _timingSafeEqual(a, b) {
+    if (a.byteLength !== b.byteLength) return false;
+    try {
+      if (crypto.subtle && typeof crypto.subtle.timingSafeEqual === "function") {
+        return crypto.subtle.timingSafeEqual(a, b);
+      }
+    } catch { /* fall through to the manual comparison */ }
+    let diff = 0;
+    for (let i = 0; i < a.byteLength; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+
   _passwordOk(supplied) {
     // Mirrors server.py: when a password is configured (Cloudflare secret
     // HELUCRYPTIC_SERVER_PASSWORD), the client must send a matching `?password=`.
@@ -120,8 +137,7 @@ export class SignalHub {
     if (!expected) return true;
     const a = new TextEncoder().encode(supplied || "");
     const b = new TextEncoder().encode(expected);
-    if (a.byteLength !== b.byteLength) return false;
-    return crypto.timingSafeEqual(a, b);
+    return this._timingSafeEqual(a, b);
   }
 
   _parseUrlParams(request) {
@@ -151,10 +167,7 @@ export class SignalHub {
     const enc = new TextEncoder();
     const a = enc.encode(sessionToken);
     const b = enc.encode(expectedToken);
-    const tokenOk =
-      expectedToken.length > 0 &&
-      a.byteLength === b.byteLength &&
-      crypto.timingSafeEqual(a, b);
+    const tokenOk = expectedToken.length > 0 && this._timingSafeEqual(a, b);
     if (!tokenOk) return this._rejectWS("Username already in use by an active session.");
     for (const old of existingSockets) {
       try { old.close(1000, "replaced"); } catch {}
@@ -186,6 +199,17 @@ export class SignalHub {
   // ---- connection handling ----------------------------------------------
 
   async fetch(request) {
+    // Never let an exception escape as a bare 500: log it (visible via
+    // `wrangler tail`) and return a readable error instead.
+    try {
+      return await this._handleUpgrade(request);
+    } catch (err) {
+      console.error("signaling fetch failed:", (err && err.stack) || err);
+      return new Response("internal signaling error", { status: 500 });
+    }
+  }
+
+  async _handleUpgrade(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }

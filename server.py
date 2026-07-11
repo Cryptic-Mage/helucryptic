@@ -82,11 +82,15 @@ def _username_ok(username: str) -> bool:
     return bool(_USERNAME_RE.match(username)) and username.strip().lower() not in _RESERVED_USERNAMES
 
 
+def _timing_safe_equal(a: str, b: str) -> bool:
+    # Constant-time comparison to avoid leaking secret tokens via timing.
+    return hmac.compare_digest(a, b)
+
+
 def _password_ok(supplied: str | None) -> bool:
     if not EXPECTED_PASSWORD:
         return True  # no password configured → open server
-    # Constant-time comparison to avoid leaking the token via timing.
-    return hmac.compare_digest(supplied or "", EXPECTED_PASSWORD)
+    return _timing_safe_equal(supplied or "", EXPECTED_PASSWORD)
 
 
 async def _handle_stale_connection(username: str) -> None:
@@ -289,7 +293,7 @@ async def _verify_and_update_session(
     if username in active_connections:
         expected = _session_tokens.get(username, "")
         supplied = session_token or ""
-        if not (expected and hmac.compare_digest(supplied, expected)):
+        if not (expected and _timing_safe_equal(supplied, expected)):
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "data": "Username already in use by an active session.",
@@ -376,35 +380,38 @@ async def websocket_endpoint(
     password: str | None = Query(default=None),
     session_token: str | None = Query(default=None),
 ):
-    client_ip = websocket.client.host if websocket.client else "unknown"
-    if not _conn_rate_ok(client_ip):
-        logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
-        await websocket.send_denial_response(
-            Response(status_code=429, content="Too many connection attempts — slow down."))
-        return
-
-    if not _username_ok(username):
-        logger.warning("Rejecting invalid username %r from IP '%s'", username[:64], client_ip)
-        await websocket.send_denial_response(
-            Response(status_code=400, content="Invalid username (1-32 chars: letters, digits, space, _ . -)."))
-        return
-
-    logger.info("Incoming connection request from '%s'", username)
-
-    if not await _authenticate_and_accept_connection(websocket, username, password):
-        return
-
-    if not await _verify_and_update_session(websocket, username, session_token):
-        return
-
-    await _establish_connection_session(websocket, username)
-
     try:
-        if room:
-            joined = await _handle_room_joining(websocket, username, room)
-            if not joined:
-                return
+        client_ip = websocket.client.host if websocket.client else "unknown"
+        if not _conn_rate_ok(client_ip):
+            logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
+            await websocket.send_denial_response(
+                Response(status_code=429, content="Too many connection attempts — slow down."))
+            return
 
-        await _run_message_loop(websocket, username)
-    finally:
-        await _cleanup_connection(websocket, username)
+        if not _username_ok(username):
+            logger.warning("Rejecting invalid username %r from IP '%s'", username[:64], client_ip)
+            await websocket.send_denial_response(
+                Response(status_code=400, content="Invalid username (1-32 chars: letters, digits, space, _ . -)."))
+            return
+
+        logger.info("Incoming connection request from '%s'", username)
+
+        if not await _authenticate_and_accept_connection(websocket, username, password):
+            return
+
+        if not await _verify_and_update_session(websocket, username, session_token):
+            return
+
+        await _establish_connection_session(websocket, username)
+
+        try:
+            if room:
+                joined = await _handle_room_joining(websocket, username, room)
+                if not joined:
+                    return
+
+            await _run_message_loop(websocket, username)
+        finally:
+            await _cleanup_connection(websocket, username)
+    except Exception as e:
+        logger.exception("Internal signaling error in websocket_endpoint: %s", e)

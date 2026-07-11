@@ -120,6 +120,12 @@ from constants.client_constants import (
 )
 
 
+def _alpha(alpha2: str, color: str) -> str:
+    """8-digit hex with alpha FIRST (#AARRGGBB) — Flet/Flutter's format.
+    Suffixing alpha (color+"aa") silently shifts the hue (cyan turns green)."""
+    return f"#{alpha2}{color.lstrip('#')}"
+
+
 # Delivery-status glyphs for sent bubbles: icon name + colour per state.
 _MSG_STATUS_GLYPHS = {
     "queued":    (ft.Icons.SCHEDULE,  C.MUTED),   # waiting in the offline outbox
@@ -288,6 +294,7 @@ class HelucrypticApp:
         self._wire_engine_callbacks()
         self._bg_tasks.append(asyncio.ensure_future(self._retention_background_loop()))
         self._bg_tasks.append(asyncio.ensure_future(self._presence_loop()))
+        self._bg_tasks.append(asyncio.ensure_future(self._insights_loop()))
         if self._motion_ok:
             self._bg_tasks.append(asyncio.ensure_future(self._status_pulse_loop()))
         self._apply_port_forward()
@@ -705,8 +712,18 @@ class HelucrypticApp:
                                             bgcolor=C.ELEV, border_radius=R.PILL, height=4)
 
         self.btn_send     = ft.IconButton(ft.Icons.SEND_ROUNDED, on_click=self._send_chat,
-                                          icon_color=C.CYAN, tooltip="Send",
-                                          disabled=True)
+                                          icon_color="#ffffff", tooltip="Send",
+                                          icon_size=18, disabled=True)
+        # Accent send button: a quiet filled circle that dims while sending is
+        # disabled (toggled alongside btn_send.disabled). Deliberately restrained
+        # — one solid accent, soft shadow, no gradient.
+        self._send_wrap = ft.Container(
+            content=self.btn_send, width=42, height=42, border_radius=R.PILL,
+            bgcolor=C.CYAN,
+            shadow=_glow(_alpha("44", C.CYAN), blur=10, spread=0),
+            alignment=ft.Alignment.CENTER,
+            opacity=0.45, animate_opacity=_anim(D.MED),
+        )
         self.btn_call     = ft.IconButton(ft.Icons.CALL,         on_click=self._start_call,   disabled=True, icon_color=C.SUBTLE,  tooltip="Voice call")
         self.btn_screen   = ft.IconButton(ft.Icons.SCREEN_SHARE, on_click=self._toggle_screen, disabled=True, icon_color=C.SUBTLE,  tooltip=SHARE_SCREEN_TXT)
         self.btn_file     = ft.IconButton(ft.Icons.ATTACH_FILE,  on_click=self._send_file,    disabled=True, icon_color=C.SUBTLE,  tooltip="Send file")
@@ -770,13 +787,17 @@ class HelucrypticApp:
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
         )
 
-        # Composer card (input + inline send button)
+        # Composer card (lock hint + input + gradient send orb)
         self._composer = ft.Container(
             padding=ft.Padding.symmetric(horizontal=8, vertical=8),
             border_radius=R.XL, bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER2),
             animate=_anim(D.MED),
-            content=ft.Row([self.msg_input, self.btn_send],
-                           vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
+            content=ft.Row([
+                ft.Container(content=ft.Icon(ft.Icons.LOCK, color=C.FAINT, size=14),
+                             padding=ft.Padding.only(left=8),
+                             tooltip="Messages are end-to-end encrypted"),
+                self.msg_input, self._send_wrap,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
         )
 
         toolbar = ft.Container(
@@ -850,7 +871,8 @@ class HelucrypticApp:
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             content=ft.Column([
                 presence_bar,
-                ft.Row([sidebar, chat_panel], expand=True, spacing=0),
+                ft.Row([sidebar, chat_panel, self._build_insights_panel()],
+                       expand=True, spacing=0),
             ], spacing=0, expand=True),
             opacity=0, scale=0.985,
             animate_opacity=_anim(280, _EASE_IO),
@@ -1192,6 +1214,132 @@ class HelucrypticApp:
             content=ft.Column([head, *children], spacing=10, tight=True),
         )
 
+    # ---- live insights rail (right side) --------------------------------
+
+    def _insight_card(self, children: list) -> ft.Container:
+        return ft.Container(
+            padding=ft.Padding.all(14), border_radius=R.LG, bgcolor=C.ELEV,
+            border=ft.Border.all(1, C.BORDER), shadow=_glow(blur=16),
+            content=ft.Column(children, spacing=10, tight=True),
+        )
+
+    def _build_insights_panel(self) -> ft.Container:
+        """Right-hand rail: live link latency (real heartbeat RTT rendered as
+        an animated bar sparkline) + this session's crypto at a glance.
+        Deliberately restrained: solid accents, no gradients, no glow bloom."""
+        mono = _t_FONTS["mono"]
+        self._spark_bars = [
+            ft.Container(width=5, height=6, border_radius=3, bgcolor=C.CYAN,
+                         animate=_anim(D.MED, _EASE_IO))
+            for _ in range(20)
+        ]
+        self.insight_rtt  = ft.Text("— ms", size=20, color=C.TEXT,
+                                    weight=ft.FontWeight.W_800, font_family=mono)
+        self.insight_live = ft.Text("idle", size=10, color=C.MUTED, font_family=mono)
+        latency = self._insight_card([
+            ft.Row([
+                ft.Icon(ft.Icons.NETWORK_CHECK, color=C.CYAN, size=15),
+                ft.Text("LINK LATENCY", size=10, color=C.MUTED, font_family=mono,
+                        weight=ft.FontWeight.W_800),
+                ft.Container(expand=True),
+                self.insight_live,
+            ], spacing=8),
+            ft.Row([
+                self.insight_rtt,
+                ft.Container(expand=True),
+                ft.Container(
+                    content=ft.Row(self._spark_bars, spacing=3, tight=True,
+                                   vertical_alignment=ft.CrossAxisAlignment.END),
+                    height=34, alignment=ft.Alignment.BOTTOM_RIGHT),
+            ], vertical_alignment=ft.CrossAxisAlignment.END),
+        ])
+
+        def crow(icon, label, value, color):
+            return ft.Row([
+                ft.Icon(icon, color=color, size=14),
+                ft.Text(label, size=11, color=C.SUBTLE),
+                ft.Container(expand=True),
+                ft.Text(value, size=11, color=color, font_family=mono,
+                        weight=ft.FontWeight.W_700),
+            ], spacing=8)
+        e2ee = self.settings.security_mode == "e2ee"
+        crypto_rows = [
+            ft.Row([
+                ft.Icon(ft.Icons.LOCK_OUTLINE, color=C.CYAN, size=15),
+                ft.Text("SESSION CRYPTO", size=10, color=C.MUTED, font_family=mono,
+                        weight=ft.FontWeight.W_800),
+            ], spacing=8),
+        ]
+        if e2ee:
+            crypto_rows += [
+                crow(ft.Icons.SWAP_HORIZ, "Key exchange", "X25519", C.CYAN),
+                crow(ft.Icons.DRAW, "Signatures", "Ed25519", C.CYAN),
+                crow(ft.Icons.TOKEN, "Transport", "PASETO v4", C.SUBTLE),
+                crow(ft.Icons.STORAGE, "Local history", "ENCRYPTED", C.GREEN),
+            ]
+        else:
+            crypto_rows += [
+                crow(ft.Icons.SWAP_HORIZ, "Transport", "DTLS", C.CYAN),
+                crow(ft.Icons.INFO_OUTLINE, "E2EE signing", "OFF", C.YELLOW),
+            ]
+        crypto = self._insight_card(crypto_rows)
+
+        tagline = ft.Container(
+            padding=ft.Padding.all(14), border_radius=R.LG, bgcolor=C.ELEV,
+            border=ft.Border.all(1, C.BORDER),
+            content=ft.Column([
+                ft.Row([ft.Icon(ft.Icons.SHIELD_MOON, color=C.CYAN, size=15),
+                        ft.Text("Nothing to subpoena", size=12, color=C.TEXT,
+                                weight=ft.FontWeight.W_700)], spacing=8),
+                ft.Text("Messages never touch a server. This machine ↔ theirs.",
+                        size=11, color=C.MUTED),
+            ], spacing=6, tight=True),
+        )
+
+        self._insights_panel = ft.Container(
+            width=248, bgcolor=C.PANEL,
+            border=ft.Border.only(left=ft.BorderSide(1, C.BORDER)),
+            padding=ft.Padding.all(14),
+            content=ft.Column([
+                ft.Text("LIVE INSIGHTS", size=10, color=C.MUTED, font_family=mono,
+                        weight=ft.FontWeight.W_800),
+                latency, crypto,
+                ft.Container(expand=True),
+                tagline,
+            ], spacing=12, expand=True),
+        )
+        return self._insights_panel
+
+    async def _insights_loop(self) -> None:
+        """Feed the latency sparkline once a second from the real heartbeat
+        RTTs (best/lowest across live peers). Idle when nothing is connected."""
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                rtts = list(self._peer_rtt.values())
+                if rtts:
+                    rtt = min(rtts)
+                    h = 6 + min(28, int(rtt * 0.30))
+                    self.insight_rtt.value  = f"{int(rtt)} ms"
+                    self.insight_live.value = "live"
+                    self.insight_live.color = C.GREEN
+                else:
+                    h = 6
+                    self.insight_rtt.value  = "— ms"
+                    self.insight_live.value = "idle"
+                    self.insight_live.color = C.MUTED
+                heights = [b.height for b in self._spark_bars[1:]] + [h]
+                for bar, hh in zip(self._spark_bars, heights):
+                    bar.height = hh
+                try:
+                    self._insights_panel.update()
+                except Exception:
+                    pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
     def _tool_wrap(self, btn: ft.IconButton) -> ft.Container:
         c = ft.Container(
             content=btn, border_radius=R.MD, bgcolor=C.ELEV + "00",
@@ -1390,6 +1538,7 @@ class HelucrypticApp:
             if not self._room_id or peer in self._room_peers:
                 self.msg_input.disabled  = False
                 self.btn_send.disabled   = False
+                self._send_wrap.opacity  = 1.0
                 self.btn_call.disabled   = False
                 self.btn_screen.disabled = False
                 self.btn_file.disabled   = False
@@ -1400,6 +1549,7 @@ class HelucrypticApp:
             if not any(s == "connected" for s in self._room_peers.values()):
                 self.msg_input.disabled  = True
                 self.btn_send.disabled   = True
+                self._send_wrap.opacity  = 0.45
                 self.btn_call.disabled   = True
                 self.btn_screen.disabled = True
                 self.btn_file.disabled   = True
@@ -2453,6 +2603,33 @@ class HelucrypticApp:
         icon_color = C.GREEN if is_online else C.FAINT
         return ft.Icon(icon_name, color=icon_color, size=15)
 
+    def _last_message_snippet(self, username: str) -> tuple[str, str]:
+        """(preview, compact time) of the newest 1-to-1 message with ``username``
+        for the two-line contact card. Defensive: any failure → empty strings."""
+        try:
+            msgs = read_messages(username, self.history_key,
+                                 self.settings.security_mode, limit=1)
+        except Exception:
+            return "", ""
+        if not msgs:
+            return "", ""
+        m = msgs[-1]
+        text = (m.get("content") or "").replace("\n", " ")
+        if m.get("direction") == "sent" and text:
+            text = "You: " + text
+        when = ""
+        day = _msg_day(m.get("timestamp"))
+        if day is not None:
+            today = datetime.now().astimezone().date()
+            delta = (today - day).days
+            if delta == 0:
+                when = _fmt_msg_ts(m.get("timestamp"))
+            elif delta == 1:
+                when = "Yesterday"
+            else:
+                when = day.strftime("%d %b")
+        return text, when
+
     def _contact_card(self, c) -> ft.Container:
         display   = c.nickname or c.username
         is_active = c.username == self._active_contact and not self._room_id
@@ -2461,7 +2638,7 @@ class HelucrypticApp:
 
         avatar = self._contact_card_avatar(display, verified, is_online)
         name = self._contact_card_name(display, is_active, verified)
-        wifi = self._contact_card_wifi(is_online)
+        preview, when = self._last_message_snippet(c.username)
 
         btn_menu = ft.IconButton(
             ft.Icons.MORE_VERT, icon_size=14, icon_color=C.FAINT,
@@ -2470,24 +2647,42 @@ class HelucrypticApp:
             style=ft.ButtonStyle(padding=ft.Padding.all(2)),
         )
 
+        # Two-line card: name (+ verify badge) with a compact time on the
+        # right, and the latest message underneath — the presence dot on the
+        # avatar already tells the online story, so no extra icons needed.
+        top_row = ft.Row(
+            [name, ft.Container(expand=True),
+             *([ft.Text(when, size=9.5, color=C.FAINT, font_family=_t_FONTS["mono"])]
+               if when else [])],
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        lines: list = [top_row]
+        if preview:
+            lines.append(ft.Text(preview, size=11, color=C.MUTED, max_lines=1,
+                                 overflow=ft.TextOverflow.ELLIPSIS))
+        meta = ft.Column(lines, spacing=2, tight=True, expand=True)
+
         base_bg = C.CYAN + "1a" if is_active else C.ELEV + "00"
         border_color = C.CYAN if is_active else C.ELEV + "00"
         tile = ft.Container(
-            content=ft.Row([avatar, name, ft.Container(expand=True), wifi, btn_menu],
+            content=ft.Row([avatar, meta, btn_menu],
                            spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=base_bg,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=7),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=8),
             border_radius=R.MD,
             border=ft.Border.all(1, border_color),
             on_click=lambda e, u=c.username: self._select_contact(u),
             on_long_press=lambda e, u=c.username: self._show_contact_menu(u),
             animate=_anim(D.FAST), ink=True,
+            scale=1.0, animate_scale=_anim(D.FAST),
         )
 
         def on_hover(e, _t=tile, _active=is_active):
             if _active:
                 return
-            _t.bgcolor = C.ELEV2 if e.data == "true" else C.ELEV + "00"
+            hov = e.data == "true"
+            _t.bgcolor = C.ELEV2 if hov else C.ELEV + "00"
+            _t.scale = 1.015 if hov else 1.0   # gentle lift, no glow
             try:
                 _t.update()
             except Exception:
@@ -4159,9 +4354,12 @@ class HelucrypticApp:
         self._settings_new_prof = _neon_field(label="New profile name", width=200)
         self._settings_prof_err = ft.Text("", color=C.RED, size=11, visible=False)
 
-        _sec = self._settings_section
-        sections = [
-            _sec("Profiles", ft.Icons.SWITCH_ACCOUNT, [
+        # Two-pane settings: category nav on the left, ONE section at a time on
+        # the right — no more scrolling through nine stacked cards to find the
+        # TURN fields. Same control objects, so _settings_save is untouched.
+        pages = [
+            ("Profiles", ft.Icons.SWITCH_ACCOUNT, C.VIOLET,
+             "Separate identities, contacts and history", [
                 ft.Text(f"Active: {prof_active}", size=12, color=C.SUBTLE),
                 ft.Text("Each profile is a fully separate identity, contacts and history.",
                         size=11, color=C.MUTED),
@@ -4170,38 +4368,54 @@ class HelucrypticApp:
                 ft.Row([self._settings_new_prof, ft.FilledButton("Create & switch", on_click=self._settings_do_create_profile,
                                                   style=_filled_style(C.VIOLET, "#ffffff"))]),
                 self._settings_prof_err,
-            ], accent=C.VIOLET),
-            _sec("Security & privacy", ft.Icons.SHIELD_MOON, [
+            ]),
+            ("Security & privacy", ft.Icons.SHIELD_MOON, C.CYAN,
+             "Encryption mode and message retention", [
                 ft.Text("Encryption mode", size=11, color=C.MUTED),
                 self._settings_mode_radio,
                 ft.Text("Message retention", size=11, color=C.MUTED),
                 ft.Row([self._settings_retention_dd, self._settings_custom_days]),
                 self._settings_custom_error,
             ]),
-            _sec("Connection", ft.Icons.LANGUAGE, [self._settings_url_field], accent=C.VIOLET),
-            _sec("Performance", ft.Icons.SPEED, [self._settings_profile_dd, self._settings_overclock_warn], accent=C.VIOLET),
-            _sec("TURN relay", ft.Icons.ROUTER, [
+            ("Connection", ft.Icons.LANGUAGE, C.CYAN,
+             "Signaling server (handshake only)", [
+                ft.Text("Used only to find your peer — messages never pass through it.",
+                        size=11, color=C.MUTED),
+                self._settings_url_field,
+            ]),
+            ("Performance", ft.Icons.SPEED, C.CYAN,
+             "Video/share quality profile", [
+                self._settings_profile_dd, self._settings_overclock_warn,
+            ]),
+            ("TURN relay", ft.Icons.ROUTER, C.CYAN,
+             "Fallback for strict NATs", [
                 ft.Text("Optional — fixes strict-NAT connections.", size=11, color=C.MUTED),
                 self._settings_turn_url_f, self._settings_turn_user_f, self._settings_turn_pass_f,
                 ft.Row([btn_test_turn, self._settings_turn_result]),
-            ], accent=C.VIOLET),
-            _sec("Port forwarding", ft.Icons.SETTINGS_ETHERNET, [
+            ]),
+            ("Port forwarding", ft.Icons.SETTINGS_ETHERNET, C.CYAN,
+             "Direct connect via forwarded port", [
                 ft.Text("Advanced — direct connect via a forwarded port.", size=11, color=C.MUTED),
                 self._settings_pf_enabled_cb, self._settings_pf_port_f,
                 ft.Row([btn_pf_detect, btn_pf_test]),
                 self._settings_pf_result, pf_caption,
-            ], accent=C.VIOLET),
-            _sec("Trust & verification", ft.Icons.VERIFIED_USER, [
+            ]),
+            ("Trust & verification", ft.Icons.VERIFIED_USER, C.GREEN,
+             "Verified-only mode and your identity", [
                 self._settings_verified_only_cb, btn_show_identity,
-            ], accent=C.GREEN),
-            _sec("Identity keys", ft.Icons.KEY, [
+            ]),
+            ("Identity keys", ft.Icons.KEY, C.GREEN,
+             "Export, import or regenerate", [
+                ft.Text("Your keys ARE your identity — export them before reinstalling.",
+                        size=11, color=C.MUTED),
                 ft.Row([
                     ft.FilledButton("Export Keys", on_click=self._settings_export_keys, style=_filled_style(C.ELEV2, C.TEXT)),
                     ft.FilledButton("Import Keys", on_click=self._settings_import_keys, style=_filled_style(C.ELEV2, C.TEXT)),
                     ft.FilledButton("Regenerate Keys", on_click=self._settings_regen_keys, style=_filled_style(C.ELEV2, C.TEXT)),
                 ], wrap=True, spacing=8),
-            ], accent=C.GREEN),
-            _sec("Data & backup", ft.Icons.STORAGE, [
+            ]),
+            ("Data & backup", ft.Icons.STORAGE, C.RED,
+             "Backup, restore, emergency wipe", [
                 ft.Text(f"Data folder: {paths.DATA_DIR}"
                         + ("  (portable)" if paths.is_portable() else ""),
                         size=11, color=C.SUBTLE, selectable=True),
@@ -4211,13 +4425,55 @@ class HelucrypticApp:
                 ], wrap=True, spacing=8),
                 ft.TextButton("⚠ Emergency Wipe…", on_click=self._show_wipe,
                               style=ft.ButtonStyle(color=C.RED)),
-            ], accent=C.RED),
+            ]),
         ]
+
+        body_col = ft.Column([], spacing=12, scroll=ft.ScrollMode.AUTO, expand=True)
+        nav_tiles: list[ft.Container] = []
+        nav_labels: list[ft.Text] = []
+
+        def _open_page(idx: int) -> None:
+            title, icon, accent, _subtitle, controls = pages[idx]
+            body_col.controls = [
+                ft.Row([
+                    ft.Container(content=ft.Icon(icon, color=accent, size=18),
+                                 padding=ft.Padding.all(8), border_radius=R.MD,
+                                 bgcolor=_alpha("1f", accent)),
+                    ft.Text(title, size=15, weight=ft.FontWeight.W_800, color=C.TEXT),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Container(height=1, bgcolor=C.BORDER),
+                *controls,
+            ]
+            for i, (tile, lbl) in enumerate(zip(nav_tiles, nav_labels)):
+                active = i == idx
+                tile.bgcolor = _alpha("14", C.CYAN) if active else C.ELEV + "00"
+                tile.border  = ft.Border.all(1, _alpha("55", C.CYAN) if active else "#00000000")
+                lbl.color    = C.TEXT if active else C.SUBTLE
+                lbl.weight   = ft.FontWeight.W_700 if active else ft.FontWeight.W_500
+            try:
+                self._settings_dlg.update()
+            except Exception:
+                pass
+
+        for i, (title, icon, _accent, subtitle, _controls) in enumerate(pages):
+            lbl = ft.Text(title, size=12, color=C.SUBTLE, max_lines=1,
+                          overflow=ft.TextOverflow.ELLIPSIS)
+            nav_labels.append(lbl)
+            tile = ft.Container(
+                content=ft.Row([ft.Icon(icon, size=15, color=C.SUBTLE), lbl], spacing=8,
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                border_radius=R.MD, ink=True, animate=_anim(D.FAST),
+                border=ft.Border.all(1, "#00000000"),
+                on_click=lambda e, i=i: _open_page(i),
+                tooltip=subtitle,
+            )
+            nav_tiles.append(tile)
 
         header = ft.Row([
             ft.Container(content=ft.Icon(ft.Icons.SETTINGS, color=C.CYAN, size=20),
-                         padding=ft.Padding.all(9), border_radius=R.MD, bgcolor=C.CYAN + "1f",
-                         shadow=_glow(C.CYAN + "55", blur=14)),
+                         padding=ft.Padding.all(9), border_radius=R.MD,
+                         bgcolor=_alpha("1f", C.CYAN)),
             ft.Column([
                 ft.Text("Settings", size=18, weight=ft.FontWeight.W_800, color=C.WHITE),
                 ft.Text("Security, performance & connection", size=11, color=C.MUTED),
@@ -4226,8 +4482,13 @@ class HelucrypticApp:
 
         self._settings_dlg = ft.AlertDialog(
             title=header,
-            content=ft.Container(width=540, height=520, content=ft.Column(
-                sections, tight=True, spacing=12, scroll=ft.ScrollMode.AUTO)),
+            content=ft.Container(width=720, height=480, content=ft.Row([
+                ft.Container(width=188, content=ft.Column(nav_tiles, spacing=2,
+                                                          scroll=ft.ScrollMode.AUTO)),
+                ft.Container(width=1, bgcolor=C.BORDER),
+                ft.Container(content=body_col, expand=True,
+                             padding=ft.Padding.only(left=14)),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.STRETCH)),
             actions=[
                 ft.TextButton("Restart App", on_click=lambda ev: restart_app(),
                               style=ft.ButtonStyle(color=C.YELLOW)),
@@ -4236,10 +4497,8 @@ class HelucrypticApp:
                 ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(self._settings_dlg)),
             ],
         )
+        _open_page(0)   # populate before showing (update() is a no-op pre-attach)
         self._show_dialog(self._settings_dlg)
-        # Staggered fade/scale-in for the section cards.
-        for i, card in enumerate(sections):
-            self._reveal(card, delay=0.05 + i * 0.05)
 
     # ------------------------------------------------------------------
     # Add contact
@@ -4389,7 +4648,7 @@ class HelucrypticApp:
                                 weight=ft.FontWeight.W_600,
                                 font_family=_t_FONTS["mono"]),
                 padding=ft.Padding.symmetric(horizontal=12, vertical=4),
-                border_radius=R.PILL, bgcolor=C.ELEV + "cc",
+                border_radius=R.PILL, bgcolor=_alpha("cc", C.ELEV),
                 border=ft.Border.all(1, C.BORDER),
             ),
         )
@@ -4438,8 +4697,13 @@ class HelucrypticApp:
         # Sent leans on the accent; received stays neutral so a busy room of
         # peers doesn't turn into a wall of accent colour.
         name_color   = C.CYAN if is_sent else C.SUBTLE
-        fill         = C.CYAN_DIM if is_sent else C.ELEV
-        border_color = (C.CYAN + "55") if is_sent else C.BORDER2
+        fill         = None if is_sent else C.ELEV
+        # Sent bubbles: a barely-there accent wash (single hue, low alpha) —
+        # enough to read direction at a glance without turning the chat neon.
+        sent_grad    = ft.LinearGradient(
+            begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
+            colors=[_alpha("22", C.CYAN), _alpha("12", C.CYAN)]) if is_sent else None
+        border_color = _alpha("44", C.CYAN) if is_sent else C.BORDER2
         header = ft.Row(
             [
                 ft.Text(name, size=10, color=name_color, weight=ft.FontWeight.W_700),
@@ -4467,6 +4731,7 @@ class HelucrypticApp:
                 else ft.CrossAxisAlignment.START),
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             bgcolor=fill,
+            gradient=sent_grad,
             border=ft.Border.all(1, border_color),
             border_radius=ft.BorderRadius(
                 top_left=R.LG, top_right=R.LG,
