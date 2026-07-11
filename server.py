@@ -25,6 +25,11 @@ from constants.server_constants import (
 )
 
 logger = logging.getLogger("helucryptic.server")
+# The signaling server sees every user's username and room. For a privacy-focused
+# tool, allow operators to raise the log level (e.g. WARNING) so those identifiers
+# aren't recorded at INFO. Defaults to INFO for backward compatibility.
+_log_level = os.getenv("HELUCRYPTIC_LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, _log_level, logging.INFO))
 
 app = FastAPI(title=SERVER_TITLE)
 
@@ -169,8 +174,14 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
 
     # --- Presence query (directed at the server, not a peer) ---
     if msg_type == "presence":
-        wanted = (payload.get("data") or {}).get("usernames", [])
-        online = [u for u in wanted if u in active_connections]
+        # Be defensive about the shape: a malformed packet (non-dict `data`, or a
+        # `usernames` that isn't a list of strings) must not raise here — that would
+        # escape the message loop and disconnect the client. Mirror the tolerant
+        # handling in the Cloudflare worker.
+        data = payload.get("data")
+        raw_wanted = data.get("usernames") if isinstance(data, dict) else None
+        wanted = raw_wanted if isinstance(raw_wanted, list) else []
+        online = [u for u in wanted if isinstance(u, str) and u in active_connections]
         logger.debug("User '%s' requested presence check for: %s. Online: %s", username, wanted, online)
         try:
             await websocket.send_text(json.dumps({

@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.parse
 from collections import deque
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -119,6 +120,58 @@ from constants.client_constants import (
 )
 
 
+# Delivery-status glyphs for sent bubbles: icon name + colour per state.
+_MSG_STATUS_GLYPHS = {
+    "queued":    (ft.Icons.SCHEDULE,  C.MUTED),   # waiting in the offline outbox
+    "sent":      (ft.Icons.DONE,      C.MUTED),   # left this machine
+    "delivered": (ft.Icons.DONE_ALL,  C.CYAN),    # peer acked receipt
+}
+
+
+def _fmt_msg_ts(iso_ts: str | None = None) -> str:
+    """Human timestamp for a chat bubble, in LOCAL time. History rows store
+    UTC ISO strings; live messages pass None (= now). Same-day → 'HH:MM',
+    older → 'DD Mon HH:MM'. Defensive: any parse failure → empty string."""
+    try:
+        if iso_ts:
+            dt = datetime.fromisoformat(iso_ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            dt = dt.astimezone()
+        else:
+            dt = datetime.now().astimezone()
+        if dt.date() == datetime.now().astimezone().date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%d %b %H:%M")
+    except Exception:
+        return ""
+
+
+def _msg_day(iso_ts: str | None = None):
+    """Local calendar date of a message (stored UTC ISO ts, or None = now).
+    Returns None on parse failure so callers can skip the separator."""
+    try:
+        if iso_ts:
+            dt = datetime.fromisoformat(iso_ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone().date()
+        return datetime.now().astimezone().date()
+    except Exception:
+        return None
+
+
+def _day_label(day) -> str:
+    """Human label for a date separator chip: Today / Yesterday / '12 Jun 2026'."""
+    today = datetime.now().astimezone().date()
+    delta = (today - day).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Yesterday"
+    return day.strftime("%d %b %Y")
+
+
 # ---------------------------------------------------------------------------
 # Startup helpers
 # ---------------------------------------------------------------------------
@@ -203,6 +256,24 @@ class HelucrypticApp:
         # (server-backed, refreshed by _presence_loop). A contact is "online" if
         # it's in here OR we already hold a live P2P link to it.
         self._online_users:    set[str]        = set()
+        # --- Delivery / health / typing UI state ------------------------------
+        # msg_id → the little status Icon in a sent bubble (⏳ queued → ✓ sent
+        # → ✓✓ delivered); cleared whenever the transcript is rebuilt.
+        self._msg_status:      dict[str, ft.Icon] = {}
+        # Last measured heartbeat round-trip per peer (from engine.on_rtt).
+        self._peer_rtt:        dict[str, float] = {}
+        # Live WebRTC connection state per 1-to-1 peer (rooms use _room_peers).
+        self._peer_conn_state: dict[str, str]  = {}
+        # Typing indicator: who's composing + the revert task, and an outbound
+        # throttle so we don't spam a __typing frame on every keystroke.
+        self._typing_task:     asyncio.Task | None = None
+        self._typing_sent_at:  float           = 0.0
+        # Consecutive-sender bubble grouping (reset on transcript rebuild).
+        self._last_bubble_sender: str | None   = None
+        # Date-separator bookkeeping: calendar day of the last bubble shown,
+        # and the "say hello" hint control shown in an empty conversation.
+        self._last_msg_date                    = None
+        self._chat_empty_hint: ft.Control | None = None
 
         self._pf_manager = None  # PortForwardManager when port-forwarding is on
         # Background loops are tracked so a profile switch can stop this session's
@@ -224,8 +295,27 @@ class HelucrypticApp:
     def _fire_and_forget(self, coro) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
         self._running_tasks.add(task)
-        task.add_done_callback(self._running_tasks.discard)
+        task.add_done_callback(self._task_done)
         return task
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        """Reap a background task and SURFACE its failure instead of letting it
+        bubble to the loop exception handler (which restarts the whole app).
+        A background hiccup becomes a visible toast + console traceback; the
+        process-level restart stays reserved for truly unhandled crashes."""
+        self._running_tasks.discard(task)
+        if task.cancelled():
+            return
+        ex = task.exception()   # also marks the exception as retrieved
+        if ex is None:
+            return
+        import traceback
+        print(f"[task] background task failed: {type(ex).__name__}: {ex}", flush=True)
+        traceback.print_exception(type(ex), ex, ex.__traceback__)
+        try:
+            self._toast(f"Something went wrong: {type(ex).__name__}: {ex}", "error")
+        except Exception:
+            pass
 
     def _apply_port_forward(self) -> None:
         """(Re)start or stop the forwarded-port manager from current settings."""
@@ -439,6 +529,13 @@ class HelucrypticApp:
     def _build_ui(self) -> None:
         # --- Sidebar controls (same control objects/types as the original) ---
         self.contact_list     = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=4)
+        # Filter-as-you-type over the contact list (nickname or username).
+        self.contact_search   = _neon_field(
+            hint_text="Search contacts…", dense=True, text_size=12,
+            prefix_icon=ft.Icons.SEARCH, border_radius=R.PILL,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            on_change=lambda e: self._refresh_contact_list(),
+        )
         self.btn_add_contact  = ft.TextButton("+  Add contact", on_click=self._show_add_contact,
                                               style=_ghost_style())
         self.btn_import_id    = ft.TextButton("Import from code", on_click=self._show_import_identity,
@@ -563,6 +660,7 @@ class HelucrypticApp:
                 room_card,
                 ft.Container(height=4),
                 contacts_header,
+                self.contact_search,
                 self.contact_list,
                 ft.Row([self.btn_add_contact], spacing=0),
                 ft.Row([self.btn_import_id], spacing=0),
@@ -601,6 +699,7 @@ class HelucrypticApp:
             on_submit=self._send_chat, disabled=True, border_radius=R.PILL,
             content_padding=ft.Padding.symmetric(horizontal=18, vertical=12),
             on_focus=self._on_input_focus, on_blur=self._on_input_blur,
+            on_change=self._on_input_change,
         )
         self.file_progress = ft.ProgressBar(value=0, visible=False, color=C.CYAN,
                                             bgcolor=C.ELEV, border_radius=R.PILL, height=4)
@@ -970,6 +1069,36 @@ class HelucrypticApp:
 
     # ---- home / landing view -------------------------------------------
 
+    def _refresh_home_recent(self) -> None:
+        """Populate the home view's quick-resume row: up to 5 contacts as
+        one-click chips (online first, matching the sidebar sort)."""
+        if not hasattr(self, "_home_recent_row"):
+            return
+        contacts = sorted(load_contacts(),
+                          key=lambda c: (not self._is_contact_online(c.username),
+                                         (c.nickname or c.username).lower()))[:5]
+        chips = []
+        for c in contacts:
+            display = c.nickname or c.username
+            online  = self._is_contact_online(c.username)
+            chip = ft.Container(
+                content=ft.Row([
+                    self._avatar(display, bool(c.verified), 24),
+                    ft.Text(display, size=12, color=C.TEXT, weight=ft.FontWeight.W_600,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Container(width=7, height=7, border_radius=R.PILL,
+                                 bgcolor=C.GREEN if online else C.FAINT),
+                ], spacing=8, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                border_radius=R.PILL, bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER2),
+                on_click=lambda e, u=c.username: self._select_contact(u),
+                ink=True, animate=_anim(D.FAST), tooltip=f"Open chat with {display}",
+            )
+            self._attach_hover(chip, C.ELEV, C.ELEV2)
+            chips.append(chip)
+        self._home_recent_row.controls = chips
+        self._home_recent_title.visible = bool(chips)
+
     def _build_home_view(self) -> ft.Control:
         def action(icon, label, fn, primary=False):
             return ft.FilledButton(
@@ -977,6 +1106,14 @@ class HelucrypticApp:
                 style=_filled_style(C.CYAN if primary else C.ELEV2,
                                     C.BTN_CYAN if primary else C.TEXT),
             )
+        # Quick-resume: recent contacts as one-click chips (filled by
+        # _refresh_home_recent whenever contacts/presence change).
+        self._home_recent_title = ft.Text("JUMP BACK IN", size=10, color=C.MUTED,
+                                          weight=ft.FontWeight.W_800,
+                                          font_family=_t_FONTS["mono"], visible=False)
+        self._home_recent_row = ft.Row([], spacing=8, wrap=True,
+                                       alignment=ft.MainAxisAlignment.CENTER)
+        self._refresh_home_recent()
         hero = ft.Column(
             [
                 ft.Container(
@@ -995,6 +1132,9 @@ class HelucrypticApp:
                     action(ft.Icons.LOGIN, JOIN_ROOM_TXT, lambda: self._show_join_room(None)),
                     action(ft.Icons.PERSON_ADD, "Add contact", lambda: self._show_add_contact(None)),
                 ], alignment=ft.MainAxisAlignment.CENTER, spacing=10, wrap=True),
+                ft.Container(height=10),
+                self._home_recent_title,
+                self._home_recent_row,
                 ft.Container(height=6),
                 ft.Row([
                     ft.Icon(ft.Icons.KEYBOARD_COMMAND_KEY, color=C.MUTED, size=14),
@@ -1022,6 +1162,7 @@ class HelucrypticApp:
     def _go_home(self) -> None:
         """Return to the landing view (e.g. clicking the logo)."""
         self._active_contact = ""
+        self._refresh_home_recent()
         # Reset the chat header to its default, no-conversation state.
         try:
             self.chat_header_title.value = "Select a conversation"
@@ -1143,6 +1284,73 @@ class HelucrypticApp:
         self.engine.on_session_ready    = self._on_engine_session_ready
         self.engine.on_history_request  = self._on_engine_history_request
         self.engine.on_history_response = self._on_engine_history_response
+        self.engine.on_delivery         = self._on_engine_delivery
+        self.engine.on_sent             = self._on_engine_sent
+        self.engine.on_rtt              = self._on_engine_rtt
+        self.engine.on_typing           = self._on_engine_typing
+
+    # --- Delivery ticks / RTT / typing (reliability made visible) ---------
+
+    def _set_msg_status(self, msg_id: str, status: str) -> None:
+        """Flip a sent bubble's status glyph: queued → sent → delivered.
+        Never downgrades a bubble that's already 'delivered' (a late outbox
+        flush event must not overwrite a faster ack)."""
+        icon = self._msg_status.get(msg_id)
+        if icon is None:
+            return
+        if getattr(icon, "data", "") == "delivered":
+            return
+        name, color = _MSG_STATUS_GLYPHS.get(status, _MSG_STATUS_GLYPHS["sent"])
+        icon.name, icon.color, icon.data = name, color, status
+        icon.tooltip = status.capitalize()
+        self.page.update()
+
+    def _on_engine_delivery(self, peer: str, msg_id: str) -> None:
+        self._set_msg_status(msg_id, "delivered")
+
+    def _on_engine_sent(self, peer: str, msg_id: str) -> None:
+        # A queued message actually left the outbox after reconnect.
+        self._set_msg_status(msg_id, "sent")
+
+    def _on_engine_rtt(self, peer: str, rtt_ms: float) -> None:
+        self._peer_rtt[peer] = rtt_ms
+        # Cheap repaints only: the open 1-to-1 header, or the room roster row.
+        # Heartbeats tick every ~15 s per peer, so this stays light.
+        if peer == self._active_contact and not self._room_id:
+            self._update_chat_header_contact(peer)
+            self.page.update()
+        elif peer in self._room_peers:
+            self._refresh_participant_list()
+            self.page.update()
+
+    def _on_engine_typing(self, peer: str) -> None:
+        if self._room_id or peer != self._active_contact:
+            return
+        self.chat_header_status_text.value = "typing…"
+        self.chat_header_status_text.color = C.CYAN
+        self.page.update()
+        if self._typing_task and not self._typing_task.done():
+            self._typing_task.cancel()
+        self._typing_task = self._fire_and_forget(self._typing_revert(peer))
+
+    async def _typing_revert(self, peer: str) -> None:
+        try:
+            await asyncio.sleep(3.0)
+        except asyncio.CancelledError:
+            return
+        if peer == self._active_contact and not self._room_id:
+            self._update_chat_header_contact(peer)
+            self.page.update()
+
+    def _on_input_change(self, e) -> None:
+        """Throttled outbound composing hint (1-to-1 only, ≤1 per 2.5 s)."""
+        if self._room_id or not self._active_contact:
+            return
+        now = time.monotonic()
+        if now - self._typing_sent_at < 2.5:
+            return
+        self._typing_sent_at = now
+        self.engine.send_typing()
 
     def _on_engine_state(self, peer: str, state: str) -> None:
         if peer in self._room_peers:
@@ -1166,8 +1374,12 @@ class HelucrypticApp:
             # Honest aggregate status across the WHOLE room (not last-wins).
             self._apply_aggregate_status(self._room_peers, group=True)
         else:
-            # 1-to-1 peer state changed — flip its presence dot/wifi promptly
-            # and refresh the header if it's the open conversation.
+            # 1-to-1 peer state changed — remember it for the health readout,
+            # flip its presence dot/wifi promptly and refresh the header if
+            # it's the open conversation.
+            self._peer_conn_state[peer] = state
+            if state in ("failed", "disconnected", "closed"):
+                self._peer_rtt.pop(peer, None)   # last RTT is stale once the link drops
             self._refresh_contact_list()
             if peer == self._active_contact and not self._room_id:
                 self._update_chat_header_contact(peer)
@@ -2134,15 +2346,32 @@ class HelucrypticApp:
     def _refresh_contact_list(self) -> None:
         self.contact_list.controls.clear()
         contacts = load_contacts()
+        # Filter-as-you-type (matches nickname OR username, case-insensitive).
+        query = (getattr(self, "contact_search", None) and self.contact_search.value or "").strip().lower()
+        if query:
+            contacts = [c for c in contacts
+                        if query in (c.nickname or "").lower() or query in c.username.lower()]
+        # Online contacts float to the top; each group stays alphabetical, so
+        # the people you can actually talk to right now are one glance away.
+        contacts = sorted(contacts,
+                          key=lambda c: (not self._is_contact_online(c.username),
+                                         (c.nickname or c.username).lower()))
         if not contacts:
-            self.contact_list.controls.append(self._empty_state(
-                ft.Icons.PERSON_ADD_ALT_1,
-                "No contacts yet",
-                "Add a contact or share your identity code to start a private conversation.",
-            ))
+            if query:
+                self.contact_list.controls.append(self._empty_state(
+                    ft.Icons.SEARCH_OFF, "No matches",
+                    f"No contact matches “{query}”.",
+                ))
+            else:
+                self.contact_list.controls.append(self._empty_state(
+                    ft.Icons.PERSON_ADD_ALT_1,
+                    "No contacts yet",
+                    "Add a contact or share your identity code to start a private conversation.",
+                ))
         else:
             for c in contacts:
                 self.contact_list.controls.append(self._contact_card(c))
+        self._refresh_home_recent()   # keep the home quick-resume chips in sync
         self.page.update()
 
     def _empty_state(self, icon, title: str, subtitle: str = "") -> ft.Container:
@@ -2287,6 +2516,17 @@ class HelucrypticApp:
         )
         wifi = ft.Icon(ft.Icons.WIFI if online else ft.Icons.WIFI_OFF,
                        color=dot_color if online else C.MUTED, size=13)
+        # Live link health: last heartbeat RTT for a connected peer, or the
+        # in-flight state (connecting…/reconnecting…) so a stuck peer is visible.
+        health = []
+        rtt = self._peer_rtt.get(username)
+        if online and rtt is not None:
+            health = [ft.Text(f"{int(rtt)} ms", size=10, color=C.MUTED,
+                              font_family=_t_FONTS["mono"])]
+        elif state in ("new", "connecting", "checking"):
+            health = [ft.Text("connecting…", size=10, color=C.YELLOW)]
+        elif state in ("disconnected", "failed"):
+            health = [ft.Text("reconnecting…", size=10, color=C.YELLOW)]
         # Membership badge (feature D) — only shown when membership is in play.
         member_badge = []
         if self.engine.room_creator_pubkey:
@@ -2297,7 +2537,7 @@ class HelucrypticApp:
                 member_badge = [ft.Icon(ft.Icons.HELP_OUTLINE, color=C.YELLOW, size=13,
                                         tooltip="Not a vouched member")]
         return ft.Container(
-            content=ft.Row([avatar, name, ft.Container(expand=True), *member_badge, wifi],
+            content=ft.Row([avatar, name, ft.Container(expand=True), *health, *member_badge, wifi],
                            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.symmetric(horizontal=6, vertical=4),
             border_radius=R.SM,
@@ -2320,10 +2560,27 @@ class HelucrypticApp:
         self.chat_header_avatar.gradient = self._avatar_gradient(verified)
         self.chat_header_title.value = display
         self.chat_header_status_dot.visible = True
-        self.chat_header_status_dot.bgcolor = C.GREEN if online else C.FAINT
         self.chat_header_status_text.visible = True
-        self.chat_header_status_text.value = "online" if online else "offline"
-        self.chat_header_status_text.color = C.GREEN if online else C.MUTED
+        # Health readout: prefer the LIVE WebRTC link state over bare presence,
+        # so the header honestly says connecting / reconnecting / p2p + RTT.
+        conn = self._peer_conn_state.get(username, "")
+        rtt  = self._peer_rtt.get(username)
+        if conn == "connected":
+            label = "online · p2p"
+            if rtt is not None:
+                label += f" · {int(rtt)} ms"
+            dot, color = C.GREEN, C.GREEN
+        elif conn in ("new", "connecting", "checking"):
+            label, dot, color = "connecting…", C.YELLOW, C.YELLOW
+        elif conn in ("disconnected", "failed") and online:
+            label, dot, color = "reconnecting…", C.YELLOW, C.YELLOW
+        elif online:
+            label, dot, color = "online", C.GREEN, C.GREEN
+        else:
+            label, dot, color = "offline", C.FAINT, C.MUTED
+        self.chat_header_status_dot.bgcolor = dot
+        self.chat_header_status_text.value = label
+        self.chat_header_status_text.color = color
 
     def _update_chat_header_room(self, code: str) -> None:
         self.chat_header_lead.visible = False
@@ -2522,6 +2779,10 @@ class HelucrypticApp:
         self.engine.target_peer = username   # 1-to-1 sends/answers route to this peer
         self._history_offset = 0
         self.chat_log.controls.clear()
+        self._msg_status.clear()             # transcript rebuilt → old glyph refs are dead
+        self._last_bubble_sender = None
+        self._last_msg_date = None
+        self._chat_empty_hint = None
         self._load_more_history()
         self._refresh_contact_list()              # move the active highlight
         self._update_chat_header_contact(username)  # show selected conversation as context
@@ -2544,6 +2805,55 @@ class HelucrypticApp:
             return
         await self.engine.add_peer(username, ws_send)
 
+    def _history_bubbles(self, msgs: list, default_sender: str) -> tuple[list, object, str | None]:
+        """Build transcript controls for a page of history rows: date-separator
+        chips at day boundaries + sender-grouped bubbles. Returns
+        (controls, day_of_last_message, last_sender_prefix)."""
+        controls: list = []
+        prev_sender: str | None = None
+        prev_day = None
+        for m in msgs:
+            is_sent = m["direction"] == "sent"
+            prefix  = "You" if is_sent else (m.get("sender") or default_sender or "Peer")
+            day = _msg_day(m.get("timestamp"))
+            if day is not None and day != prev_day:
+                controls.append(self._date_chip(_day_label(day)))
+                prev_day = day
+                prev_sender = None            # new day breaks bubble grouping
+            controls.append(self._make_bubble(prefix, m["content"], bool(m["verified"]), is_sent,
+                                              ts=m.get("timestamp"), grouped=(prefix == prev_sender)))
+            prev_sender = prefix
+        return controls, prev_day, prev_sender
+
+    def _merge_history_page(self, msgs: list, default_sender: str, load_more_cb) -> None:
+        """Shared tail of both history loaders: build the page's controls,
+        maintain the grouping/date cursors, show the empty-conversation hint,
+        dedupe the day chip at a prepend boundary, and re-add 'load more'."""
+        controls, last_day, last_sender = self._history_bubbles(msgs, default_sender)
+        if self._history_offset == 0:
+            # Initial page: the newest bubble seeds the live cursors.
+            self._last_bubble_sender = last_sender
+            self._last_msg_date = last_day
+            if not msgs:
+                hint = self._empty_state(
+                    ft.Icons.LOCK_OUTLINE, "No messages yet",
+                    "Say hello — everything here is end-to-end encrypted and peer-to-peer.")
+                self._chat_empty_hint = hint
+                controls = [hint]
+        elif controls and self.chat_log.controls and last_day is not None:
+            # Prepending older messages: if the previously-top control is a
+            # date chip for the same day this block ends on, it's now redundant.
+            tag = getattr(self.chat_log.controls[0], "data", None)
+            if isinstance(tag, tuple) and len(tag) == 2 and tag[0] == "date_chip" \
+                    and tag[1] == _day_label(last_day):
+                self.chat_log.controls.pop(0)
+
+        self.chat_log.controls = controls + self.chat_log.controls
+        self._bulk_load = False
+        self._history_offset += len(msgs)
+        if len(msgs) == 100:
+            self.chat_log.controls.insert(0, ft.TextButton(LOAD_MORE_TXT, on_click=load_more_cb))
+
     def _load_more_history(self) -> None:
         msgs = read_messages(
             self._active_contact, self.history_key,
@@ -2554,20 +2864,10 @@ class HelucrypticApp:
             if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == LOAD_MORE_TXT:
                 self.chat_log.controls.pop(0)
 
-        bubbles = []
-        for m in msgs:
-            is_sent = m["direction"] == "sent"
-            prefix  = "You" if is_sent else (m.get("sender") or self._active_contact or "Peer")
-            bubbles.append(self._make_bubble(prefix, m["content"], bool(m["verified"]), is_sent))
-
-        self.chat_log.controls = bubbles + self.chat_log.controls
-        self._bulk_load = False
-        self._history_offset += len(msgs)
-        if len(msgs) == 100:
-            def load_more(e):
-                self._load_more_history()
-                self.page.update()
-            self.chat_log.controls.insert(0, ft.TextButton(LOAD_MORE_TXT, on_click=load_more))
+        def load_more(e):
+            self._load_more_history()
+            self.page.update()
+        self._merge_history_page(msgs, self._active_contact, load_more)
 
     def _select_room(self) -> None:
         if not self._room_id:
@@ -2575,6 +2875,10 @@ class HelucrypticApp:
         self._active_contact = ""
         self._history_offset = 0
         self.chat_log.controls.clear()
+        self._msg_status.clear()             # transcript rebuilt → old glyph refs are dead
+        self._last_bubble_sender = None
+        self._last_msg_date = None
+        self._chat_empty_hint = None
         self._load_more_room_history()
         self._update_main_view()                  # leave home → show conversation
         self.page.update()
@@ -2589,20 +2893,10 @@ class HelucrypticApp:
             if isinstance(self.chat_log.controls[0], ft.TextButton) and self.chat_log.controls[0].text == LOAD_MORE_TXT:
                 self.chat_log.controls.pop(0)
 
-        bubbles = []
-        for m in msgs:
-            is_sent = m["direction"] == "sent"
-            prefix  = "You" if is_sent else (m.get("sender") or "Peer")
-            bubbles.append(self._make_bubble(prefix, m["content"], bool(m["verified"]), is_sent))
-
-        self.chat_log.controls = bubbles + self.chat_log.controls
-        self._bulk_load = False
-        self._history_offset += len(msgs)
-        if len(msgs) == 100:
-            def load_more(e):
-                self._load_more_room_history()
-                self.page.update()
-            self.chat_log.controls.insert(0, ft.TextButton(LOAD_MORE_TXT, on_click=load_more))
+        def load_more(e):
+            self._load_more_room_history()
+            self.page.update()
+        self._merge_history_page(msgs, "", load_more)
 
     # ------------------------------------------------------------------
     # Chat
@@ -2618,7 +2912,7 @@ class HelucrypticApp:
             self._block_unverified(self._active_contact)
             return
         try:
-            await self.engine.send_chat(text)
+            mid = await self.engine.send_chat(text)
         except RuntimeError as ex:
             self._toast(str(ex), "error")
             return
@@ -2630,7 +2924,14 @@ class HelucrypticApp:
                 room_id=self._room_id or None,
                 sender=None,
             )
-        self._append_to_log("sent", text, False)
+        # 1-to-1 sends return a message id → show a live delivery glyph:
+        # queued (peer offline, outbox) / sent (on the wire) / delivered (acked).
+        status = None
+        if mid and not self._room_id:
+            status = "sent" if self.engine.peer_channel_open(self._active_contact) else "queued"
+            if status == "queued":
+                self._toast("Contact is offline — message queued, will send on reconnect", "warn")
+        self._append_to_log("sent", text, False, msg_id=mid if status else None, status=status)
         self.msg_input.value = ""
         if self._motion_ok:
             if self._flash_task and not self._flash_task.done():
@@ -4077,17 +4378,63 @@ class HelucrypticApp:
             self.status_label.color = color
         self.page.update()
 
-    def _append_to_log(self, direction: str, text: str, verified: bool, label: str = "") -> None:
+    def _date_chip(self, label: str) -> ft.Container:
+        """A small centered pill marking a day boundary in the transcript."""
+        return ft.Container(
+            alignment=ft.Alignment.CENTER,
+            padding=ft.Padding.symmetric(vertical=6),
+            data=("date_chip", label),   # tagged so loaders can dedupe on prepend
+            content=ft.Container(
+                content=ft.Text(label, size=10, color=C.SUBTLE,
+                                weight=ft.FontWeight.W_600,
+                                font_family=_t_FONTS["mono"]),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+                border_radius=R.PILL, bgcolor=C.ELEV + "cc",
+                border=ft.Border.all(1, C.BORDER),
+            ),
+        )
+
+    def _remove_empty_hint(self) -> None:
+        if self._chat_empty_hint is not None:
+            try:
+                self.chat_log.controls.remove(self._chat_empty_hint)
+            except ValueError:
+                pass
+            self._chat_empty_hint = None
+
+    def _append_to_log(self, direction: str, text: str, verified: bool, label: str = "",
+                       msg_id: str | None = None, status: str | None = None) -> None:
         is_sent = direction == "sent"
         prefix  = "You" if is_sent else (label or self._active_contact or "Peer")
-        self.chat_log.controls.append(self._make_bubble(prefix, text, verified, is_sent))
+        # First real message replaces the "say hello" empty-conversation hint.
+        self._remove_empty_hint()
+        # Day boundary → centered date chip (live messages are always today).
+        day = _msg_day(None)
+        if day is not None and day != self._last_msg_date:
+            self.chat_log.controls.append(self._date_chip(_day_label(day)))
+            self._last_msg_date = day
+            self._last_bubble_sender = None   # new day breaks bubble grouping
+        # Group consecutive bubbles from the same sender: hide the repeated
+        # name header and tighten the gap so runs read as one turn.
+        grouped = (prefix == self._last_bubble_sender)
+        self._last_bubble_sender = prefix
+        self.chat_log.controls.append(
+            self._make_bubble(prefix, text, verified, is_sent,
+                              msg_id=msg_id, status=status, grouped=grouped))
 
-    def _make_bubble(self, name: str, text: str, verified: bool, is_sent: bool) -> ft.Control:
+    def _make_bubble(self, name: str, text: str, verified: bool, is_sent: bool,
+                     ts: str | None = None, msg_id: str | None = None,
+                     status: str | None = None, grouped: bool = False) -> ft.Control:
         """A chat bubble. With the single-accent rebrand, sent vs received are
         distinguished WITHOUT a colour pair: sent = accent-tinted fill + accent
         label on the right; received = neutral surface + muted label on the
         left. Asymmetric corners reinforce direction. Slides+fades in on arrival
-        (suppressed during bulk history loads)."""
+        (suppressed during bulk history loads).
+
+        ``grouped`` hides the repeated sender header for consecutive messages.
+        ``ts`` is a stored UTC ISO timestamp (history) or None (live = now).
+        ``msg_id``+``status`` add a delivery glyph (⏳/✓/✓✓) to sent bubbles
+        that live-updates via engine acks (see _set_msg_status)."""
         # Sent leans on the accent; received stays neutral so a busy room of
         # peers doesn't turn into a wall of accent colour.
         name_color   = C.CYAN if is_sent else C.SUBTLE
@@ -4100,10 +4447,21 @@ class HelucrypticApp:
             ],
             spacing=4, tight=True,
         )
+        # Footer: timestamp (+ delivery glyph on tracked sent messages).
+        footer_items: list = [ft.Text(_fmt_msg_ts(ts), size=9, color=C.FAINT)]
+        if is_sent and msg_id:
+            st = status or "sent"
+            icon_name, icon_color = _MSG_STATUS_GLYPHS.get(st, _MSG_STATUS_GLYPHS["sent"])
+            status_icon = ft.Icon(icon_name, size=11, color=icon_color,
+                                  tooltip=st.capitalize(), data=st)
+            self._msg_status[msg_id] = status_icon
+            footer_items.append(status_icon)
+        footer = ft.Row(footer_items, spacing=3, tight=True)
         inner = ft.Container(
             content=ft.Column([
-                header,
+                *([] if grouped else [header]),
                 ft.Text(text, size=13, color=C.TEXT, selectable=True),
+                footer,
             ], spacing=4, tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.END if is_sent
                 else ft.CrossAxisAlignment.START),
@@ -4120,7 +4478,13 @@ class HelucrypticApp:
         bubble = ft.Container(
             content=inner,
             alignment=ft.Alignment.CENTER_RIGHT if is_sent else ft.Alignment.CENTER_LEFT,
-            padding=ft.Padding.only(left=40 if is_sent else 0, right=0 if is_sent else 40),
+            padding=ft.Padding.only(
+                left=40 if is_sent else 0, right=0 if is_sent else 40,
+                top=0 if grouped else 2,
+            ),
+            # Long-press any bubble to copy its text (the text is selectable
+            # too, but this is one gesture instead of select-then-ctrl-c).
+            on_long_press=lambda ev, _t=text: self._copy_bubble_text(_t),
         )
         if not self._bulk_load:
             bubble.opacity = 0
@@ -4129,6 +4493,10 @@ class HelucrypticApp:
             bubble.animate_scale = _anim(D.MED)
             self._reveal(bubble)
         return bubble
+
+    def _copy_bubble_text(self, text: str) -> None:
+        self._fire_and_forget(self._set_clipboard(text))
+        self._toast("Message copied", "success")
 
     def _log(self, text: str) -> None:
         # Clean, console-style system line: a centered hairline divider with the
@@ -4146,6 +4514,7 @@ class HelucrypticApp:
         )
         self.chat_log.controls.append(
             ft.Container(content=chip, padding=ft.Padding.symmetric(horizontal=8, vertical=6)))
+        self._last_bubble_sender = None   # a system line breaks bubble grouping
         self.page.update()
 
     def _toast(self, text: str, level: str = "info") -> None:

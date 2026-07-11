@@ -1,5 +1,3 @@
-docs/*
-!docs/FEATURE_SPEC.md
 dist
 build
 cloudflare/.wrangler
@@ -13,6 +11,8 @@ Helucryptic.spec
 # OneDrive/Explorer folder-metadata droppings (corrupt .git refs if synced)
 desktop.ini
 *.txt
+# ...but requirements.txt is a real tracked file, not a dropping.
+!requirements.txt
 *.spec
 *.venv
 *.vscode
@@ -20,9 +20,14 @@ desktop.ini
 .scannerwork
 .sonarqube
 .agent
-*.spec
 .scannerwork/*
 .sonarqube/*
 .agent/*
-docs/
 .superpowers/*
+
+# Ignore the whole docs/ tree EXCEPT the checked-in feature spec.
+# NOTE: the exception must come AFTER the ignore, and the ignore must use
+# docs/* (not docs/) — a file cannot be re-included once its parent directory
+# is itself excluded.
+docs/*
+!docs/FEATURE_SPEC.md

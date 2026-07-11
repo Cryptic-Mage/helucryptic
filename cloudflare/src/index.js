@@ -25,6 +25,8 @@ export default {
 // Sliding-window rate limiting constants (mirrors server.py).
 const MSG_WINDOW_MS = 10_000;  // 10 s
 const MSG_MAX       = 100;     // max signaling messages per user per window
+const CONN_WINDOW_MS = 60_000; // 60 s
+const CONN_MAX       = 20;     // max new connections per IP per window
 
 export class SignalHub {
   constructor(state, env) {
@@ -32,6 +34,7 @@ export class SignalHub {
     this.env = env;
     this._sessionTokens = new Map(); // username → session token (prevents impersonation)
     this._msgTimes      = new Map(); // username → number[] (message timestamps, ms)
+    this._connTimes     = new Map(); // ip → number[] (connection timestamps, ms)
   }
 
   // ---- helpers -----------------------------------------------------------
@@ -44,6 +47,20 @@ export class SignalHub {
     const cutoff = now - MSG_WINDOW_MS;
     while (times.length && times[0] < cutoff) times.shift();
     if (times.length >= MSG_MAX) return false;
+    times.push(now);
+    return true;
+  }
+
+  // Per-IP connection rate limit (mirrors server.py _conn_rate_ok). These
+  // timestamps live only in memory; if the Durable Object hibernates the
+  // window simply resets, which is harmless (Cloudflare's edge also shields us).
+  _connRateOk(ip) {
+    const now = Date.now();
+    let times = this._connTimes.get(ip);
+    if (!times) { times = []; this._connTimes.set(ip, times); }
+    const cutoff = now - CONN_WINDOW_MS;
+    while (times.length && times[0] < cutoff) times.shift();
+    if (times.length >= CONN_MAX) return false;
     times.push(now);
     return true;
   }
@@ -120,7 +137,17 @@ export class SignalHub {
   _evictOrRejectExisting(username, sessionToken) {
     const existingSockets = this.state.getWebSockets(`user:${username}`);
     if (existingSockets.length === 0) return null;
-    const expectedToken = this._sessionTokens.get(username) || "";
+    // The in-memory token map is lost if the Durable Object hibernates while the
+    // sockets survive — that would wrongly reject a legitimate reconnect. The
+    // token is also serialized into each socket's attachment, which DOES survive
+    // hibernation, so fall back to it when the map has been cleared.
+    let expectedToken = this._sessionTokens.get(username) || "";
+    if (!expectedToken) {
+      for (const old of existingSockets) {
+        const t = this._attach(old).token;
+        if (t) { expectedToken = t; break; }
+      }
+    }
     const enc = new TextEncoder();
     const a = enc.encode(sessionToken);
     const b = enc.encode(expectedToken);
@@ -161,6 +188,13 @@ export class SignalHub {
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
+    }
+
+    // Per-IP connection rate limit (mirrors server.py). CF-Connecting-IP is the
+    // client's real IP as seen by Cloudflare.
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+    if (!this._connRateOk(clientIp)) {
+      return new Response("Too many connection attempts — slow down.", { status: 429 });
     }
 
     const { username, room, password, sessionToken } = this._parseUrlParams(request);

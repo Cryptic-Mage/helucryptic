@@ -636,6 +636,8 @@ class WebRTCEngine:
         self.on_membership_change: Callable | None = None  # (peer, is_member)
         self.on_delivery:      Callable | None = None  # (peer: str, msg_id: str) — chat acked
         self.on_rtt:           Callable | None = None  # (peer: str, rtt_ms: float)
+        self.on_sent:          Callable | None = None  # (peer, msg_id) — queued chat left the outbox
+        self.on_typing:        Callable | None = None  # (peer: str) — peer is composing
 
         # --- Reliability layer (heartbeat + outbox + delivery acks) ----------
         # App-layer heartbeat: detects a logically-dead-but-"open" channel that
@@ -1520,6 +1522,16 @@ class WebRTCEngine:
                         pass
             return
 
+        if t == "__typing":
+            # Content-free composing hint (1-to-1). Only reachable post-hello
+            # (gated in _handle_text), so an unauthenticated peer can't ping UI.
+            if self.on_typing:
+                try:
+                    self.on_typing(peer)
+                except Exception:
+                    pass
+            return
+
         if t == "track_origin":
             self._handle_track_origin(frame)
             return
@@ -1785,6 +1797,26 @@ class WebRTCEngine:
         self._awaiting_ack.setdefault(peer, set()).add(mid)
         return mid
 
+    def peer_channel_open(self, peer: str) -> bool:
+        """True if we hold an OPEN DataChannel to ``peer`` right now — lets the
+        UI distinguish 'sent' from 'queued to the outbox' without reaching into
+        engine internals."""
+        ch = self.data_channels.get(peer)
+        return bool(ch and getattr(ch, "readyState", None) == "open")
+
+    def send_typing(self) -> None:
+        """Fire a content-free composing hint to the 1-to-1 target peer.
+        Best-effort: never queued, never encrypted (it carries no content),
+        skipped entirely in rooms (multi-recipient typing is just noise)."""
+        if self.room_id:
+            return
+        ch = self.data_channels.get(self.target_peer)
+        if ch and getattr(ch, "readyState", None) == "open":
+            try:
+                ch.send(json.dumps({"__type": "__typing"}))
+            except Exception:
+                pass
+
     async def _send_ack(self, peer: str, msg_id: str) -> None:
         ch = self.data_channels.get(peer)
         if not (ch and ch.readyState == "open"):
@@ -1805,6 +1837,11 @@ class WebRTCEngine:
                 frame = self._encrypt_frame_for({"__type": "chat", "text": text, "id": mid}, peer)
                 ch.send(json.dumps(frame))
                 self._awaiting_ack.setdefault(peer, set()).add(mid)
+                if self.on_sent:
+                    try:
+                        self.on_sent(peer, mid)
+                    except Exception:
+                        pass
             except Exception:
                 # Re-queue the rest and stop; we'll retry on the next ready event.
                 self._outbox.enqueue(peer, (mid, text))
