@@ -2,7 +2,7 @@
 
 Root cause being guarded: when a contact regenerates its identity, its new
 signed hello no longer matches the key we pinned, so verification failed and
-EVERY subsequent frame (chat AND call-control) was buffered/dropped silently —
+EVERY subsequent frame (chat AND call-control) was buffered/dropped silently -
 the peer's messages showed "[decryption failed]" and incoming calls never rang.
 
 Desired behaviour:

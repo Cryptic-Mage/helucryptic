@@ -1,4 +1,4 @@
-"""Tests for sounds.py — SoundManager mixing callback.
+"""Tests for sounds.py - SoundManager mixing callback.
 
 All tests bypass real audio hardware by constructing the manager via
 object.__new__ and setting up internal state directly.

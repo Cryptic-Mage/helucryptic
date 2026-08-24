@@ -1,4 +1,4 @@
-"""Tests for theme/contrast.py — WCAG luminance and contrast utilities."""
+"""Tests for theme/contrast.py - WCAG luminance and contrast utilities."""
 import pytest
 
 from theme.contrast import (

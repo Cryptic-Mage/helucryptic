@@ -1,4 +1,4 @@
-"""Tests for membership certificates (feature D) — crypto core."""
+"""Tests for membership certificates (feature D) - crypto core."""
 import crypto
 
 

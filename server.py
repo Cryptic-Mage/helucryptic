@@ -71,7 +71,7 @@ def _msg_rate_ok(username: str) -> bool:
     return True
 
 
-# Usernames are routing keys AND display identities — constrain them so a user
+# Usernames are routing keys AND display identities - constrain them so a user
 # can't register an empty/whitespace/oversized name or impersonate the reserved
 # "system" sender used for server-generated messages.
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,32}$")
@@ -172,14 +172,14 @@ async def _handle_room_joining(websocket: WebSocket, username: str, room: str) -
 
 async def _handle_websocket_message(websocket: WebSocket, username: str, payload: dict) -> None:
     if not _msg_rate_ok(username):
-        logger.warning("Message rate limit exceeded for '%s' — dropping packet", username)
+        logger.warning("Message rate limit exceeded for '%s' - dropping packet", username)
         return
     msg_type = payload.get("type")
 
     # --- Presence query (directed at the server, not a peer) ---
     if msg_type == "presence":
         # Be defensive about the shape: a malformed packet (non-dict `data`, or a
-        # `usernames` that isn't a list of strings) must not raise here — that would
+        # `usernames` that isn't a list of strings) must not raise here - that would
         # escape the message loop and disconnect the client. Mirror the tolerant
         # handling in the Cloudflare worker.
         data = payload.get("data")
@@ -209,7 +209,7 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
 
     # Room isolation: a sender in a room may only signal peers in that same room.
     # Exception: "room_invite" exists precisely to reach a contact who is NOT in
-    # the room yet — blocking it here broke the invite-contacts feature.
+    # the room yet - blocking it here broke the invite-contacts feature.
     sender_room = room_of.get(username)
     if msg_type != "room_invite" and sender_room and room_of.get(target) != sender_room:
         logger.warning(
@@ -385,7 +385,7 @@ async def websocket_endpoint(
         if not _conn_rate_ok(client_ip):
             logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
             await websocket.send_denial_response(
-                Response(status_code=429, content="Too many connection attempts — slow down."))
+                Response(status_code=429, content="Too many connection attempts - slow down."))
             return
 
         if not _username_ok(username):

@@ -152,7 +152,7 @@ async def test_reflection_attack_is_rejected():
 
 @pytest.mark.asyncio
 async def test_nonce_is_single_use():
-    """A correct proof consumes the pending nonce — replaying it later must
+    """A correct proof consumes the pending nonce - replaying it later must
     not re-trigger session start against a stale nonce."""
     psk = invites.generate_psk()
     a = _engine("alice", psk)

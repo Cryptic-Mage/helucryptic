@@ -31,7 +31,7 @@ def test_screen_share_does_not_auto_add_mic():
     e = _engine()
     e._screen_peers.discard("bob")
     e._voice_peers.discard("bob")
-    # Simulate the guard check only — no real RTCPeerConnection needed.
+    # Simulate the guard check only - no real RTCPeerConnection needed.
     assert "bob" not in e._voice_peers
     assert "bob" not in e._screen_peers
 
@@ -100,7 +100,7 @@ def test_purge_secrets_clears_senders():
     e = _engine()
     e._voice_senders["x"] = object()
     e._screen_senders["x"] = object()
-    # purge_secrets clears PSK/session state; senders are separate — check they
+    # purge_secrets clears PSK/session state; senders are separate - check they
     # aren't accidentally left after end_call_local (which is called on disconnect).
     e._end_call_local("x")
     assert e._voice_senders == {}

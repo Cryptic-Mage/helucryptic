@@ -1,4 +1,4 @@
-// helucryptic signaling server — Cloudflare Worker + Durable Object.
+// helucryptic signaling server - Cloudflare Worker + Durable Object.
 //
 // A 1:1 port of server.py. The wire protocol is identical, so the desktop
 // client connects unchanged at:
@@ -7,7 +7,7 @@
 // All connections are routed to ONE Durable Object instance ("global") so they
 // share state. The DO uses the WebSocket Hibernation API; per-socket identity
 // (username, room) is stored as a serialized attachment + tags so it survives
-// hibernation. Media never touches this server — it only relays the handshake.
+// hibernation. Media never touches this server - it only relays the handshake.
 
 const OPEN = 1; // WebSocket.OPEN
 const SERVER_TYPES = new Set(["peer_joined", "peer_left", "room_state", "error"]);
@@ -24,17 +24,17 @@ export default {
 
 // Sliding-window rate limiting constants (mirrors server.py).
 const MSG_WINDOW_MS = 10_000;  // 10 s
-const MSG_MAX       = 100;     // max signaling messages per user per window
+const MSG_MAX = 100;     // max signaling messages per user per window
 const CONN_WINDOW_MS = 60_000; // 60 s
-const CONN_MAX       = 20;     // max new connections per IP per window
+const CONN_MAX = 20;     // max new connections per IP per window
 
 export class SignalHub {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this._sessionTokens = new Map(); // username → session token (prevents impersonation)
-    this._msgTimes      = new Map(); // username → number[] (message timestamps, ms)
-    this._connTimes     = new Map(); // ip → number[] (connection timestamps, ms)
+    this._msgTimes = new Map(); // username → number[] (message timestamps, ms)
+    this._connTimes = new Map(); // ip → number[] (connection timestamps, ms)
   }
 
   // ---- helpers -----------------------------------------------------------
@@ -113,7 +113,7 @@ export class SignalHub {
   }
 
   // Workers expose timingSafeEqual on crypto.subtle (a non-standard CF
-  // extension) — NOT on crypto itself. `crypto.timingSafeEqual(...)` throws a
+  // extension) - NOT on crypto itself. `crypto.timingSafeEqual(...)` throws a
   // TypeError, which turned a CORRECT password into an HTTP 500 on connect
   // (wrong-length passwords short-circuited earlier and were politely
   // rejected). Falls back to a manual constant-time comparison for safety.
@@ -154,7 +154,7 @@ export class SignalHub {
     const existingSockets = this.state.getWebSockets(`user:${username}`);
     if (existingSockets.length === 0) return null;
     // The in-memory token map is lost if the Durable Object hibernates while the
-    // sockets survive — that would wrongly reject a legitimate reconnect. The
+    // sockets survive - that would wrongly reject a legitimate reconnect. The
     // token is also serialized into each socket's attachment, which DOES survive
     // hibernation, so fall back to it when the map has been cleared.
     let expectedToken = this._sessionTokens.get(username) || "";
@@ -170,7 +170,7 @@ export class SignalHub {
     const tokenOk = expectedToken.length > 0 && this._timingSafeEqual(a, b);
     if (!tokenOk) return this._rejectWS("Username already in use by an active session.");
     for (const old of existingSockets) {
-      try { old.close(1000, "replaced"); } catch {}
+      try { old.close(1000, "replaced"); } catch { }
     }
     this._sessionTokens.delete(username);
     return null;
@@ -218,7 +218,7 @@ export class SignalHub {
     // client's real IP as seen by Cloudflare.
     const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
     if (!this._connRateOk(clientIp)) {
-      return new Response("Too many connection attempts — slow down.", { status: 429 });
+      return new Response("Too many connection attempts - slow down.", { status: 429 });
     }
 
     const { username, room, password, sessionToken } = this._parseUrlParams(request);
@@ -227,7 +227,7 @@ export class SignalHub {
     // Mirror server.py: constrain usernames (routing keys + display identity)
     // and reserve "system" so server-generated messages can't be impersonated.
     if (!/^[A-Za-z0-9 _.\-]{1,32}$/.test(username) ||
-        username.trim().toLowerCase() === "system") {
+      username.trim().toLowerCase() === "system") {
       return new Response("invalid username", { status: 400 });
     }
     if (!this._passwordOk(password)) return this._rejectWS("Invalid server access password.");
@@ -271,7 +271,7 @@ export class SignalHub {
 
     const me = this._attach(ws);
     if (me.username && !this._msgRateOk(me.username)) {
-      // Drop the packet silently — same behaviour as server.py.
+      // Drop the packet silently - same behaviour as server.py.
       return;
     }
 
@@ -297,7 +297,7 @@ export class SignalHub {
 
     // Room isolation: sender in a room may only signal peers in that same room.
     // Exception: "room_invite" exists to reach a contact who is NOT in the room
-    // yet — blocking it here broke the invite-contacts feature (see server.py).
+    // yet - blocking it here broke the invite-contacts feature (see server.py).
     if (me.room && type !== "room_invite") {
       const targetWsForRoom = this._findUser(target);
       if (targetWsForRoom) {
@@ -319,8 +319,8 @@ export class SignalHub {
 
   async webSocketClose(ws, code, reason) {
     const a = this._attach(ws);
-    try { ws.close(code, reason); } catch {}
-    // Only clean up if this socket's token is still the current one — a
+    try { ws.close(code, reason); } catch { }
+    // Only clean up if this socket's token is still the current one - a
     // replacement socket may have already installed a new token.
     if (a.username && a.token && a.token === this._sessionTokens.get(a.username)) {
       this._sessionTokens.delete(a.username);

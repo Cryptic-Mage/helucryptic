@@ -66,7 +66,7 @@ def upsert_contact(
     if existing:
         # A changed public key on a known contact may indicate a MITM or a
         # re-keyed peer. Either way the old verification no longer applies, so
-        # drop the verified flag — the user must re-verify the new fingerprint.
+        # drop the verified flag - the user must re-verify the new fingerprint.
         key_changed = bool(
             (x25519_pub  and existing.x25519_pub  and x25519_pub  != existing.x25519_pub) or
             (ed25519_pub and existing.ed25519_pub and ed25519_pub != existing.ed25519_pub)

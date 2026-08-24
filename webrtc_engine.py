@@ -25,7 +25,7 @@ try:
 except ImportError:
     cv2 = None
 
-# Pillow's BOX resampling is area-averaging — the equivalent of cv2.INTER_AREA
+# Pillow's BOX resampling is area-averaging - the equivalent of cv2.INTER_AREA
 # used for downscaling. Pillow replaces opencv here to keep the binary small.
 _BOX = getattr(Image, "Resampling", Image).BOX
 from datetime import UTC
@@ -57,7 +57,7 @@ _STUN_SERVERS = [
     # Multiple independent STUN providers (not just Google) so candidate
     # gathering still succeeds if one provider is unreachable/blocked. aiortc
     # gathers IPv6 srflx candidates automatically from these when the host has a
-    # routable IPv6 address — and an IPv6 path means NO NAT at all, which is the
+    # routable IPv6 address - and an IPv6 path means NO NAT at all, which is the
     # single biggest non-relay win for "strict NAT" peers.
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
@@ -77,7 +77,7 @@ HEARTBEAT_DEAD_S     = 45.0
 
 # ---------------------------------------------------------------------------
 # Symmetric-NAT traversal WITHOUT a relay: predicted-srflx candidate injection
-# + UDP birthday-spray pre-punch. Both are additive and best-effort — if they
+# + UDP birthday-spray pre-punch. Both are additive and best-effort - if they
 # don't help, normal ICE / the signaling relay still carry the connection.
 # ---------------------------------------------------------------------------
 
@@ -103,7 +103,7 @@ def inject_predicted_srflx(sdp: str, ip: str, port: int) -> str:
 
     Inserted right after the last existing ``a=candidate:`` line in each media
     block (or after ``a=end-of-candidates`` / before the next ``m=`` if none
-    exist). Idempotent for a given ip:port — never adds a duplicate.
+    exist). Idempotent for a given ip:port - never adds a duplicate.
     """
     if not ip or not (0 < port <= 65535):
         return sdp
@@ -218,7 +218,7 @@ MAX_HELLO_SKEW_SECONDS = 24 * 3600
 # exposes no port knob, so we wrap the event loop's create_datagram_endpoint
 # once and rewrite ONLY that exact bind. The bound socket is a normal host
 # socket, so aioice's existing STUN step auto-advertises the public mapping
-# (ExitIP:forwarded_port) as a srflx candidate — no candidate injection. The
+# (ExitIP:forwarded_port) as a srflx candidate - no candidate injection. The
 # feature is purely additive: if the bind fails (e.g. port already in use by
 # another peer connection), aioice's own ``except OSError`` skips it and normal
 # gathering continues.
@@ -270,7 +270,7 @@ def install_forward_patch(loop) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hub-election helpers (pure, deterministic — no I/O)
+# Hub-election helpers (pure, deterministic - no I/O)
 # ---------------------------------------------------------------------------
 
 def reachability_tier(settings, current_port=None, reflected_host=None) -> int:
@@ -320,7 +320,7 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
         sdp = pc.localDescription.sdp if pc.localDescription else ""
         if "typ relay" in sdp:
             return (True, "Relay reachable")
-        return (False, "No relay candidate — check URL/credentials")
+        return (False, "No relay candidate - check URL/credentials")
     except TimeoutError:
         return (False, "Timed out contacting TURN server")
     except Exception as ex:
@@ -404,7 +404,7 @@ class ScreenShareTrack(VideoStreamTrack):
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def _grab_frame(self) -> np.ndarray:
-        """Blocking capture + resize — always called from the dedicated grab thread."""
+        """Blocking capture + resize - always called from the dedicated grab thread."""
         if self._sct is None:
             self._sct     = mss.mss()
             self._monitor = self._sct.monitors[1]
@@ -564,19 +564,19 @@ class WebRTCEngine:
         self._pre_hello_bytes:     dict[str, int]               = {}
         self._is_negotiating:      dict[str, bool]              = {}
         self._neg_dirty:           dict[str, bool]              = {}
-        # Peers we tried to call before their data channel was open — the
+        # Peers we tried to call before their data channel was open - the
         # "call_start" ping is (re)sent from _bind_channel once it opens so the
         # callee actually rings instead of silently missing the call.
         self._pending_call_start:  set[str]                     = set()
         # PSK channel authentication (feature C). When room_psk is set, peers must
         # prove knowledge of the pre-shared key (HMAC challenge) BEFORE the hello
-        # — a room becomes invisible to anyone without the PSK from the invite.
+        # - a room becomes invisible to anyone without the PSK from the invite.
         self.room_psk:             str | None                = None   # base64 32-byte
         self._psk_authed:          dict[str, bool]              = {}
         self._psk_my_nonce:        dict[str, str]               = {}
         # Membership PKI (feature D, advisory). The creator vouches for members by
         # signing a cert; peers verify it against the creator's key but never drop
-        # the connection (PSK already gates access) — they just flag membership.
+        # the connection (PSK already gates access) - they just flag membership.
         self.room_creator_pubkey:  str | None                = None   # creator ed25519 pub
         self.my_membership_cert:   str | None                = None   # our creator-signed cert
         self._peer_is_member:      dict[str, bool]              = {}
@@ -596,7 +596,7 @@ class WebRTCEngine:
         self._voice_peers:  set[str] = set()   # peers we've added a mic track to
         self._screen_peers: set[str] = set()   # peers we've added a screen track to
         # RTP senders kept so a track can be REMOVED (stop sharing/voice) without
-        # tearing down the whole call — screen and voice are independent streams.
+        # tearing down the whole call - screen and voice are independent streams.
         self._screen_senders: dict[str, object] = {}
         self._voice_senders:  dict[str, object] = {}
         self._incoming_audio_active: set[str] = set()  # peers whose audio we play
@@ -618,7 +618,7 @@ class WebRTCEngine:
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
 
-        # Callbacks set by client.py — on_state_change(peer, state)
+        # Callbacks set by client.py - on_state_change(peer, state)
         self.on_state_change:  Callable | None = None  # (peer: str, state: str)
         self.on_message:       Callable | None = None  # (sender, text, verified)
         self.on_file_chunk:    Callable | None = None
@@ -628,16 +628,16 @@ class WebRTCEngine:
         self.on_call_rejected: Callable | None = None
         self.on_hangup:        Callable | None = None
         self.on_video_frame:   Callable | None = None  # (sender: str, img: np.ndarray)
-        self.on_video_end:     Callable | None = None  # (sender: str) — incoming screen track ended
-        self.on_key_change:    Callable | None = None  # (peer: str) — verified key changed
-        self.on_session_ready: Callable | None = None  # (peer: str) — hello verified, channel usable
+        self.on_video_end:     Callable | None = None  # (sender: str) - incoming screen track ended
+        self.on_key_change:    Callable | None = None  # (peer: str) - verified key changed
+        self.on_session_ready: Callable | None = None  # (peer: str) - hello verified, channel usable
         self.on_history_request:  Callable | None = None  # (peer, room_id, since)
         self.on_history_response: Callable | None = None  # (peer, room_id, messages)
         self.on_membership_change: Callable | None = None  # (peer, is_member)
-        self.on_delivery:      Callable | None = None  # (peer: str, msg_id: str) — chat acked
+        self.on_delivery:      Callable | None = None  # (peer: str, msg_id: str) - chat acked
         self.on_rtt:           Callable | None = None  # (peer: str, rtt_ms: float)
-        self.on_sent:          Callable | None = None  # (peer, msg_id) — queued chat left the outbox
-        self.on_typing:        Callable | None = None  # (peer: str) — peer is composing
+        self.on_sent:          Callable | None = None  # (peer, msg_id) - queued chat left the outbox
+        self.on_typing:        Callable | None = None  # (peer: str) - peer is composing
 
         # --- Reliability layer (heartbeat + outbox + delivery acks) ----------
         # App-layer heartbeat: detects a logically-dead-but-"open" channel that
@@ -655,7 +655,7 @@ class WebRTCEngine:
         # Audio playback: a single callback-driven output stream. Incoming
         # decoded frames are appended to per-peer numpy buffers; sounddevice's
         # audio thread pulls + mixes them in _play_callback (NOT the asyncio
-        # loop — a blocking write in the loop starves playback and freezes UI).
+        # loop - a blocking write in the loop starves playback and freezes UI).
         self._output_stream = None
         # Per-peer queue of decoded int16 chunks (deque of ndarrays). Using a
         # deque + partial-head consumption avoids the O(n) full-buffer copy that
@@ -680,7 +680,7 @@ class WebRTCEngine:
         self._predicted_ext_ip:   str = ""
 
     # ------------------------------------------------------------------
-    # ICE / TURN configuration (from settings — env only seeds first run)
+    # ICE / TURN configuration (from settings - env only seeds first run)
     # ------------------------------------------------------------------
 
     def _ice_servers(self) -> list:
@@ -702,7 +702,7 @@ class WebRTCEngine:
     async def detect_nat(self) -> dict:
         """Probe NAT behaviour (RFC 5780) off the event loop and cache the result.
 
-        Surfaced in diagnostics, and — for a sequential-symmetric NAT — used to
+        Surfaced in diagnostics, and - for a sequential-symmetric NAT - used to
         predict the external port we inject as an extra srflx candidate during
         offer/answer (see _augment_local_sdp). Best-effort; never raises.
         """
@@ -719,7 +719,7 @@ class WebRTCEngine:
             else:
                 self._predicted_ext_port = 0
                 self._predicted_ext_ip = ""
-                print(f"[nat] detected {profile.nat_type} — {profile.summary}", flush=True)
+                print(f"[nat] detected {profile.nat_type} - {profile.summary}", flush=True)
             return {"nat_type": profile.nat_type, "summary": profile.summary,
                     "ext_ip": profile.ext_ip, "predicted_port": pred or 0}
         except Exception as ex:
@@ -739,7 +739,7 @@ class WebRTCEngine:
         return sdp
 
     def get_diagnostics(self) -> dict:
-        """Redacted connection snapshot for the diagnostics UI — never includes
+        """Redacted connection snapshot for the diagnostics UI - never includes
         passwords, keys, SDP, or ICE candidate strings."""
         peers = []
         for peer, pc in self.pcs.items():
@@ -750,7 +750,7 @@ class WebRTCEngine:
                 "signaling":     pc.signalingState,
                 "ice":           self._ice_states.get(peer, pc.iceConnectionState),
                 "ice_gathering": pc.iceGatheringState,
-                "datachannel":   getattr(dc, "readyState", "—") if dc else "none",
+                "datachannel":   getattr(dc, "readyState", "-") if dc else "none",
                 "hello_sent":    bool(self._hello_sent.get(peer)),
                 "hello_ok":      bool(self._peer_hello_verified.get(peer)),
                 "session_key":   peer in self.session_keys,
@@ -903,7 +903,7 @@ class WebRTCEngine:
         self._last_pong[peer]           = _time.monotonic()   # fresh heartbeat clock
         self.start_heartbeat()                                # idempotent
 
-        # NOTE: aiortc gathers ICE non-trickle — all candidates are embedded in
+        # NOTE: aiortc gathers ICE non-trickle - all candidates are embedded in
         # the SDP offer/answer, and it never emits a browser-style "icecandidate"
         # event. So there is deliberately no outbound trickle handler here.
         # handle_ice() still accepts inbound candidates defensively (e.g. from a
@@ -917,7 +917,7 @@ class WebRTCEngine:
                 self.on_state_change(peer, state)
 
             if state == "failed":
-                # Signaling may still be alive — attempt self-healing renegotiation
+                # Signaling may still be alive - attempt self-healing renegotiation
                 # before giving up. Only fall back to remove_peer when there is no
                 # send channel (signaling is also gone).
                 if self._send_ws is not None:
@@ -928,7 +928,7 @@ class WebRTCEngine:
                 self._bg(self.remove_peer(peer))
             elif state == "disconnected":
                 # ICE has its own short recovery timers, so give it a grace
-                # period — but aiortc can sit in "disconnected" indefinitely
+                # period - but aiortc can sit in "disconnected" indefinitely
                 # (NAT rebind, network switch) without ever reaching "failed".
                 # If it hasn't recovered after the grace window, heal it.
                 self._bg(self._watch_disconnected(peer, pc))
@@ -1046,7 +1046,7 @@ class WebRTCEngine:
         return self._peer_is_member.get(peer, False)
 
     def purge_secrets(self) -> None:
-        """Wipe all session/room cryptographic material from RAM (feature H —
+        """Wipe all session/room cryptographic material from RAM (feature H -
         ephemeral rooms purge on leave so nothing survives the session)."""
         self.session_keys.clear()
         self.group_key = None
@@ -1063,7 +1063,7 @@ class WebRTCEngine:
         self._peer_is_member.clear()
 
     def _psk_proof(self, nonce: str, responder: str) -> str:
-        """HMAC-SHA256 over (nonce | room_id | responder) keyed by the PSK —
+        """HMAC-SHA256 over (nonce | room_id | responder) keyed by the PSK -
         proves the sender holds the PSK without revealing it. Binding the
         room_id stops cross-room replay; binding the RESPONDER's username stops
         a reflection attack (an attacker echoing our own nonce back as a
@@ -1075,7 +1075,7 @@ class WebRTCEngine:
 
     async def _handle_psk(self, kind: str, frame: dict, peer: str) -> None:
         if not self.room_psk:
-            return  # not a PSK room — ignore stray PSK frames
+            return  # not a PSK room - ignore stray PSK frames
         ch = self.data_channels.get(peer)
         if kind == "psk_challenge":
             # Answer the peer's challenge with a proof over THEIR nonce,
@@ -1088,11 +1088,11 @@ class WebRTCEngine:
                     pass
         elif kind == "psk_response":
             # Verify the peer's proof over OUR nonce (constant-time).
-            # Reject responses when no challenge is pending — prevents replay
+            # Reject responses when no challenge is pending - prevents replay
             # against an absent/empty nonce which would produce a predictable hash.
             nonce = self._psk_my_nonce.get(peer, "")
             if not nonce:
-                print(f"[psk] {self.my_username}: unexpected psk_response from {peer} — no pending challenge", flush=True)
+                print(f"[psk] {self.my_username}: unexpected psk_response from {peer} - no pending challenge", flush=True)
                 return
             expected = self._psk_proof(nonce, peer)
             if hmac.compare_digest(expected, str(frame.get("proof", ""))):
@@ -1103,7 +1103,7 @@ class WebRTCEngine:
                     print(f"[psk] {self.my_username}: {peer} passed PSK auth", flush=True)
                     await self._start_session(peer)
             else:
-                print(f"[psk] {self.my_username}: {peer} FAILED PSK auth — aborting", flush=True)
+                print(f"[psk] {self.my_username}: {peer} FAILED PSK auth - aborting", flush=True)
                 await self.remove_peer(peer)
 
     # ------------------------------------------------------------------
@@ -1209,7 +1209,7 @@ class WebRTCEngine:
                 # First-contact TOFU: notify the user so they can verify the
                 # fingerprint out-of-band. A MITM on the first connection is
                 # otherwise undetectable until the contact is manually verified.
-                print(f"[crypto] TOFU: first-contact key pinning for {peer} — verify fingerprint out-of-band.", flush=True)
+                print(f"[crypto] TOFU: first-contact key pinning for {peer} - verify fingerprint out-of-band.", flush=True)
                 if self.on_key_change:
                     self.on_key_change(peer)
 
@@ -1219,8 +1219,8 @@ class WebRTCEngine:
                 # The hello didn't verify against the key we have pinned. Decide
                 # whether the peer simply re-keyed (reinstalled / regenerated) by
                 # checking the hello against the key it claims for itself. A valid
-                # signature there means a real identity — just a different one than
-                # we pinned — i.e. a key rotation, not noise.
+                # signature there means a real identity - just a different one than
+                # we pinned - i.e. a key rotation, not noise.
                 rotation = bool(
                     claimed_pub and prior and prior.ed25519_pub
                     and claimed_pub != prior.ed25519_pub
@@ -1234,7 +1234,7 @@ class WebRTCEngine:
                     print(f"[crypto] Signature verification failed for peer {peer}.", flush=True)
                     return
                 # A VERIFIED contact's signing key changing is a security event
-                # (possible MITM): alert the user and abort — never auto-accept.
+                # (possible MITM): alert the user and abort - never auto-accept.
                 if prior.verified:
                     print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
                     if self.on_key_change:
@@ -1242,10 +1242,10 @@ class WebRTCEngine:
                     self._bg(self.remove_peer(peer))
                     return
                 # An UNVERIFIED (trust-on-first-use) contact re-keyed. Don't drop
-                # their frames silently — surface the change AND re-pin the new key
+                # their frames silently - surface the change AND re-pin the new key
                 # (the success path below calls upsert_contact) so chat and calls
                 # keep working after the peer regenerated its identity.
-                print(f"[crypto] Unverified contact {peer} re-keyed — re-pinning (TOFU).", flush=True)
+                print(f"[crypto] Unverified contact {peer} re-keyed - re-pinning (TOFU).", flush=True)
                 if self.on_key_change:
                     self.on_key_change(peer)
                 # `payload` is set from the claimed-key verification; fall through.
@@ -1295,7 +1295,7 @@ class WebRTCEngine:
                            x25519_pub=payload["x25519_pub"],
                            ed25519_pub=payload["ed25519_pub"])
             # Send the group key to this peer.  The creator always does this.
-            # The hub also does it when the creator is a non-hub member — the
+            # The hub also does it when the creator is a non-hub member - the
             # hub has a direct channel to every peer, so it can distribute the
             # key even when the creator can only reach the hub (star topology).
             am_hub = self.room_id and self.current_hub() == self.my_username
@@ -1325,7 +1325,7 @@ class WebRTCEngine:
             self._bg(self._relay_existing_tracks_to(peer))
 
     # ------------------------------------------------------------------
-    # Membership PKI (feature D, advisory — never drops connections)
+    # Membership PKI (feature D, advisory - never drops connections)
     # ------------------------------------------------------------------
 
     def _set_member(self, peer: str, ok: bool) -> None:
@@ -1460,7 +1460,7 @@ class WebRTCEngine:
             return
         if t == "hello":
             # In a PSK-protected room, ignore a hello until the peer has proven
-            # the pre-shared key — no identity is exchanged with an unauthorised peer.
+            # the pre-shared key - no identity is exchanged with an unauthorised peer.
             if self.room_psk and not self._psk_authed.get(peer):
                 print(f"[psk] {self.my_username}: dropping hello from {peer} (PSK not yet proven)", flush=True)
                 return
@@ -1649,7 +1649,7 @@ class WebRTCEngine:
             if self.on_call_rejected:
                 self.on_call_rejected()
         elif t == "hangup":
-            # Remote hung up — tear down our side immediately (stop sending +
+            # Remote hung up - tear down our side immediately (stop sending +
             # stop playing them), then notify the UI.
             self.end_call_from_peer(peer)
             if self.on_hangup:
@@ -1788,7 +1788,7 @@ class WebRTCEngine:
         if not (ch and ch.readyState == "open"):
             # Peer offline → queue in order; flushed on session-ready/reconnect.
             self._outbox.enqueue(peer, (mid, text))
-            print(f"[chat] {peer} offline — queued message (outbox={self._outbox.pending(peer)})", flush=True)
+            print(f"[chat] {peer} offline - queued message (outbox={self._outbox.pending(peer)})", flush=True)
             return mid
         frame = self._encrypt_frame_for(
             {"__type": "chat", "text": text, "id": mid}, peer
@@ -1798,7 +1798,7 @@ class WebRTCEngine:
         return mid
 
     def peer_channel_open(self, peer: str) -> bool:
-        """True if we hold an OPEN DataChannel to ``peer`` right now — lets the
+        """True if we hold an OPEN DataChannel to ``peer`` right now - lets the
         UI distinguish 'sent' from 'queued to the outbox' without reaching into
         engine internals."""
         ch = self.data_channels.get(peer)
@@ -1853,7 +1853,7 @@ class WebRTCEngine:
 
     def start_heartbeat(self) -> None:
         """Idempotently start the background ping loop (call once the engine has
-        a running event loop — e.g. from the first connect)."""
+        a running event loop - e.g. from the first connect)."""
         if self._hb_task is not None and not self._hb_task.done():
             return
         self._hb_task = self._bg(self._heartbeat_loop())
@@ -1874,7 +1874,7 @@ class WebRTCEngine:
                     except Exception:
                         pass
                     if now - self._last_pong.get(peer, now) > HEARTBEAT_DEAD_S:
-                        print(f"[hb] {peer} silent > {HEARTBEAT_DEAD_S:.0f}s on an open channel — healing", flush=True)
+                        print(f"[hb] {peer} silent > {HEARTBEAT_DEAD_S:.0f}s on an open channel - healing", flush=True)
                         self._last_pong[peer] = now   # avoid repeat-firing while healing
                         if self._send_ws is not None:
                             self._bg(self._heal_peer(peer))
@@ -1884,7 +1884,7 @@ class WebRTCEngine:
                 print(f"[hb] loop error: {type(ex).__name__}: {ex}", flush=True)
 
     # ------------------------------------------------------------------
-    # Peer-assisted history sync (feature E) — encrypted over the session channel
+    # Peer-assisted history sync (feature E) - encrypted over the session channel
     # ------------------------------------------------------------------
 
     HISTORY_SYNC_MAX = 200
@@ -1962,7 +1962,7 @@ class WebRTCEngine:
         offer = await self.pcs[peer].createOffer()
         await self.pcs[peer].setLocalDescription(offer)
 
-        # Re-fetch after every await — remove_peer can run during any yield.
+        # Re-fetch after every await - remove_peer can run during any yield.
         pc = self.pcs.get(peer)
         if pc is None:
             return
@@ -1999,7 +1999,7 @@ class WebRTCEngine:
                 await self.request_negotiation(peer)
 
     # ------------------------------------------------------------------
-    # Public API — signaling events
+    # Public API - signaling events
     # ------------------------------------------------------------------
 
     async def create_offer(self, target: str, ws_send: Callable) -> None:
@@ -2087,7 +2087,7 @@ class WebRTCEngine:
                 print(f"[rtc] {self.my_username}: handle_answer FAILED for {peer}: {type(ex).__name__}: {ex}", flush=True)
 
     async def handle_ice(self, data: dict, sender: str = "") -> None:
-        """Apply a trickled ICE candidate from a peer (defensive — aiortc itself
+        """Apply a trickled ICE candidate from a peer (defensive - aiortc itself
         is non-trickle, but a browser peer may send these).
 
         NOTE: aiortc's RTCIceCandidate has NO `candidate=` constructor kwarg;
@@ -2099,7 +2099,7 @@ class WebRTCEngine:
             return
         raw = str((data or {}).get("candidate") or "")
         if not raw:
-            return  # end-of-candidates marker — nothing to add
+            return  # end-of-candidates marker - nothing to add
         try:
             from aiortc.sdp import candidate_from_sdp
             sdp_str = raw.split(":", 1)[1] if raw.startswith("candidate:") else raw
@@ -2118,7 +2118,7 @@ class WebRTCEngine:
     async def add_peer(self, username: str, ws_send: Callable) -> None:
         self._send_ws = ws_send
         # If we already have a PC to this peer, only rebuild it when it's dead.
-        # An in-progress / live connection must NOT be torn down — otherwise two
+        # An in-progress / live connection must NOT be torn down - otherwise two
         # peers initiating at once (both selecting each other, or re-entry) would
         # keep resetting each other and never connect.
         existing = self.pcs.get(username)
@@ -2148,7 +2148,7 @@ class WebRTCEngine:
                 continue
             sub = self._relay.subscribe(track)
             pc.addTrack(sub)
-            # Broadcast sub.id (what the receiver sees), NOT the source track.id —
+            # Broadcast sub.id (what the receiver sees), NOT the source track.id -
             # relay.subscribe() assigns a new id (confirmed by spike).
             self._forwarded.setdefault(source_peer, []).append((dest, sub, sub.id, track.id))
             ch = self.data_channels.get(dest)
@@ -2165,7 +2165,7 @@ class WebRTCEngine:
     async def _relay_existing_tracks_to(self, dest: str) -> None:
         """Hub late-joiner fan-out: forward every still-live incoming track from
         other members to `dest` (a peer that just became session-ready). Without
-        this, someone joining MID-call/share never receives the ongoing media —
+        this, someone joining MID-call/share never receives the ongoing media -
         the original _relay_track_to_others only runs at track-receipt time."""
         if not (self.room_id and self.current_hub() == self.my_username):
             return
@@ -2184,7 +2184,7 @@ class WebRTCEngine:
                     continue
                 if (dest, track.id) in already:
                     continue  # this track is already being forwarded to dest
-                # Re-check after every await-bearing step — peers can vanish.
+                # Re-check after every await-bearing step - peers can vanish.
                 if dest not in self.pcs:
                     return
                 sub = self._relay.subscribe(track)
@@ -2246,7 +2246,7 @@ class WebRTCEngine:
         self._peer_is_member.pop(username, None)
         self._pending_call_start.discard(username)
         # Heartbeat / delivery bookkeeping for a gone peer. NOTE: the outbox is
-        # deliberately NOT cleared — queued messages must survive a disconnect
+        # deliberately NOT cleared - queued messages must survive a disconnect
         # and flush when the peer reconnects.
         self._last_pong.pop(username, None)
         self._rtt_ms.pop(username, None)
@@ -2282,7 +2282,7 @@ class WebRTCEngine:
         if pc.connectionState != "disconnected":
             return  # recovered (or moved to failed/closed and was handled there)
         print(f"[rtc] {self.my_username}: {peer} stuck in 'disconnected' for "
-              f"{self.DISCONNECT_GRACE_SECONDS:.0f}s — treating as failed", flush=True)
+              f"{self.DISCONNECT_GRACE_SECONDS:.0f}s - treating as failed", flush=True)
         if self._send_ws is not None:
             await self._heal_peer(peer)
         else:
@@ -2334,7 +2334,7 @@ class WebRTCEngine:
         # Phase 3: only prune WORKING non-hub connections once the hub link is
         # confirmed up. Dropping them speculatively leaves the user with NO
         # connection if the new hub is unreachable (failed ICE, behind symmetric
-        # NAT, etc.) — the old working connection is then unrecoverable.
+        # NAT, etc.) - the old working connection is then unrecoverable.
         hub_pc = self.pcs.get(hub)
         if hub_pc and hub_pc.connectionState == "connected":
             for peer in list(self.pcs.keys()):
@@ -2367,7 +2367,7 @@ class WebRTCEngine:
     async def start_voice_call(self, peer: str | None = None, ring: bool = True) -> None:
         """Add our mic to the call with `peer`. `ring=True` means we are the one
         STARTING the call, so notify them (call_start → their phone rings).
-        `ring=False` is used when ANSWERING — we add our mic but must NOT ring the
+        `ring=False` is used when ANSWERING - we add our mic but must NOT ring the
         caller back (that produced a duplicate incoming-call prompt)."""
         p = peer or self.target_peer
         if p not in self.pcs or p in self._voice_peers:
@@ -2384,10 +2384,10 @@ class WebRTCEngine:
                 except Exception as ex:
                     print(f"[rtc] {self.my_username}: call_start to {p} failed: {ex}", flush=True)
             else:
-                # Channel not open yet — defer the ring so the callee isn't missed.
+                # Channel not open yet - defer the ring so the callee isn't missed.
                 self._pending_call_start.add(p)
                 print(f"[rtc] {self.my_username}: call_start to {p} deferred (channel not open)", flush=True)
-        # aiortc won't auto-negotiate the added track — re-offer explicitly.
+        # aiortc won't auto-negotiate the added track - re-offer explicitly.
         # If we are the callee (ring=False), we only initiate renegotiation if we've already
         # applied the caller's offer (meaning we have a remote audio track). Otherwise, we wait
         # for their offer to arrive, and our answer will automatically negotiate both tracks.
@@ -2397,7 +2397,7 @@ class WebRTCEngine:
 
     async def start_screen_share(self, peer: str | None = None) -> None:
         # Screen share is VIDEO ONLY and independent of voice. To talk while
-        # sharing, also start a voice call — the two streams are decoupled so one
+        # sharing, also start a voice call - the two streams are decoupled so one
         # never cuts the other out (and sharing won't silently hot-mic you).
         p = peer or self.target_peer
         if p not in self.pcs or p in self._screen_peers:
@@ -2476,7 +2476,7 @@ class WebRTCEngine:
             self._end_call_local(p)
 
     def end_call_from_peer(self, peer: str) -> None:
-        # The remote side hung up — tear down our side WITHOUT echoing a hangup.
+        # The remote side hung up - tear down our side WITHOUT echoing a hangup.
         self._end_call_local(peer)
 
     def _end_call_local(self, peer: str) -> None:
@@ -2625,7 +2625,7 @@ class WebRTCEngine:
         print(f"[screen] {self.my_username}: receiving video track from {peer}", flush=True)
         origin = await self._resolve_origin(track.id, peer)
         q: asyncio.Queue = asyncio.Queue(maxsize=2)
-        got_frame = False  # local to this call — avoids clobbering across concurrent tracks
+        got_frame = False  # local to this call - avoids clobbering across concurrent tracks
 
         async def fetch():
             nonlocal got_frame
@@ -2643,9 +2643,9 @@ class WebRTCEngine:
                             pass
                     await q.put(img)
                 except MediaStreamError:
-                    break  # track ended cleanly — fall through to sentinel
+                    break  # track ended cleanly - fall through to sentinel
                 except Exception as ex:
-                    # Transient error (decode glitch, buffer underrun) — log and
+                    # Transient error (decode glitch, buffer underrun) - log and
                     # retry instead of killing the whole stream.
                     print(f"[screen] {self.my_username}: frame error from {peer}: {type(ex).__name__}", flush=True)
                     await asyncio.sleep(0.05)

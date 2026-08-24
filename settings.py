@@ -38,7 +38,7 @@ class Settings:
     turn_url: str = ""
     turn_username: str = ""
     turn_password: str = ""
-    # Port forwarding (VPN/router) — bind ICE to a reachable forwarded port
+    # Port forwarding (VPN/router) - bind ICE to a reachable forwarded port
     port_forward_enabled: bool = False
     forwarded_port: int = 0
     # Trust: when on, block 1-to-1 actions with unverified contacts.

@@ -1,10 +1,10 @@
-"""Room invite code — a shareable code that configures the receiver's client to
+"""Room invite code - a shareable code that configures the receiver's client to
 reach a signaling server and join a group room (Quiet-style invite, adapted).
 
 Format: ``HELU-INV1:<base64url(json)>`` (mirrors identity.py's ``HELU1:``).
 
 The JSON payload uses compact keys; only ``r`` (room) and ``u`` (signaling URL)
-are required — the rest are optional carriers for later features:
+are required - the rest are optional carriers for later features:
 
     r  room_id              ROOM-XXXX
     u  signaling_url        ws:// wss:// http:// https://
@@ -14,7 +14,7 @@ are required — the rest are optional carriers for later features:
     v  version              format version (1)
     h  checksum             sha256 of the canonical payload (sans h), hex[:16]
 
-The checksum is a corruption/tamper guard, NOT a secret — anyone holding the
+The checksum is a corruption/tamper guard, NOT a secret - anyone holding the
 code can read every field. Treat the whole code as sensitive (it may carry the
 server password and/or PSK) and share it over a trusted channel.
 """

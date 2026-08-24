@@ -3,7 +3,7 @@
 On Windows, sensitive blobs (the private identity keys in ``keys.json``) are
 wrapped with DPAPI (``CryptProtectData``), tying them to the current user
 account so a plain file copy off the disk is useless without that user's logon
-credentials. On any other platform — or if DPAPI is unavailable — the functions
+credentials. On any other platform - or if DPAPI is unavailable - the functions
 degrade to a transparent pass-through so the app still works (the file is then
 only as protected as the filesystem permissions make it).
 
@@ -62,7 +62,7 @@ def _dpapi(data: bytes, encrypt: bool) -> bytes:
 
     blob_in = _to_blob(data)
     blob_out = _DataBlob()
-    # CRYPTPROTECT_UI_FORBIDDEN = 0x1 — never pop a UI prompt (we run headless).
+    # CRYPTPROTECT_UI_FORBIDDEN = 0x1 - never pop a UI prompt (we run headless).
     if not fn(ctypes.byref(blob_in), None, None, None, None, 0x1, ctypes.byref(blob_out)):
         logger.error("DPAPI operation %s failed", op_name)
         raise OSError(f"DPAPI operation failed ({op_name})")

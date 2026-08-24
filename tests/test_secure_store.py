@@ -1,4 +1,4 @@
-"""Dedicated tests for secure_store.py — OS-keystore protection."""
+"""Dedicated tests for secure_store.py - OS-keystore protection."""
 import secure_store
 
 from constants.secure_store_constants import MAGIC

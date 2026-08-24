@@ -1,7 +1,7 @@
 """Multi-profile compartmentalisation (feature G).
 
-A profile is a fully sandboxed data directory — its own keys, contacts, settings
-and encrypted history — living under ``<root>/profiles/<name>/``. The active
+A profile is a fully sandboxed data directory - its own keys, contacts, settings
+and encrypted history - living under ``<root>/profiles/<name>/``. The active
 profile is recorded in ``<root>/profiles/.active``; with no pointer the app uses
 the root directly (unchanged behaviour).
 
@@ -89,7 +89,7 @@ def repoint_data_dir(new_dir: Path) -> None:
     """Point every data-path-resolving module at ``new_dir`` (hot reload).
 
     crypto/backup read ``DATA_DIR`` per call; settings/contacts/history cache a
-    path constant — so both the module ``DATA_DIR`` name and the cached constants
+    path constant - so both the module ``DATA_DIR`` name and the cached constants
     are updated here. This is the one place that must know those names."""
     new_dir.mkdir(parents=True, exist_ok=True)
     import backup

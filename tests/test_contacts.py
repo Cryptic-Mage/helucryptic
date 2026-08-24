@@ -48,7 +48,7 @@ def test_upsert_contact_key_change_drops_verification():
     contacts.set_verified("alice", True)
     assert contacts.get_contact("alice").verified is True
 
-    # Update with new x25519 key — should set verified to False
+    # Update with new x25519 key - should set verified to False
     contacts.upsert_contact("alice", x25519_pub="bmV3X2tleV8xMjM0NTY3OA==", ed25519_pub="b2xkX2VkX2tleV8xMjM0NQ==")
     assert contacts.get_contact("alice").verified is False
 

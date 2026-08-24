@@ -4,7 +4,7 @@ A backup bundles the profile files (keys, contacts, settings, optionally the
 history DB), encrypts them under a passphrase-derived key (scrypt → PASETO
 v4.local / XChaCha20-Poly1305), and writes a small JSON container. Restore
 validates and decrypts BEFORE touching any live file, and backs up each
-existing file to `.bak` before overwriting — a failed restore leaves the
+existing file to `.bak` before overwriting - a failed restore leaves the
 current profile intact.
 """
 import base64

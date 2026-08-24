@@ -1,0 +1,53 @@
+/# Build artifacts
+build/
+dist/
+
+# Python bytecode
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test / lint cache
+.pytest_cache/
+tests/.pytest_cache/
+.pytest-tmp-*/
+.ruff_cache/
+
+# SonarQube work directory
+.scannerwork/
+
+# Planning / design docs (not source code)
+docs/
+
+# Media and binary assets
+tracks/
+assets/
+*.mp3
+*.svg
+*.png
+*.ico
+*.exe
+*.zip
+*.pkg
+*.pyz
+*.html
+
+# Cloudflare build cache
+cloudflare/.wrangler/
+
+# Secrets
+.env
+
+# Scratch / note files
+diff_webrtc.txt
+steps.txt
+
+# Documentation
+README.md
+GUIDE.md
+cloudflare/README.md
+
+# Claude Code internal config
+.claude/

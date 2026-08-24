@@ -5,7 +5,7 @@
 #        client_claude.py
 #
 # ---------------------------------------------------------------------------
-# client_claude.py — a 100%-functionally-identical reskin of client.py with a
+# client_claude.py - a 100%-functionally-identical reskin of client.py with a
 # modern "neon cyber / crypto" UI and rich-but-tasteful motion. Every engine
 # call, signaling path, room/call/file flow and dialog from the original is
 # preserved byte-for-byte in behaviour; only the presentation layer (main
@@ -121,7 +121,7 @@ from constants.client_constants import (
 
 
 def _alpha(alpha2: str, color: str) -> str:
-    """8-digit hex with alpha FIRST (#AARRGGBB) — Flet/Flutter's format.
+    """8-digit hex with alpha FIRST (#AARRGGBB) - Flet/Flutter's format.
     Suffixing alpha (color+"aa") silently shifts the hue (cyan turns green)."""
     return f"#{alpha2}{color.lstrip('#')}"
 
@@ -254,7 +254,7 @@ class HelucrypticApp:
         # the low-end performance profile.
         self._motion_ok:          bool            = self.settings.performance_profile != "old_pc"
         self._bg_layers:          list            = []
-        # Cancellable animation task handles — prevents stacked coroutines on
+        # Cancellable animation task handles - prevents stacked coroutines on
         # rapid successive triggers (e.g. fast status changes, rapid sends).
         self._status_label_task:  asyncio.Task | None = None
         self._flash_task:         asyncio.Task | None = None
@@ -347,7 +347,7 @@ class HelucrypticApp:
                 port = await asyncio.to_thread(request_mapping_over_socket, candidate)
                 if port is not None:
                     return port
-            # No NAT-PMP response from any gateway — fall back to the manually
+            # No NAT-PMP response from any gateway - fall back to the manually
             # configured port (e.g. a static router forward without NAT-PMP).
             return self.settings.forwarded_port or None
 
@@ -372,7 +372,7 @@ class HelucrypticApp:
                 save_settings(self.settings)
             except Exception:
                 pass
-        # Caveat #2: our reachability tier may have changed — re-announce + re-elect.
+        # Caveat #2: our reachability tier may have changed - re-announce + re-elect.
         if self._room_id and self.ws:
             self._fire_and_forget(self._on_topology_changed())
 
@@ -390,7 +390,7 @@ class HelucrypticApp:
         """Animate a freshly-mounted control from (faded, slightly small) to
         its resting state. sleep(0) yields once so the control is rendered
         before the transition fires. The reveal always completes even if the
-        sleep is interrupted — content is never left invisible."""
+        sleep is interrupted - content is never left invisible."""
         async def run():
             try:
                 await asyncio.sleep(delay)
@@ -406,7 +406,7 @@ class HelucrypticApp:
 
     def _build_background(self) -> ft.Control:
         """Static backdrop (rebrand): a single, calm vertical gradient from the
-        backdrop colour to the panel surface — no animation, no neon blooms, and
+        backdrop colour to the panel surface - no animation, no neon blooms, and
         no perf-gated fork. Everyone gets the same consistent surface."""
         self._bg_layers = []   # disables the (now no-op) drift loop
         return ft.Container(
@@ -559,7 +559,7 @@ class HelucrypticApp:
                                         weight=ft.FontWeight.W_700,
                                         animate_opacity=_anim(D.FAST))
 
-        # Room controls — flex to share the card width instead of fixed widths
+        # Room controls - flex to share the card width instead of fixed widths
         # (fixed 100+100 overflowed the room box).
         self.btn_create_room  = ft.FilledButton(
             "Create", icon=ft.Icons.ADD,
@@ -716,7 +716,7 @@ class HelucrypticApp:
                                           icon_size=18, disabled=True)
         # Accent send button: a quiet filled circle that dims while sending is
         # disabled (toggled alongside btn_send.disabled). Deliberately restrained
-        # — one solid accent, soft shadow, no gradient.
+        # - one solid accent, soft shadow, no gradient.
         self._send_wrap = ft.Container(
             content=self.btn_send, width=42, height=42, border_radius=R.PILL,
             bgcolor=C.CYAN,
@@ -753,7 +753,7 @@ class HelucrypticApp:
             ),
         )
 
-        # Chat header bar — shows the selected conversation as live context
+        # Chat header bar - shows the selected conversation as live context
         # (avatar + name + presence), like the part you liked in client_gem.
         self.chat_header_avatar = ft.Container(
             width=38, height=38, border_radius=R.PILL, visible=False,
@@ -779,7 +779,7 @@ class HelucrypticApp:
                            spacing=6, tight=True),
                 ], spacing=1, tight=True),
                 ft.Container(expand=True),
-                # Persistent call-status pill — always visible while a call or
+                # Persistent call-status pill - always visible while a call or
                 # screen share is active, so you know a session is ongoing.
                 self._make_call_status_pill(),
                 self.btn_diag,
@@ -814,7 +814,7 @@ class HelucrypticApp:
             ], spacing=8),
         )
 
-        # Prominent incoming-call banner — overlays the top of the chat area so
+        # Prominent incoming-call banner - overlays the top of the chat area so
         # a call is visible no matter which conversation is open. Filled in by
         # _show_call_banner().
         self.call_banner = ft.Container(
@@ -879,7 +879,7 @@ class HelucrypticApp:
             animate_scale=_anim(280, _EASE_IO),
         )
 
-        # Full-screen screen-share viewer — overlays everything when a tile is
+        # Full-screen screen-share viewer - overlays everything when a tile is
         # maximized; a switcher row flips between multiple shared streams.
         self._fs_img = ft.Image(src="", fit=ft.BoxFit.CONTAIN, expand=True,
                                 gapless_playback=True)
@@ -1233,7 +1233,7 @@ class HelucrypticApp:
                          animate=_anim(D.MED, _EASE_IO))
             for _ in range(20)
         ]
-        self.insight_rtt  = ft.Text("— ms", size=20, color=C.TEXT,
+        self.insight_rtt  = ft.Text("- ms", size=20, color=C.TEXT,
                                     weight=ft.FontWeight.W_800, font_family=mono)
         self.insight_live = ft.Text("idle", size=10, color=C.MUTED, font_family=mono)
         latency = self._insight_card([
@@ -1325,7 +1325,7 @@ class HelucrypticApp:
                     self.insight_live.color = C.GREEN
                 else:
                     h = 6
-                    self.insight_rtt.value  = "— ms"
+                    self.insight_rtt.value  = "- ms"
                     self.insight_live.value = "idle"
                     self.insight_live.color = C.MUTED
                 heights = [b.height for b in self._spark_bars[1:]] + [h]
@@ -1511,7 +1511,7 @@ class HelucrypticApp:
                 self._refresh_participant_list()
                 if was_hub:
                     self.engine.forget_peer_capability(peer)
-                    self._log(f"🛰 Relay hub {peer} dropped — re-electing a new hub…")
+                    self._log(f"🛰 Relay hub {peer} dropped - re-electing a new hub…")
                 # Reconcile topology for ANY failed peer (not just the hub) so a
                 # broken spoke can be rebuilt without waiting for the hub to change.
                 if self.ws:
@@ -1522,7 +1522,7 @@ class HelucrypticApp:
             # Honest aggregate status across the WHOLE room (not last-wins).
             self._apply_aggregate_status(self._room_peers, group=True)
         else:
-            # 1-to-1 peer state changed — remember it for the health readout,
+            # 1-to-1 peer state changed - remember it for the health readout,
             # flip its presence dot/wifi promptly and refresh the header if
             # it's the open conversation.
             self._peer_conn_state[peer] = state
@@ -1653,7 +1653,7 @@ class HelucrypticApp:
         self.btn_screen.icon_color = C.SUBTLE
         self.btn_screen.tooltip    = SHARE_SCREEN_TXT
         self._set_mute_banner(False)
-        # Remote hung up — clear ALL incoming screen shares and exit full
+        # Remote hung up - clear ALL incoming screen shares and exit full
         # screen / PiP so nothing stale remains after the call ends.
         self._clear_all_video()
         self._update_call_status(False)
@@ -1673,7 +1673,7 @@ class HelucrypticApp:
         self._fire_and_forget(self._update_video_tile(sender, img))
 
     def _on_engine_key_change(self, peer: str) -> None:
-        # The contact's identity key changed after we had verified it —
+        # The contact's identity key changed after we had verified it -
         # surface a loud warning. The contact is already auto-unverified.
         # A changed key also revokes any temporary "allow for this session".
         self._session_allowed.discard(peer)
@@ -1683,14 +1683,14 @@ class HelucrypticApp:
         c = get_contact(peer)
         if c and c.nickname:
             display = c.nickname
-        self._log(f"⚠ SECURITY: {display}'s identity key changed — verification removed. "
+        self._log(f"⚠ SECURITY: {display}'s identity key changed - verification removed. "
                   f"Re-verify their fingerprint out-of-band before trusting.")
         dlg = ft.AlertDialog(
             title=ft.Text("⚠ Contact key changed"),
             content=ft.Text(
                 f"{display}'s encryption key is different from the one you "
                 f"previously verified.\n\nThis can happen if they reinstalled or "
-                f"regenerated keys — but it can also indicate an impersonation "
+                f"regenerated keys - but it can also indicate an impersonation "
                 f"or man-in-the-middle attempt.\n\nVerification has been removed. "
                 f"Confirm their new fingerprint out-of-band before trusting it."
             ),
@@ -1728,7 +1728,7 @@ class HelucrypticApp:
         for m in messages:
             sender  = (m.get("sender") or peer)
             content = m.get("content") or ""
-            if not content or sender == me:        # I authored it / empty — skip
+            if not content or sender == me:        # I authored it / empty - skip
                 continue
             if (sender, content) in seen:          # cross-peer dedup by (sender, content)
                 continue
@@ -1797,7 +1797,7 @@ class HelucrypticApp:
                 pass
         try:
             # Explicit keepalive: ping every 20 s, declare the link dead after
-            # 15 s of silence — detects half-open connections (sleep/VPN drop)
+            # 15 s of silence - detects half-open connections (sleep/VPN drop)
             # quickly so the auto-reconnect loop can kick in.
             self.ws = await websockets.connect(
                 url, ping_interval=20, ping_timeout=15,
@@ -1849,13 +1849,13 @@ class HelucrypticApp:
                     print(f"[signaling] Error handling message {t} from {sender}: {inner_ex}", flush=True)
         except Exception as ex:
             if self.ws is not ws:
-                # A newer connection already took over — this is the OLD socket
+                # A newer connection already took over - this is the OLD socket
                 # closing; don't tear down the fresh session's state.
                 return
             self._cleanup_signaling_disconnect(ex)
             _dropped_unexpectedly = True
         finally:
-            # Auto-reconnect after an unexpected drop — for rooms AND 1-to-1
+            # Auto-reconnect after an unexpected drop - for rooms AND 1-to-1
             # sessions (previously only rooms recovered; a 1-to-1 chat went
             # silently dead until the user clicked Connect again).
             if (_dropped_unexpectedly and self.ws is ws
@@ -1897,7 +1897,7 @@ class HelucrypticApp:
                     except Exception:
                         ok = self.ws is not None
                     if ok:
-                        return  # success — new listener takes over
+                        return  # success - new listener takes over
                     delay = min(delay * 2, 30.0)
                 except Exception as ex:
                     self._toast(f"Reconnect failed ({type(ex).__name__}), retrying…", "warn")
@@ -1934,7 +1934,7 @@ class HelucrypticApp:
         await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
         await self._apply_active_call_to_hub()
         self._refresh_hub_indicator()
-        # Server confirmed we're in the room — restore the toolbar
+        # Server confirmed we're in the room - restore the toolbar
         # immediately so users can interact even before peers connect.
         self.msg_input.disabled  = False
         self.btn_send.disabled   = False
@@ -1960,7 +1960,7 @@ class HelucrypticApp:
                 self._fire_and_forget(self.engine.remove_peer(username))
             if username in self._pending_invites:
                 self._pending_invites.discard(username)
-                self._toast(f"Could not invite {username} — they are offline", "warn")
+                self._toast(f"Could not invite {username} - they are offline", "warn")
             else:
                 self._toast(msg_text, "warn")
         else:
@@ -1984,7 +1984,7 @@ class HelucrypticApp:
             self._refresh_participant_list()
         except Exception:
             pass
-        # Grey out the toolbar — re-enabled when room_state confirms we're
+        # Grey out the toolbar - re-enabled when room_state confirms we're
         # back in the room, or when a peer reaches "connected".
         try:
             self.msg_input.disabled  = True
@@ -2025,7 +2025,7 @@ class HelucrypticApp:
             await self._handle_sig_hub_capability(sender, data, ws_send)
         elif t == "call_active":
             self._room_call_active = True
-            self._log("📞 A call is active in the room — click 'Join call' to join.")
+            self._log("📞 A call is active in the room - click 'Join call' to join.")
             self._refresh_call_controls()
         elif t == "room_invite":
             room_id = data.get("room_id", "")
@@ -2125,7 +2125,7 @@ class HelucrypticApp:
         print(f"[create_room] generated {code} (secure={secure}), joining…", flush=True)
         await self._join_room(code, is_creator=True)
         if secure:
-            self._log("Invite-only room created — share the invite link to let others in.")
+            self._log("Invite-only room created - share the invite link to let others in.")
             self._show_copy_invite()
         else:
             self._show_invite_contacts()
@@ -2185,7 +2185,7 @@ class HelucrypticApp:
         self.btn_invite_link.visible  = True
         self._update_chat_header_room(code)   # show the room as the active context
         self._select_room()                    # switch home → conversation view
-        # Enable toolbar immediately — messages are buffered until peers arrive.
+        # Enable toolbar immediately - messages are buffered until peers arrive.
         self.msg_input.disabled  = False
         self.btn_send.disabled   = False
         self.btn_call.disabled   = False
@@ -2196,7 +2196,7 @@ class HelucrypticApp:
         await self._connect_signaling(None, room=code)
 
     # ------------------------------------------------------------------
-    # Invite links (HELU-INV1) — copy / redeem
+    # Invite links (HELU-INV1) - copy / redeem
     # ------------------------------------------------------------------
 
     def _show_copy_invite(self, e=None) -> None:
@@ -2232,7 +2232,7 @@ class HelucrypticApp:
                         size=12, color=C.SUBTLE),
                 incl_pw,
                 ft.Text("Anyone with this link can reach your signaling server and join the "
-                        "room — share it only over a trusted channel.", size=11, color=C.YELLOW),
+                        "room - share it only over a trusted channel.", size=11, color=C.YELLOW),
                 out,
             ], tight=True, spacing=10, width=400),
             actions=[
@@ -2427,9 +2427,9 @@ class HelucrypticApp:
         else:
             hub = self.engine.current_hub()
             if hub == self.engine.my_username:
-                self.hub_banner.value = "🛰 You are the relay — others' audio/video pass through you"
+                self.hub_banner.value = "🛰 You are the relay - others' audio/video pass through you"
             else:
-                self.hub_banner.value = f"🛰 Relayed by {hub} — media passes through them"
+                self.hub_banner.value = f"🛰 Relayed by {hub} - media passes through them"
             self.hub_banner.visible = True
         try:
             self.page.update()
@@ -2525,7 +2525,7 @@ class HelucrypticApp:
         self.page.update()
 
     def _empty_state(self, icon, title: str, subtitle: str = "") -> ft.Container:
-        """A calm, centered placeholder for an empty list/area — replaces blank
+        """A calm, centered placeholder for an empty list/area - replaces blank
         voids with quiet guidance (icon + title + optional one-liner)."""
         children = [
             ft.Container(
@@ -2561,7 +2561,7 @@ class HelucrypticApp:
         if verified:
             return ft.Icon(ft.Icons.VERIFIED, color=C.GREEN, size=size, tooltip="Verified")
         return ft.Icon(ft.Icons.GPP_MAYBE, color=C.YELLOW, size=size,
-                       tooltip="Not verified — click ··· to view fingerprint")
+                       tooltip="Not verified - click ··· to view fingerprint")
 
     def _avatar(self, display: str, verified: bool, size: int = 34) -> ft.Container:
         return ft.Container(
@@ -2648,7 +2648,7 @@ class HelucrypticApp:
         )
 
         # Two-line card: name (+ verify badge) with a compact time on the
-        # right, and the latest message underneath — the presence dot on the
+        # right, and the latest message underneath - the presence dot on the
         # avatar already tells the online story, so no extra icons needed.
         top_row = ft.Row(
             [name, ft.Container(expand=True),
@@ -2722,7 +2722,7 @@ class HelucrypticApp:
             health = [ft.Text("connecting…", size=10, color=C.YELLOW)]
         elif state in ("disconnected", "failed"):
             health = [ft.Text("reconnecting…", size=10, color=C.YELLOW)]
-        # Membership badge (feature D) — only shown when membership is in play.
+        # Membership badge (feature D) - only shown when membership is in play.
         member_badge = []
         if self.engine.room_creator_pubkey:
             if self.engine.is_member(username):
@@ -2874,7 +2874,7 @@ class HelucrypticApp:
                 self._close_dialog(fp_dlg)
 
             def doesnt_match(ev):
-                # A mismatch means the key you're seeing is NOT your contact's —
+                # A mismatch means the key you're seeing is NOT your contact's -
                 # possible man-in-the-middle, or you compared the wrong code.
                 # Keep them unverified, turn on Verified-Only so nothing is sent
                 # to them unintentionally, and offer to remove them.
@@ -2913,7 +2913,7 @@ class HelucrypticApp:
                 self._show_dialog(warn)
 
             fp_dlg = ft.AlertDialog(
-                title=ft.Text(f"Fingerprint — {c.nickname or username}"),
+                title=ft.Text(f"Fingerprint - {c.nickname or username}"),
                 content=ft.Column([
                     ft.Container(
                         content=ft.Text(fp, font_family="monospace", size=13, color=C.TEXT,
@@ -2926,7 +2926,7 @@ class HelucrypticApp:
                             "exactly.", size=11, color=C.MUTED),
                 ], tight=True, spacing=8),
                 actions=[
-                    ft.FilledButton("Matches — Verify", icon=ft.Icons.VERIFIED,
+                    ft.FilledButton("Matches - Verify", icon=ft.Icons.VERIFIED,
                                     on_click=mark_verified, style=_filled_style(C.GREEN, C.BTN_GREEN)),
                     ft.TextButton("Doesn't match", on_click=doesnt_match,
                                   style=ft.ButtonStyle(color=C.RED)),
@@ -3032,7 +3032,7 @@ class HelucrypticApp:
             if not msgs:
                 hint = self._empty_state(
                     ft.Icons.LOCK_OUTLINE, "No messages yet",
-                    "Say hello — everything here is end-to-end encrypted and peer-to-peer.")
+                    "Say hello - everything here is end-to-end encrypted and peer-to-peer.")
                 self._chat_empty_hint = hint
                 controls = [hint]
         elif controls and self.chat_log.controls and last_day is not None:
@@ -3125,7 +3125,7 @@ class HelucrypticApp:
         if mid and not self._room_id:
             status = "sent" if self.engine.peer_channel_open(self._active_contact) else "queued"
             if status == "queued":
-                self._toast("Contact is offline — message queued, will send on reconnect", "warn")
+                self._toast("Contact is offline - message queued, will send on reconnect", "warn")
         self._append_to_log("sent", text, False, msg_id=mid if status else None, status=status)
         self.msg_input.value = ""
         if self._motion_ok:
@@ -3178,7 +3178,7 @@ class HelucrypticApp:
             return None
         if len(connected) == 1:
             return connected[0]
-        # Multiple peers — present a chooser
+        # Multiple peers - present a chooser
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
 
         def pick(username):
@@ -3319,7 +3319,7 @@ class HelucrypticApp:
         self.btn_screen.icon_color = C.CYAN         # active sharing state
         self.btn_screen.tooltip    = "Stop sharing"
         self._update_call_status(True)
-        self._log("[Screen sharing started] — tip: start a call too if you also want to talk.")
+        self._log("[Screen sharing started] - tip: start a call too if you also want to talk.")
         self.page.update()
 
     async def _toggle_screen(self, e) -> None:
@@ -3329,7 +3329,7 @@ class HelucrypticApp:
             await self._start_screen(e)
 
     async def _stop_screen(self) -> None:
-        # Stop just the screen track — voice (if any) keeps flowing.
+        # Stop just the screen track - voice (if any) keeps flowing.
         if self._room_id:
             for peer in self.engine.pcs:
                 await self.engine.stop_screen_share(peer)
@@ -3367,7 +3367,7 @@ class HelucrypticApp:
         if self._in_screen_share:
             await self._stop_screen()
         self.engine.hangup()
-        # Tear down any INCOMING screen shares too — a hung-up call must never
+        # Tear down any INCOMING screen shares too - a hung-up call must never
         # leave a peer's screen visible (tile / full screen / PiP).
         self._clear_all_video()
         sounds.stop_loop()
@@ -3398,7 +3398,7 @@ class HelucrypticApp:
         tile control. Offloading avoids blocking the async event loop."""
         try:
             quality = self._jpeg_quality
-            # Fullscreen/PiP renders the raw frame at full resolution — JPEG 55
+            # Fullscreen/PiP renders the raw frame at full resolution - JPEG 55
             # creates very visible artifacts on text and UI edges at that size.
             # Bump to at least 85 whenever the overlay is active for this sender.
             is_enlarged = (sender == self._fullscreen_sender and
@@ -3486,7 +3486,7 @@ class HelucrypticApp:
         if not self._tile_row.controls:
             self._tile_row.visible = False
         if self._fullscreen_sender == sender:
-            # the stream we were viewing ended — switch to another or close
+            # the stream we were viewing ended - switch to another or close
             others = [s for s in self._video_tiles if s != sender]
             if others:
                 self._open_fullscreen(others[0])
@@ -3501,7 +3501,7 @@ class HelucrypticApp:
     # ------------------------------------------------------------------
 
     def _notify_sharing(self, sender: str) -> None:
-        self._log(f"🖥 {sender} is sharing their screen — click their tile to view it full screen.")
+        self._log(f"🖥 {sender} is sharing their screen - click their tile to view it full screen.")
         try:
             sounds.play("message")
         except Exception:
@@ -3555,7 +3555,7 @@ class HelucrypticApp:
         dlg = ft.AlertDialog(
             title=ft.Text("Call volume"),
             content=ft.Column([
-                ft.Text("Adjust remote participant volume — applies instantly.",
+                ft.Text("Adjust remote participant volume - applies instantly.",
                         size=12, color=C.SUBTLE),
                 ft.Row([ft.Icon(ft.Icons.VOLUME_MUTE, color=C.MUTED, size=18),
                         slider,
@@ -3605,7 +3605,7 @@ class HelucrypticApp:
         self.page.update()
 
     def _rebuild_share_switcher(self) -> None:
-        # One chip per active incoming stream — tap to switch which is maximized.
+        # One chip per active incoming stream - tap to switch which is maximized.
         self._fs_switcher.controls = [
             ft.FilledButton(
                 s, on_click=lambda e, u=s: self._open_fullscreen(u),
@@ -3628,11 +3628,11 @@ class HelucrypticApp:
         if not uname:
             # A bare _log() here is invisible when this is triggered from the
             # Settings dialog (the chat log is painted behind it), so surface a
-            # real dialog instead — the username is part of the identity code.
+            # real dialog instead - the username is part of the identity code.
             warn = ft.AlertDialog(
                 title=ft.Text("Set a username first"),
                 content=ft.Text("Enter your username in the sidebar before showing "
-                                "your identity code — it's part of the code you share."),
+                                "your identity code - it's part of the code you share."),
                 actions=[ft.TextButton("OK", on_click=lambda ev: self._close_dialog(warn))],
             )
             self._show_dialog(warn)
@@ -3641,7 +3641,7 @@ class HelucrypticApp:
             uname, self.keys["x25519_public"], self.keys["ed25519_public"])
         controls = []
         try:
-            # Flet 0.85 dropped Image.src_base64 — base64 must go through src as
+            # Flet 0.85 dropped Image.src_base64 - base64 must go through src as
             # a data URI.
             controls.append(ft.Image(
                 src="data:image/png;base64," + identity.qr_png_base64(code),
@@ -3666,7 +3666,7 @@ class HelucrypticApp:
             ),
             ft.Text("Your contact long-presses you → View Fingerprint and checks it "
                     "matches this, character for character, before clicking "
-                    "Matches — Verify.", size=11, color=C.MUTED),
+                    "Matches - Verify.", size=11, color=C.MUTED),
         ]
         dlg = ft.AlertDialog(
             title=ft.Text("My identity"),
@@ -3914,7 +3914,7 @@ class HelucrypticApp:
         d = self.engine.get_diagnostics()
         ws_status = "connected" if (self.ws and self.ws.open) else "disconnected"
         lines = [
-            "helucryptic — client_claude",
+            "helucryptic - client_claude",
             f"Data dir   : {paths.DATA_DIR}"
             + ("  (portable)" if paths.is_portable() else ""),
             f"Signaling  : {ws_status}",
@@ -3982,7 +3982,7 @@ class HelucrypticApp:
                     padding=ft.Padding.all(10),
                     bgcolor=C.ELEV, border_radius=R.MD, border=ft.Border.all(1, C.BORDER),
                 ),
-                ft.Text("Live log (newest last) — captured for .exe builds:",
+                ft.Text("Live log (newest last) - captured for .exe builds:",
                         size=11, color=C.MUTED),
                 ft.Container(
                     expand=True, padding=ft.Padding.all(10),
@@ -3999,7 +3999,7 @@ class HelucrypticApp:
         self._fire_and_forget(refresh_loop())
 
     def _purge_ephemeral(self) -> None:
-        """Auto-destruct (feature H): wipe an ephemeral room's in-RAM traces —
+        """Auto-destruct (feature H): wipe an ephemeral room's in-RAM traces -
         messages, video tiles, session/room keys, and room references in the
         captured-log buffer. Disk was never written for these rooms."""
         if not self._ephemeral:
@@ -4020,7 +4020,7 @@ class HelucrypticApp:
             LOG_BUFFER.clear()
             LOG_BUFFER.extend(kept)
         self._ephemeral = False
-        self._log("🔥 Ephemeral room purged from memory — no trace on disk.")
+        self._log("🔥 Ephemeral room purged from memory - no trace on disk.")
         try:
             self.page.update()
         except Exception:
@@ -4029,7 +4029,7 @@ class HelucrypticApp:
     async def _switch_profile(self, name: str) -> None:
         """Hot-swap to another profile: stop this session, re-point the data dir
         to the profile's sandbox, and rebuild the app against its keys/contacts/
-        history — without restarting the process."""
+        history - without restarting the process."""
         self._log(f"Switching to profile '{name}'…")
         self._purge_ephemeral()   # don't carry an ephemeral room across profiles
         # Stop this session's background loops + live connections.
@@ -4078,7 +4078,7 @@ class HelucrypticApp:
         async def _handle_disconnect(e):
             await new_app.shutdown()
         self.page.on_disconnect = _handle_disconnect
-        print(f"[profile] switched to '{name}' — app rebuilt in-process", flush=True)
+        print(f"[profile] switched to '{name}' - app rebuilt in-process", flush=True)
 
     def _settings_on_retention_change(self, ev) -> None:
         self._settings_custom_days.visible = self._settings_retention_dd.value == "custom"
@@ -4121,7 +4121,7 @@ class HelucrypticApp:
             self._settings_pf_result.value = f"Got port {port} on {ip}"
             self._settings_pf_result.color = C.GREEN
         else:
-            self._settings_pf_result.value = "No NAT-PMP mapping — enter the port manually"
+            self._settings_pf_result.value = "No NAT-PMP mapping - enter the port manually"
             self._settings_pf_result.color = C.RED
         self.page.update()
 
@@ -4154,7 +4154,7 @@ class HelucrypticApp:
     async def _settings_export_keys(self, ev) -> None:
         # Export the PLAINTEXT identity JSON (DPAPI-unwrapped): the on-disk
         # keys.json is machine-bound on Windows, so exporting it raw produced a
-        # file that could never be imported anywhere — including after an OS
+        # file that could never be imported anywhere - including after an OS
         # reinstall on the same PC.
         from crypto import export_keys_plaintext
         try:
@@ -4167,7 +4167,7 @@ class HelucrypticApp:
         self.page.update()
         dest = await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
         if dest:
-            self._log("[Keys] Keypair exported as plaintext JSON — store it somewhere safe "
+            self._log("[Keys] Keypair exported as plaintext JSON - store it somewhere safe "
                       "(anyone with this file owns your identity).")
 
     async def _settings_import_keys(self, ev) -> None:
@@ -4355,7 +4355,7 @@ class HelucrypticApp:
         self._settings_prof_err = ft.Text("", color=C.RED, size=11, visible=False)
 
         # Two-pane settings: category nav on the left, ONE section at a time on
-        # the right — no more scrolling through nine stacked cards to find the
+        # the right - no more scrolling through nine stacked cards to find the
         # TURN fields. Same control objects, so _settings_save is untouched.
         pages = [
             ("Profiles", ft.Icons.SWITCH_ACCOUNT, C.VIOLET,
@@ -4379,7 +4379,7 @@ class HelucrypticApp:
             ]),
             ("Connection", ft.Icons.LANGUAGE, C.CYAN,
              "Signaling server (handshake only)", [
-                ft.Text("Used only to find your peer — messages never pass through it.",
+                ft.Text("Used only to find your peer - messages never pass through it.",
                         size=11, color=C.MUTED),
                 self._settings_url_field,
             ]),
@@ -4389,13 +4389,13 @@ class HelucrypticApp:
             ]),
             ("TURN relay", ft.Icons.ROUTER, C.CYAN,
              "Fallback for strict NATs", [
-                ft.Text("Optional — fixes strict-NAT connections.", size=11, color=C.MUTED),
+                ft.Text("Optional - fixes strict-NAT connections.", size=11, color=C.MUTED),
                 self._settings_turn_url_f, self._settings_turn_user_f, self._settings_turn_pass_f,
                 ft.Row([btn_test_turn, self._settings_turn_result]),
             ]),
             ("Port forwarding", ft.Icons.SETTINGS_ETHERNET, C.CYAN,
              "Direct connect via forwarded port", [
-                ft.Text("Advanced — direct connect via a forwarded port.", size=11, color=C.MUTED),
+                ft.Text("Advanced - direct connect via a forwarded port.", size=11, color=C.MUTED),
                 self._settings_pf_enabled_cb, self._settings_pf_port_f,
                 ft.Row([btn_pf_detect, btn_pf_test]),
                 self._settings_pf_result, pf_caption,
@@ -4406,7 +4406,7 @@ class HelucrypticApp:
             ]),
             ("Identity keys", ft.Icons.KEY, C.GREEN,
              "Export, import or regenerate", [
-                ft.Text("Your keys ARE your identity — export them before reinstalling.",
+                ft.Text("Your keys ARE your identity - export them before reinstalling.",
                         size=11, color=C.MUTED),
                 ft.Row([
                     ft.FilledButton("Export Keys", on_click=self._settings_export_keys, style=_filled_style(C.ELEV2, C.TEXT)),
@@ -4698,7 +4698,7 @@ class HelucrypticApp:
         # peers doesn't turn into a wall of accent colour.
         name_color   = C.CYAN if is_sent else C.SUBTLE
         fill         = None if is_sent else C.ELEV
-        # Sent bubbles: a barely-there accent wash (single hue, low alpha) —
+        # Sent bubbles: a barely-there accent wash (single hue, low alpha) -
         # enough to read direction at a glance without turning the chat neon.
         sent_grad    = ft.LinearGradient(
             begin=ft.Alignment.TOP_LEFT, end=ft.Alignment.BOTTOM_RIGHT,
@@ -4765,7 +4765,7 @@ class HelucrypticApp:
 
     def _log(self, text: str) -> None:
         # Clean, console-style system line: a centered hairline divider with the
-        # message in muted monospace — no italics, reads as intentional system
+        # message in muted monospace - no italics, reads as intentional system
         # output rather than a stray chat bubble.
         line = ft.Container(height=1, bgcolor=C.BORDER, expand=True)
         chip = ft.Row(
@@ -4837,7 +4837,7 @@ def _to_ws_url(base: str) -> str:
     elif base.startswith(SCHEME_HTTP):
         base = SCHEME_WS + base[len(SCHEME_HTTP):]
     elif not base.startswith((SCHEME_WS, SCHEME_WSS)):
-        # bare host (e.g. "example.com" or "127.0.0.1:8000") — default to ws://
+        # bare host (e.g. "example.com" or "127.0.0.1:8000") - default to ws://
         base = SCHEME_WS + base
     return base
 

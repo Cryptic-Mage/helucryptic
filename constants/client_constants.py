@@ -69,7 +69,7 @@ def _redact_url(u: str) -> str:
 
 class C:
     """Legacy palette names, now sourced from the unified design tokens
-    (theme.tokens.PALETTE) — the "Refined dark console" rebrand. Attribute
+    (theme.tokens.PALETTE) - the "Refined dark console" rebrand. Attribute
     names are preserved so every existing call site re-skins unchanged.
     """
     BG       = _P.bg               # page backdrop (static)
@@ -96,24 +96,24 @@ class C:
     WHITE    = "#ffffff"
     BLACK_AA = "#000000aa"
 
-    # Button foreground tokens — on-colour for each filled surface.
+    # Button foreground tokens - on-colour for each filled surface.
     BTN_CYAN  = _P.on_accent
     BTN_GREEN = _P.on_success
     BTN_RED   = _P.on_danger
 
 
 class R:
-    """Corner radii — tightened for a precise, console-grade feel (from
+    """Corner radii - tightened for a precise, console-grade feel (from
     theme.tokens.RADIUS). Names preserved for drop-in compatibility."""
     SM = _t_RADIUS["sm"]    # 6
     MD = _t_RADIUS["md"]    # 8
     LG = _t_RADIUS["lg"]    # 12
-    XL = _t_RADIUS["lg"]    # collapsed to lg — no oversized corners
+    XL = _t_RADIUS["lg"]    # collapsed to lg - no oversized corners
     PILL = _t_RADIUS["pill"]
 
 
 class D:
-    """Animation durations (ms) — functional, short (from theme.tokens.MOTION)."""
+    """Animation durations (ms) - functional, short (from theme.tokens.MOTION)."""
     FAST  = _t_MOTION["fast"]   # 120
     PULSE = _t_MOTION["base"]   # 180
     MED   = _t_MOTION["base"]   # 180
@@ -131,7 +131,7 @@ def _anim(ms: int, curve=_EASE) -> ft.Animation:
 
 def _glow(color: str = "", blur: int = 18, spread: float = 1.0) -> ft.BoxShadow:
     """Rebrand: depth now comes from a neutral elevation shadow, not coloured
-    neon halos. Signature is kept for drop-in compatibility — the ``color`` and
+    neon halos. Signature is kept for drop-in compatibility - the ``color`` and
     ``spread`` arguments are intentionally ignored so every existing call site
     works unchanged while the look becomes calm and console-grade."""
     _ = (color, spread)

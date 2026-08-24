@@ -1,10 +1,10 @@
 # helucryptic signaling on Cloudflare Workers
 
 Serverless, always-on signaling server (port of `server.py`) running on a
-Cloudflare Worker + Durable Object. WebSockets work out of the box — no VPS, no
+Cloudflare Worker + Durable Object. WebSockets work out of the box - no VPS, no
 Passenger/WSGI, free tier.
 
-The desktop client needs **no changes** — you just point it at the deployed
+The desktop client needs **no changes** - you just point it at the deployed
 `workers.dev` URL.
 
 ## Deploy (you run these)
@@ -25,7 +25,7 @@ https://helucryptic-signaling.<your-subdomain>.workers.dev
 ## Point the app at it
 
 In the helucryptic desktop app's startup screen, choose **Custom server** and
-enter that URL (https or wss both work — the client converts to `wss://`):
+enter that URL (https or wss both work - the client converts to `wss://`):
 
 ```
 https://helucryptic-signaling.<your-subdomain>.workers.dev

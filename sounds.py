@@ -1,6 +1,6 @@
 """Notification / call sound cues.
 
-Backed by `av` (decodes the mp3 cues once) + `sounddevice` (plays/mixes them) —
+Backed by `av` (decodes the mp3 cues once) + `sounddevice` (plays/mixes them) -
 both already required for WebRTC media, so this adds no dependency and keeps the
 packaged binary small (no pygame/SDL).
 

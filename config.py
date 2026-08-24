@@ -14,7 +14,7 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-except Exception:  # python-dotenv missing — env vars still work, just no .env file
+except Exception:  # python-dotenv missing - env vars still work, just no .env file
     def load_dotenv(*_a, **_k):  # type: ignore
         return False
 
@@ -60,7 +60,7 @@ DEFAULT_SIGNALING_URL = os.getenv(
 )
 
 # Shared access token for the official server. Empty string means "no password
-# configured" — the client sends nothing and the server (if it also has no
+# configured" - the client sends nothing and the server (if it also has no
 # password configured) allows the connection. Set this in `.env`.
 SERVER_PASSWORD = os.getenv("HELUCRYPTIC_SERVER_PASSWORD", "")
 

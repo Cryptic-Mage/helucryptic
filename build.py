@@ -13,7 +13,7 @@ unrelated heavyweight packages (torch, PyQt5, transformers, …).
 
 NOTE: bundling `.env` embeds whatever secrets it contains into the distributed
 binary. The server password is only a *real* gate because the signaling server
-validates it (see server.py) — never rely on the bundled copy being secret.
+validates it (see server.py) - never rely on the bundled copy being secret.
 """
 import os
 import subprocess
@@ -105,7 +105,7 @@ def main(argv: list[str]) -> int:
 
     url = os.getenv("HELUCRYPTIC_SIGNALING_URL")
     if not env_file.exists():
-        print("[WARN] No .env found — building with built-in defaults. "
+        print("[WARN] No .env found - building with built-in defaults. "
               "Copy .env.example to .env to customise.")
     else:
         print(f"[INFO] Building helucryptic (signaling: {url or 'default'})")

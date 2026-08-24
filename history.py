@@ -150,7 +150,7 @@ def read_room_messages(
 # ---------------------------------------------------------------------------
 
 def last_room_message_ts(room_id: str) -> str | None:
-    """The newest stored timestamp for a room, or None — our 'since' watermark."""
+    """The newest stored timestamp for a room, or None - our 'since' watermark."""
     with _get_conn() as conn:
         row = conn.execute(
             "SELECT MAX(timestamp) AS ts FROM messages WHERE room_id = ?", (room_id,)
@@ -210,7 +210,7 @@ def read_room_message_keys(
 ) -> set:
     """A dedup set of (sender, content) for a room. Keyed on decrypted content
     (not timestamp) because the same logical message has different receive-local
-    timestamps on each peer — content+sender is its stable cross-peer identity."""
+    timestamps on each peer - content+sender is its stable cross-peer identity."""
     with _get_conn() as conn:
         rows = conn.execute(
             "SELECT content, sender FROM messages WHERE room_id = ? AND msg_type = 'chat' "

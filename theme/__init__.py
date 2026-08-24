@@ -1,10 +1,10 @@
-"""Helucryptic design system — "Refined dark console".
+"""Helucryptic design system - "Refined dark console".
 
 Two layers:
-  * ``theme.tokens``  — framework-agnostic design tokens (colours, spacing,
+  * ``theme.tokens``  - framework-agnostic design tokens (colours, spacing,
     radii, elevation, type scale, motion). No Flet dependency; fully testable.
-  * ``theme.contrast``— WCAG luminance/contrast utilities.
-  * ``theme.flet_theme`` — Flet adapter (imported lazily; needs Flet installed).
+  * ``theme.contrast``- WCAG luminance/contrast utilities.
+  * ``theme.flet_theme`` - Flet adapter (imported lazily; needs Flet installed).
 
 Import tokens directly:  ``from theme import tokens``  or  ``from theme import PALETTE``.
 The Flet adapter is intentionally NOT imported here so the token layer stays

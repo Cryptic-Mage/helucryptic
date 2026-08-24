@@ -3,7 +3,7 @@
 By default data lives in the per-user home dir (`~/.helucryptic`). If a
 `portable.flag` file sits next to the executable (frozen build) or the project
 root (running from source), data instead lives in a local `data/` folder beside
-it — for USB/offline use. Existing non-portable data is never moved automatically.
+it - for USB/offline use. Existing non-portable data is never moved automatically.
 """
 import os
 import sys
@@ -21,7 +21,7 @@ def _base_dir() -> Path:
 def _root_dir(base: Path | None = None) -> Path:
     """The data root BEFORE any profile selection (override / portable / home).
 
-    Explicit override wins — lets you run several clients (each its own identity)
+    Explicit override wins - lets you run several clients (each its own identity)
     on one machine for testing:
         $env:HELUCRYPTIC_DATA_DIR = "C:\\hc\\rest"; python client.py
     Without distinct data dirs the instances share one keys.json (one identity),
@@ -37,7 +37,7 @@ def _root_dir(base: Path | None = None) -> Path:
 
 
 def resolve_data_dir(base: Path | None = None) -> Path:
-    # Honor an active profile (feature G — multi-profile compartmentalization):
+    # Honor an active profile (feature G - multi-profile compartmentalization):
     # if profiles/.active names a profile, data lives in that sandbox. No pointer
     # → the root itself (fully backward compatible).
     root = _root_dir(base)
@@ -57,7 +57,7 @@ def is_portable(base: Path | None = None) -> bool:
     return (base / _PORTABLE_FLAG).exists()
 
 
-# Resolved once at import — portable status doesn't change during a run.
+# Resolved once at import - portable status doesn't change during a run.
 DATA_DIR = resolve_data_dir()
 
 
@@ -104,7 +104,7 @@ def harden_dir(path: Path) -> None:
 
     On the user profile this is usually already the case, but a portable
     ``data/`` folder beside the executable may inherit broader permissions.
-    Failures are swallowed — this is defence-in-depth, not a hard requirement.
+    Failures are swallowed - this is defence-in-depth, not a hard requirement.
     """
     if sys.platform != "win32":
         return

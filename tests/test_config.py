@@ -1,4 +1,4 @@
-"""Tests for config.py — environment variable parsing and defaults."""
+"""Tests for config.py - environment variable parsing and defaults."""
 
 import config
 

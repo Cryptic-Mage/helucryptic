@@ -27,7 +27,7 @@ desktop.ini
 
 # Ignore the whole docs/ tree EXCEPT the checked-in feature spec.
 # NOTE: the exception must come AFTER the ignore, and the ignore must use
-# docs/* (not docs/) — a file cannot be re-included once its parent directory
+# docs/* (not docs/) - a file cannot be re-included once its parent directory
 # is itself excluded.
 docs/*
 !docs/FEATURE_SPEC.md

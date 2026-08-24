@@ -223,5 +223,5 @@ def test_motion_durations_are_functional_and_short():
     for key in ("fast", "base", "slow"):
         assert key in tokens.MOTION
     assert tokens.MOTION["fast"] < tokens.MOTION["base"] < tokens.MOTION["slow"]
-    # Functional motion stays snappy — nothing ambient/long.
+    # Functional motion stays snappy - nothing ambient/long.
     assert tokens.MOTION["slow"] <= 300

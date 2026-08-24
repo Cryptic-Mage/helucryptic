@@ -98,7 +98,7 @@ def _save_keys(keys: dict) -> None:
 def export_keys_plaintext(path=None) -> bytes:
     """Return the identity keys as plaintext JSON bytes (DPAPI-unwrapped).
 
-    Used by the backup system so a backup stays portable across machines — the
+    Used by the backup system so a backup stays portable across machines - the
     backup is itself passphrase-encrypted, and DPAPI blobs are machine-bound.
     """
     raw = (path or _keys_path()).read_bytes()
@@ -110,7 +110,7 @@ def import_keys_plaintext(data: bytes) -> dict:
 
     Accepts plaintext JSON (the portable export format) or a DPAPI blob from
     THIS machine. Raises ValueError on anything malformed, BEFORE touching the
-    live key file — a failed import leaves the current identity intact.
+    live key file - a failed import leaves the current identity intact.
     """
     try:
         plain = secure_store.unprotect(data)
@@ -118,7 +118,7 @@ def import_keys_plaintext(data: bytes) -> dict:
     except Exception as ex:
         raise ValueError(
             "Not a valid helucryptic keys file (it may be a DPAPI-wrapped export "
-            "from another machine — re-export with the current app version)"
+            "from another machine - re-export with the current app version)"
         ) from ex
     if not isinstance(keys, dict) or not REQUIRED_KEY_FIELDS.issubset(keys):
         raise ValueError("Keys file is missing required fields")
@@ -203,7 +203,7 @@ def derive_session_key_v2(
 ) -> bytes:
     """Forward-secret, authenticated session key (helucryptic-session-v2).
 
-    Combines three X25519 exchanges — ephemeral×ephemeral (forward secrecy) plus
+    Combines three X25519 exchanges - ephemeral×ephemeral (forward secrecy) plus
     the two static×ephemeral cross terms (binds the session to both long-term
     identities). The two peers order the cross terms by static public key so they
     derive an identical key regardless of who initiated. Knowledge of the static
@@ -279,7 +279,7 @@ def paseto_verify(token_str: str, ed25519_pub_b64: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Membership certificates (feature D) — the room creator vouches for a member by
+# Membership certificates (feature D) - the room creator vouches for a member by
 # signing (room_id, member username, member ed25519 key) with its identity key.
 # A PASETO v4.public token, so verification is the same Ed25519 path as the hello.
 # ---------------------------------------------------------------------------

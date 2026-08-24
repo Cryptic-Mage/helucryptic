@@ -90,7 +90,7 @@ def animation(speed: str = "base", curve: ft.AnimationCurve | None = None) -> ft
 def color_scheme() -> ft.ColorScheme:
     """Map tokens onto Flet's Material ColorScheme so built-in controls
     (dialogs, dropdowns, checkboxes) inherit the palette instead of defaulting
-    to stock Material — fixing the audit's dialog-inconsistency at the root."""
+    to stock Material - fixing the audit's dialog-inconsistency at the root."""
     # Conservative, widely-supported field set (avoids deprecated Material
     # fields like background/on_background that some Flet builds reject).
     return ft.ColorScheme(

@@ -1,6 +1,6 @@
 """Minimal NAT-PMP (RFC 6886) client for VPN/router port-forward detection.
 
-Pure stdlib sockets — no extra dependency, safe to bundle with PyInstaller.
+Pure stdlib sockets - no extra dependency, safe to bundle with PyInstaller.
 
 Used to discover and keep alive a forwarded port (e.g. Proton VPN P2P port
 forwarding) so WebRTC can bind its ICE socket to it. See
@@ -224,7 +224,7 @@ class PortForwardManager:
             await self._detect_once()
             if self._fail_count >= self.max_failures:
                 logger.info(
-                    "NAT-PMP: gateway %s did not respond after %d attempts — "
+                    "NAT-PMP: gateway %s did not respond after %d attempts - "
                     "port forwarding unavailable on this network, stopping.",
                     self.gateway, self.max_failures,
                 )

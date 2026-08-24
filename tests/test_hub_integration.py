@@ -1,5 +1,5 @@
 """
-Task 12 — 3-peer localhost integration test for the star/SFU group-call engine.
+Task 12 - 3-peer localhost integration test for the star/SFU group-call engine.
 
 Topology
 --------
@@ -25,7 +25,7 @@ Assertion path used: CONTROL-PLANE
   data-channel track_origin frame arrives BEFORE audio frames flow (the hub
   sends it immediately when it calls _relay_track_to_others, before the
   renegotiation finishes). The control-plane assertion therefore proves the
-  core goal—origin keying is correct—without depending on DTLS-SRTP timing.
+  core goal-origin keying is correct-without depending on DTLS-SRTP timing.
 """
 
 import asyncio
@@ -42,7 +42,7 @@ from aiortc.mediastreams import AudioStreamTrack
 from webrtc_engine import WebRTCEngine
 
 # ---------------------------------------------------------------------------
-# Minimal settings for the test — DTLS only (no crypto keys needed for hello)
+# Minimal settings for the test - DTLS only (no crypto keys needed for hello)
 # ---------------------------------------------------------------------------
 
 class _Settings:
@@ -129,7 +129,7 @@ async def test_hub_star_origin_keying():
         eng._ensure_output_stream = lambda: None
         # Deterministic hub election: "hub" always wins
         eng.current_hub = lambda: "hub"
-        # Synthetic mic — return a NEW track each call so relay subscribes work
+        # Synthetic mic - return a NEW track each call so relay subscribes work
         eng._get_mic_source = lambda: AudioStreamTrack()
 
     # Pre-assign each engine's _send_ws so renegotiation offers carry the
@@ -235,10 +235,10 @@ async def test_hub_star_origin_keying():
         f"bbb._origin_waiters: {list(b_eng._origin_waiters.keys())}"
     )
 
-    # Bonus: if audio frames also arrived, great — but not required
+    # Bonus: if audio frames also arrived, great - but not required
     if "aaa" in b_eng._play_chunks and len(b_eng._play_chunks["aaa"]) > 0:
         print(f"\n[integration] BONUS: bbb._play_chunks['aaa'] has "
-              f"{len(b_eng._play_chunks['aaa'])} chunk(s) — audio flow confirmed")
+              f"{len(b_eng._play_chunks['aaa'])} chunk(s) - audio flow confirmed")
 
     # Teardown: close all PeerConnections
     # ------------------------------------------------------------------

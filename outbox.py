@@ -1,7 +1,7 @@
 """Per-peer offline outbox for 1-to-1 chat.
 
 A message sent while the peer's DataChannel isn't open is queued here (in order,
-bounded) and flushed once the session is ready — so "send while the other side
+bounded) and flushed once the session is ready - so "send while the other side
 is offline" becomes at-least-once, in-order delivery on reconnect rather than a
 hard failure. Pure logic (no I/O), so it's unit-testable in isolation.
 """

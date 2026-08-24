@@ -63,7 +63,7 @@ class UvicornThread(threading.Thread):
 @pytest.mark.asyncio
 async def test_password_auth():
     port = get_free_port()
-    # NOTE: use a dummy value here — never the real server password (this file
+    # NOTE: use a dummy value here - never the real server password (this file
     # is committed to git; the real one lives only in .env, which is ignored).
     with patch_password("test-password-123"):
         thread = UvicornThread(server.app, port)

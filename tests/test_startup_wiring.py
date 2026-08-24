@@ -44,7 +44,7 @@ def test_launch_app_accepts_url_and_password(monkeypatch):
     asyncio.run(client.main(page))
 
     on_done = captured["on_done"]
-    # This is exactly how StartupScreen.connect() calls it — two positional args.
+    # This is exactly how StartupScreen.connect() calls it - two positional args.
     on_done("wss://example", "s3cret")  # must NOT raise TypeError
 
 

@@ -1,17 +1,17 @@
 """NAT behaviour discovery + port prediction (RFC 5780 / RFC 8489).
 
-Pure-stdlib STUN client — no aioice/aiortc dependency, so it runs before the
+Pure-stdlib STUN client - no aioice/aiortc dependency, so it runs before the
 WebRTC engine starts and on any thread. It answers two questions that decide
 which traversal strategy can work:
 
-  1. **Mapping behaviour** — does the NAT reuse the same external port for every
+  1. **Mapping behaviour** - does the NAT reuse the same external port for every
      destination (endpoint-independent → STUN works) or assign a new one per
      destination (address/port-dependent → "symmetric" → STUN alone fails)?
-  2. **Port-allocation pattern** — when the mapping IS per-destination, are the
+  2. **Port-allocation pattern** - when the mapping IS per-destination, are the
      external ports sequential (predictable: next ≈ last + delta) or random?
 
 From those we classify the NAT and, for the sequential-symmetric case, predict
-the external port the NAT will assign to the *next* new destination — which a
+the external port the NAT will assign to the *next* new destination - which a
 caller can inject as an extra srflx candidate (see ``predicted_srflx_line`` in
 webrtc_engine) to punch a symmetric NAT WITHOUT a relay.
 
@@ -42,9 +42,9 @@ _ATTR_XOR_MAPPED_ADDRESS = 0x0020
 
 # NAT classifications.
 OPEN_INTERNET = "open-internet"          # public IP, no NAT
-ENDPOINT_INDEPENDENT = "endpoint-independent"   # full/restricted cone — STUN works
+ENDPOINT_INDEPENDENT = "endpoint-independent"   # full/restricted cone - STUN works
 SEQUENTIAL_SYMMETRIC = "sequential-symmetric"   # per-dest port, but predictable
-RANDOM_SYMMETRIC = "random-symmetric"    # per-dest random port — needs relay
+RANDOM_SYMMETRIC = "random-symmetric"    # per-dest random port - needs relay
 BLOCKED = "blocked"                      # no STUN reachable at all
 UNKNOWN = "unknown"
 
@@ -78,15 +78,15 @@ class NatProfile:
     @property
     def summary(self) -> str:
         if self.nat_type == OPEN_INTERNET:
-            return "Open / no NAT — direct works"
+            return "Open / no NAT - direct works"
         if self.nat_type == ENDPOINT_INDEPENDENT:
-            return "Cone NAT — STUN hole-punch works"
+            return "Cone NAT - STUN hole-punch works"
         if self.nat_type == SEQUENTIAL_SYMMETRIC:
-            return f"Symmetric NAT, sequential ports (Δ≈{self.port_delta}) — prediction possible"
+            return f"Symmetric NAT, sequential ports (Δ≈{self.port_delta}) - prediction possible"
         if self.nat_type == RANDOM_SYMMETRIC:
-            return "Symmetric NAT, random ports — relay required"
+            return "Symmetric NAT, random ports - relay required"
         if self.nat_type == BLOCKED:
-            return "STUN blocked — relay required"
+            return "STUN blocked - relay required"
         return "Unknown"
 
 
@@ -202,7 +202,7 @@ def discover(servers: list[tuple[str, int]] | None = None,
     """Probe several STUN servers from FRESH sockets and classify the NAT.
 
     Each probe uses a new unbound UDP socket so the OS assigns a new local port
-    — that is exactly what forces the NAT to create a *new* mapping per probe,
+    - that is exactly what forces the NAT to create a *new* mapping per probe,
     which is what lets us observe whether the external port is stable (cone),
     sequential (predictable symmetric) or random (relay-only).
     """
@@ -237,7 +237,7 @@ def discover(servers: list[tuple[str, int]] | None = None,
         profile.nat_type = OPEN_INTERNET
         return profile
 
-    # One probe only — can't tell mapping behaviour; assume cone (optimistic,
+    # One probe only - can't tell mapping behaviour; assume cone (optimistic,
     # the real ICE run will still try and fall back to relay if it fails).
     if len(ext_ports_per_server) < 2:
         profile.nat_type = ENDPOINT_INDEPENDENT

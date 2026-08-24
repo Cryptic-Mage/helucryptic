@@ -1,4 +1,4 @@
-"""Contact identity payload — encode/decode a shareable verification code.
+"""Contact identity payload - encode/decode a shareable verification code.
 
 Format: ``HELU1:<base64url(json)>`` where the JSON holds ONLY public identity
 data: username, X25519 public key, Ed25519 public key, and the fingerprint
