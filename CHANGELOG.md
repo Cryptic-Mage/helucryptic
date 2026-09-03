@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v1.0.14] - 2026-06-08
 
 ### 🚀 Highlights
+
 * **Microphone Noise Reduction**: Real-time microphone background noise reduction with adaptive noise profiling and configurable UI settings.
 * **Cloudflare Workers Signaling**: Complete serverless signaling server using Cloudflare Workers Durable Objects with WebSocket Hibernation support as a 1:1 drop-in replacement for `server.py`.
 * **Session Token Authentication**: Cryptographic session-token authentication preventing unauthorized username impersonation and channel spoofing.
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ### ✨ Added
+
 * **Audio & Voice Processing**:
   * Adaptive noise profiling and real-time noise suppression in [tracks/audio.py](file:///c:/Users/naman/OneDrive/Desktop/Project/helucryptic/tracks/audio.py).
   * Microphone noise reduction toggle and sensitivity controls in Settings and Client UI.
@@ -46,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ### 🔄 Changed & Improved
+
 * **WebRTC Engine**:
   * Explicit background task tracking in [webrtc_engine.py](file:///c:/Users/naman/OneDrive/Desktop/Project/helucryptic/webrtc_engine.py) to prevent asyncio GC collection of active connection coroutines.
   * Optimized loop iterations and data-channel buffer management.
@@ -58,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ### 🐛 Fixed
+
 * Fixed issue where unreferenced asyncio tasks in WebRTC engine could be prematurely garbage collected during signaling negotiations.
 * Resolved potential username collision / hijacking vulnerability on signaling reconnects via session token enforcement.
 * Fixed contrast issues on select UI components to meet accessibility standards.
@@ -66,16 +70,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [v1.0.13] - 2026-06-07
+
 * Ignore `.claude` and `.superpowers` internal directories in version control.
 * Packaging and release build pipeline updates.
 
 ---
 
 ## [v1.0.6] - 2026-05-20
+
 * Added `flet-desktop` dependency for cross-platform desktop compatibility.
 * Fixed packaging build script dependencies.
 
 ---
 
 ## [v1.0.5] - 2026-05-15
+
 * Initial automated release workflow and desktop standalone binary builds.
