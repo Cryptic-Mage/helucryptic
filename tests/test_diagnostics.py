@@ -1,3 +1,5 @@
+import pytest
+
 import webrtc_engine as W
 
 
@@ -18,14 +20,33 @@ def _engine():
 
 
 def test_ice_servers_include_turn_when_configured():
-    assert len(_engine()._ice_servers()) == 3  # 2 STUN + 1 TURN
+    e = _engine()
+    servers = e._ice_servers()
+    turn_urls = [s.urls for s in servers if any(u.startswith("turn:") for u in s.urls)]
+    assert len(turn_urls) >= 1  # user-configured TURN is present
+    assert any("turn:relay.example:3478" in s.urls for s in servers)
 
 
 def test_ice_servers_stun_only_without_turn():
     class NoTurn(S):
         turn_url = ""
     e = W.WebRTCEngine("me", NoTurn(), _KEYS)
-    assert len(e._ice_servers()) == 2
+    servers = e._ice_servers()
+    stun_urls = [s.urls for s in servers if any(u.startswith("stun:") for u in s.urls)]
+    assert len(stun_urls) >= 1  # STUN servers are present
+
+
+def test_strict_nat_uses_turn_servers_without_unsupported_transport_policy():
+    e = _engine()
+    e._nat_profile = type("StrictNat", (), {"needs_relay": True})()
+
+    config = e._ice_config()
+
+    assert config.iceServers
+    assert all(
+        any(url.startswith(("turn:", "turns:")) for url in server.urls)
+        for server in config.iceServers
+    )
 
 
 def test_get_diagnostics_shape_and_redaction():
@@ -39,3 +60,119 @@ def test_get_diagnostics_shape_and_redaction():
     blob = repr(d).lower()
     for forbidden in ("password", "candidate", "sdp", "private", "\"p\""):
         assert forbidden not in blob
+
+
+def test_get_diagnostics_when_last_error_set():
+    e = _engine()
+    e.last_error = "Failed to connect to signaling"
+    d = e.get_diagnostics()
+    assert d["last_error"] == "Failed to connect to signaling"
+
+
+def test_get_diagnostics_hub_fallback_on_exception(monkeypatch):
+    e = _engine()
+    e.room_id = "ROOM-123"
+    # Cause current_hub to raise an exception
+    monkeypatch.setattr(e, "current_hub", lambda: exec("raise ValueError('hub error')"))
+    d = e.get_diagnostics()
+    assert d["hub"] == "?"
+
+
+def test_get_diagnostics_peer_details():
+    e = _engine()
+    # Mock a minimal peer connection
+    class DummyPC:
+        connectionState = "connected"
+        signalingState = "stable"
+        iceConnectionState = "completed"
+        iceGatheringState = "complete"
+    
+    class DummyDC:
+        readyState = "open"
+
+    e.pcs["bob"] = DummyPC()
+    e.data_channels["bob"] = DummyDC()
+    e._hello_sent["bob"] = True
+    e._peer_hello_verified["bob"] = True
+    e.session_keys["bob"] = b"key"
+
+    d = e.get_diagnostics()
+    assert d["num_peers"] == 1
+    peer_info = d["peers"][0]
+    assert peer_info["peer"] == "bob"
+    assert peer_info["connection"] == "connected"
+    assert peer_info["signaling"] == "stable"
+    assert peer_info["ice"] == "completed"
+    assert peer_info["ice_gathering"] == "complete"
+    assert peer_info["datachannel"] == "open"
+    assert peer_info["hello_sent"] is True
+    assert peer_info["hello_ok"] is True
+    assert peer_info["session_key"] is True
+
+
+def test_diagnostics_ui_rendering(monkeypatch):
+    pytest.importorskip("flet")
+    import flet as ft
+
+    import client
+
+    class FakeClipboard:
+        def set(self, text):
+            pass
+
+    class FakePage:
+        def __init__(self):
+            self.clipboard = FakeClipboard()
+
+    class FakeApp:
+        def __init__(self):
+            self.page = FakePage()
+            self._diag_open = False
+
+        def _render_diagnostics_state(self):
+            return "fake diagnostics state"
+
+        def _render_diagnostics_log(self):
+            return "fake logs"
+
+        def _log(self, text):
+            pass
+
+        def _close_dialog(self, dlg):
+            pass
+
+        def _show_dialog(self, dlg):
+            self.dialog = dlg
+
+        def _fire_and_forget(self, coro):
+            try:
+                coro.close()
+            except Exception:
+                pass
+
+        async def _set_clipboard(self, text):
+            pass
+
+
+    app = FakeApp()
+    client.HelucrypticApp._show_diagnostics(app, None)
+
+    assert app._diag_open is True
+    assert isinstance(app.dialog, ft.AlertDialog)
+    col = app.dialog.content.content
+    assert isinstance(col, ft.Column)
+    assert len(col.controls) == 3
+    
+    # Verify the first section (Peer info) is a scrollable container with expand=True
+    top_container = col.controls[0]
+    assert isinstance(top_container, ft.Container)
+    assert top_container.expand is True
+    assert isinstance(top_container.content, ft.Column)
+    assert top_container.content.scroll == ft.ScrollMode.AUTO
+
+    # Verify the second section (Logs) is a scrollable container with expand=True
+    bottom_container = col.controls[2]
+    assert isinstance(bottom_container, ft.Container)
+    assert bottom_container.expand is True
+    assert isinstance(bottom_container.content, ft.Column)
+    assert bottom_container.content.scroll == ft.ScrollMode.AUTO

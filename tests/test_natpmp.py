@@ -144,6 +144,7 @@ def test_manager_clears_when_request_fails():
 
 def test_manager_requests_multiple_mappings():
     import asyncio
+
     from natpmp import PortForwardManager
     granted = iter([55000, 55001, 55002])
     published = []

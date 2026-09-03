@@ -1,172 +1,505 @@
 import hmac
 import json
+import logging
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
-from typing import Optional
+import re
+import secrets as _secrets
+import time
+from collections import deque
+
+# pyrefly: ignore [missing-import]
+from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 
 try:
+    # pyrefly: ignore [missing-import]
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-app = FastAPI(title="helucryptic-signaling")
+from constants.server_constants import (
+    EXPECTED_PASSWORD,
+    MAX_ROOM_CAPACITY,
+    SERVER_TITLE,
+    SERVER_TYPES,
+)
 
-# Shared access token. When set (via env), every WebSocket connection must send
-# a matching `?password=` query param or it is rejected before joining. Empty
-# means the server is open (back-compat / LAN use).
-_EXPECTED_PASSWORD = os.getenv("HELUCRYPTIC_SERVER_PASSWORD", "")
+logger = logging.getLogger("helucryptic.server")
+
+# Security: max incoming WebSocket message size (bytes). Prevents memory DoS
+# from malicious clients sending multi-MB JSON payloads.
+_MAX_PAYLOAD_BYTES = 65536  # 64 KiB — signaling messages are tiny
+
+# Security: allowed Origin headers for WebSocket upgrade. Empty = no check
+# (self-hosted servers behind reverse proxies may strip Origin). Set
+# HELUCRYPTIC_ALLOWED_ORIGINS="https://app.helucryptic.io,https://helucryptic.io"
+# in production. Native (non-browser) clients send no Origin - allowed intentionally.
+_ALLOWED_ORIGINS: set[str] = set()
+_origins_env = os.getenv("HELUCRYPTIC_ALLOWED_ORIGINS", "")
+if _origins_env.strip():
+    _ALLOWED_ORIGINS = {o.strip().lower() for o in _origins_env.split(",") if o.strip()}
+elif os.getenv("HELUCRYPTIC_ENV", "").lower() == "production":
+    logger.warning("HELUCRYPTIC_ALLOWED_ORIGINS is not set in production - WebSocket Origin checks are disabled. Set this to prevent cross-site WebSocket hijacking.")
+# The signaling server sees every user's username and room. For a privacy-focused
+# tool, allow operators to raise the log level (e.g. WARNING) so those identifiers
+# aren't recorded at INFO. Defaults to INFO for backward compatibility.
+_log_level = os.getenv("HELUCRYPTIC_LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, _log_level, logging.INFO))
+
+app = FastAPI(title=SERVER_TITLE)
 
 active_connections: dict[str, WebSocket] = {}
 rooms:   dict[str, set[str]] = {}   # room_id → {username, ...}
 room_of: dict[str, str]      = {}   # username → room_id
+_session_tokens:   dict[str, str]    = {}   # username → session token (prevents impersonation)
 
-# Message types the server generates — never forward these back into the mesh
-_SERVER_TYPES = {"peer_joined", "peer_left", "room_state", "error"}
+# --- Rate limiting (token-bucket, in-memory) --------------------------------
+# Connection rate: max 20 new WS connections per IP per 60 s.
+_conn_times: dict[str, deque] = {}
+_CONN_WINDOW = 60.0
+_CONN_MAX    = 20
+# Message rate: max 100 signaling messages per username per 10 s.
+_msg_times: dict[str, deque] = {}
+_MSG_WINDOW = 10.0
+_MSG_MAX    = 100
+# Byte rate: max 640 KiB per username per 10 s (~64 KiB/s sustained, 256 KiB burst).
+_byte_times: dict[str, deque] = {}
+_BYTE_WINDOW = 10.0
+_BYTE_MAX    = 655360
+_RELAY_FRAME_MAX_BYTES = 24576  # 24 KiB wire cap for relay (16 KiB plaintext + PASETO overhead)
+SERVER_CAPABILITIES = ["relay_e2ee_v1", "signaling_hello_v1"]
 
 
-def _password_ok(supplied: Optional[str]) -> bool:
-    if not _EXPECTED_PASSWORD:
+def reset_server_state() -> None:
+    """Reset all active connections, rooms, session tokens, and rate limiter state."""
+    active_connections.clear()
+    rooms.clear()
+    room_of.clear()
+    _session_tokens.clear()
+    _conn_times.clear()
+    _msg_times.clear()
+    _byte_times.clear()
+
+
+def _conn_rate_ok(ip: str) -> bool:
+    now = time.monotonic()
+    dq  = _conn_times.setdefault(ip, deque())
+    while dq and dq[0] < now - _CONN_WINDOW:
+        dq.popleft()
+    if len(dq) >= _CONN_MAX:
+        return False
+    dq.append(now)
+    return True
+
+
+def _msg_rate_ok(username: str) -> bool:
+    now = time.monotonic()
+    dq  = _msg_times.setdefault(username, deque())
+    while dq and dq[0] < now - _MSG_WINDOW:
+        dq.popleft()
+    if len(dq) >= _MSG_MAX:
+        return False
+    dq.append(now)
+    return True
+
+
+def _byte_rate_ok(username: str, byte_count: int) -> bool:
+    now = time.monotonic()
+    dq = _byte_times.setdefault(username, deque())
+    while dq and dq[0][0] < now - _BYTE_WINDOW:
+        dq.popleft()
+    current_total = sum(b for _, b in dq)
+    if current_total + byte_count > _BYTE_MAX:
+        return False
+    dq.append((now, byte_count))
+    return True
+
+
+# Usernames are routing keys AND display identities - constrain them so a user
+# can't register an empty/whitespace/oversized name or impersonate the reserved
+# "system" sender used for server-generated messages.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,32}$")
+_RESERVED_USERNAMES = {"system"}
+
+
+def _username_ok(username: str) -> bool:
+    return bool(_USERNAME_RE.match(username)) and username.strip().lower() not in _RESERVED_USERNAMES
+
+
+def _timing_safe_equal(a: str, b: str) -> bool:
+    # Constant-time comparison to avoid leaking secret tokens via timing.
+    return hmac.compare_digest(a, b)
+
+
+def _password_ok(supplied: str | None) -> bool:
+    if not EXPECTED_PASSWORD:
         return True  # no password configured → open server
-    # Constant-time comparison to avoid leaking the token via timing.
-    return hmac.compare_digest(supplied or "", _EXPECTED_PASSWORD)
+    return _timing_safe_equal(supplied or "", EXPECTED_PASSWORD)
 
 
-@app.websocket("/ws/{username}")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    username: str,
-    room: Optional[str] = Query(default=None),
-    password: Optional[str] = Query(default=None),
-):
-    # --- Access control (Pre-upgrade) ---
-    if not _password_ok(password):
-        from fastapi import Response
-        await websocket.send_denial_response(Response(status_code=403, content="Invalid server access password."))
+async def _handle_stale_connection(username: str) -> None:
+    if username in active_connections:
+        logger.info("Closing stale connection for user '%s'", username)
+        old_ws = active_connections[username]
+        try:
+            await old_ws.close()
+        except Exception as e:
+            logger.debug("Error closing stale connection for '%s': %s", username, e)
+        active_connections.pop(username, None)
+
+
+async def _cleanup_rejoin_stale_entry(username: str, existing: set[str], room: str) -> None:
+    logger.info("Rejoining room '%s' for '%s' - cleaning up stale entry", room, username)
+    for member in existing - {username}:
+        ws = active_connections.get(member)
+        if ws:
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "peer_left",
+                    "sender": username,
+                }))
+            except Exception as e:
+                logger.debug("Failed to notify peer '%s' of stale rejoin by '%s': %s", member, username, e)
+    existing.discard(username)
+    room_of.pop(username, None)
+
+
+async def _notify_peers_joined(username: str, existing_peers: list[str]) -> None:
+    for peer in existing_peers:
+        ws = active_connections.get(peer)
+        if ws:
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "peer_joined",
+                    "sender": username,
+                }))
+            except Exception as e:
+                logger.debug("Failed to notify peer '%s' that '%s' joined: %s", peer, username, e)
+
+
+async def _handle_room_joining(websocket: WebSocket, username: str, room: str) -> bool:
+    existing = rooms.get(room, set())
+    if len(existing) >= MAX_ROOM_CAPACITY and username not in existing:
+        logger.warning("Rejecting join room '%s' for '%s' - Room is full", room, username)
+        await websocket.send_text(json.dumps({
+            "sender": "system",
+            "type": "error",
+            "data": "Room is full (max 4 participants).",
+        }))
+        await websocket.close()
+        return False
+
+    # --- Re-join: clean up stale entry ---
+    if username in existing:
+        await _cleanup_rejoin_stale_entry(username, existing, room)
+
+    existing_peers = list(rooms.get(room, set()))
+    logger.info("User '%s' joining room '%s'. Current peers: %s", username, room, existing_peers)
+
+    # Notify existing peers that a new peer joined
+    await _notify_peers_joined(username, existing_peers)
+
+    # Send joiner the current room state
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "room_state",
+            "peers": existing_peers,
+        }))
+    except Exception as e:
+        logger.exception("Failed to send room state to '%s': %s", username, e)
+        return False
+
+    rooms.setdefault(room, set()).add(username)
+    room_of[username] = room
+    return True
+
+
+async def _handle_websocket_message(websocket: WebSocket, username: str, payload: dict) -> None:
+    if not _msg_rate_ok(username):
+        logger.warning("Message rate limit exceeded for '%s' - dropping packet", username)
+        return
+    msg_type = payload.get("type")
+
+    # --- Presence query (directed at the server, not a peer) ---
+    if msg_type == "presence":
+        # Be defensive about the shape: a malformed packet (non-dict `data`, or a
+        # `usernames` that isn't a list of strings) must not raise here - that would
+        # escape the message loop and disconnect the client. Mirror the tolerant
+        # handling in the Cloudflare worker.
+        data = payload.get("data")
+        raw_wanted = data.get("usernames") if isinstance(data, dict) else None
+        wanted = raw_wanted if isinstance(raw_wanted, list) else []
+        online = [u for u in wanted if isinstance(u, str) and u in active_connections]
+        logger.debug("User '%s' requested presence check for: %s. Online: %s", username, wanted, online)
+        try:
+            await websocket.send_text(json.dumps({
+                "sender": "system",
+                "type":   "presence",
+                "data":   {"online": online},
+            }))
+        except Exception as e:
+            logger.debug("Failed to send presence response to '%s': %s", username, e)
         return
 
-    await websocket.accept()
+    target = payload.get("target")
+    if not target or not msg_type:
+        logger.warning("User '%s' sent malformed packet: target=%s, type=%s", username, target, msg_type)
+        return
 
+    # Never forward server-generated types
+    if msg_type in SERVER_TYPES:
+        logger.warning("User '%s' tried to forge server message type '%s'", username, msg_type)
+        return
+
+    # Room isolation: a sender in a room may only signal peers in that same room.
+    # Exception: "room_invite" exists precisely to reach a contact who is NOT in
+    # the room yet - blocking it here broke the invite-contacts feature.
+    sender_room = room_of.get(username)
+    if msg_type != "room_invite" and sender_room and room_of.get(target) != sender_room:
+        logger.warning(
+            "Cross-room message blocked: '%s' (room %s) → '%s' (room %s)",
+            username, sender_room, target, room_of.get(target),
+        )
+        try:
+            await websocket.send_text(json.dumps({
+                "sender": "system",
+                "type": "error",
+                "data": f"User '{target}' is not in your room.",
+            }))
+        except Exception:
+            pass
+        return
+
+    # Relay-specific quota & size checks to prevent signaling server abuse
+    # ``p2p_relay`` is retained for older clients, so it needs the same abuse
+    # controls as the current relay message type.
+    if msg_type in {"relay_e2ee", "p2p_relay"}:
+        raw_data = str(payload.get("data") or "")
+        data_len = len(raw_data.encode("utf-8"))
+        if data_len > _RELAY_FRAME_MAX_BYTES:
+            logger.warning("User '%s' exceeded relay frame limit (%d > %d bytes)", username, data_len, _RELAY_FRAME_MAX_BYTES)
+            try:
+                await websocket.send_text(json.dumps({
+                    "sender": "system",
+                    "type": "error",
+                    "data": f"Relay payload too large ({data_len} bytes, max {_RELAY_FRAME_MAX_BYTES}).",
+                }))
+            except Exception:
+                pass
+            return
+        if not _byte_rate_ok(username, data_len):
+            logger.warning("User '%s' exceeded relay byte quota - dropping packet", username)
+            try:
+                await websocket.send_text(json.dumps({
+                    "sender": "system",
+                    "type": "error",
+                    "data": "Relay bandwidth quota exceeded (slow down).",
+                }))
+            except Exception:
+                pass
+            return
+
+    if target not in active_connections:
+        logger.info("Target '%s' offline for message type '%s' from '%s'", target, msg_type, username)
+        try:
+            await websocket.send_text(json.dumps({
+                "sender": "system",
+                "type": "error",
+                "data": f"User '{target}' is offline.",
+            }))
+        except Exception as e:
+            logger.debug("Failed to send offline status to '%s': %s", username, e)
+        return
+
+    logger.debug("Forwarding message type '%s' from '%s' to '%s'", msg_type, username, target)
+    try:
+        await active_connections[target].send_text(json.dumps({
+            "sender": username,
+            "type": msg_type,
+            "data": payload.get("data"),
+        }))
+    except Exception as e:
+        logger.warning("Failed forwarding message from '%s' to '%s': %s", username, target, e)
+
+
+async def _notify_peer_left(room_id: str, username: str) -> None:
+    for peer in rooms[room_id]:
+        ws = active_connections.get(peer)
+        if ws:
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "peer_left",
+                    "sender": username,
+                }))
+            except Exception as e:
+                logger.debug("Failed to notify peer '%s' that '%s' left: %s", peer, username, e)
+
+
+async def _handle_websocket_disconnect(username: str) -> None:
+    logger.info("Disconnecting websocket for user '%s'", username)
+    active_connections.pop(username, None)
+    room_id = room_of.pop(username, None)
+    if room_id and room_id in rooms:
+        rooms[room_id].discard(username)
+        if not rooms[room_id]:
+            logger.info("Room '%s' is empty, deleting it", room_id)
+            del rooms[room_id]
+        else:
+            await _notify_peer_left(room_id, username)
+
+async def _authenticate_and_accept_connection(
+    websocket: WebSocket, username: str, password: str | None
+) -> bool:
+    if not _password_ok(password):
+        logger.warning("Access denied for user '%s' due to invalid password.", username)
+        await websocket.send_denial_response(Response(status_code=403, content="Invalid server access password."))
+        return False
+
+    await websocket.accept()
+    logger.info("Websocket connection accepted for '%s'", username)
+    return True
+
+
+async def _verify_and_update_session(
+    websocket: WebSocket, username: str, session_token: str | None
+) -> bool:
     if username in active_connections:
+        expected = _session_tokens.get(username, "")
+        supplied = session_token or ""
+        if not (expected and _timing_safe_equal(supplied, expected)):
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "data": "Username already in use by an active session.",
+            }))
+            await websocket.close()
+            return False
         old_ws = active_connections[username]
         try:
             await old_ws.close()
         except Exception:
             pass
         active_connections.pop(username, None)
+        _session_tokens.pop(username, None)
+        # Evict stale room membership so capacity counts and peer_left fan-out
+        # are correct even when the reconnect has no ?room= parameter.
+        old_room = room_of.pop(username, None)
+        if old_room and old_room in rooms:
+            rooms[old_room].discard(username)
+            if not rooms[old_room]:
+                del rooms[old_room]
+            else:
+                await _notify_peer_left(old_room, username)
+    return True
 
-    # --- Room capacity check ---
-    if room:
-        existing = rooms.get(room, set())
-        if len(existing) >= 4 and username not in existing:
-            await websocket.send_text(json.dumps({
-                "sender": "system",
-                "type": "error",
-                "data": "Room is full (max 4 participants).",
-            }))
-            await websocket.close()
-            return
 
-        # --- Re-join: clean up stale entry ---
-        if username in existing:
-            for member in list(existing - {username}):
-                ws = active_connections.get(member)
-                if ws:
-                    await ws.send_text(json.dumps({
-                        "type": "peer_left",
-                        "sender": username,
-                    }))
-            existing.discard(username)
-            room_of.pop(username, None)
-
+async def _establish_connection_session(websocket: WebSocket, username: str) -> str:
+    new_token = _secrets.token_hex(32)
+    _session_tokens[username] = new_token
     active_connections[username] = websocket
 
-    if room:
-        existing_peers = list(rooms.get(room, set()))
+    client = websocket.client
+    await websocket.send_text(json.dumps({
+        "type": "session_token",
+        "data": {
+            "token": new_token,
+            "reflected_host": client.host if client else None,
+            "reflected_port": client.port if client else None,
+            "capabilities": SERVER_CAPABILITIES,
+        },
+    }))
+    return new_token
 
-        # Notify existing peers that a new peer joined
-        for peer in existing_peers:
-            ws = active_connections.get(peer)
-            if ws:
-                await ws.send_text(json.dumps({
-                    "type": "peer_joined",
-                    "sender": username,
-                }))
 
-        # Send joiner the current room state
-        await websocket.send_text(json.dumps({
-            "type": "room_state",
-            "peers": existing_peers,
-        }))
-
-        rooms.setdefault(room, set()).add(username)
-        room_of[username] = room
-
+async def _run_message_loop(websocket: WebSocket, username: str) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
+            # Security: reject oversized payloads to prevent memory DoS (count bytes, not chars)
+            if len(raw.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+                logger.warning("Oversized payload (%d bytes) from '%s' - dropping", len(raw.encode("utf-8")), username)
+                continue
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
+                logger.warning("Received invalid JSON from '%s'", username)
                 continue
 
-            target   = payload.get("target")
-            msg_type = payload.get("type")
-
-            # --- Presence query (directed at the server, not a peer) ---
-            # The client sends the usernames it cares about (its local contacts)
-            # and we reply with the subset that currently hold a live connection.
-            # Privacy-preserving: the server never volunteers who is online, it
-            # only confirms names the asker already knows. Additive + backward
-            # compatible — older clients simply never send this.
-            if msg_type == "presence":
-                wanted = (payload.get("data") or {}).get("usernames", [])
-                online = [u for u in wanted if u in active_connections]
-                await websocket.send_text(json.dumps({
-                    "sender": "system",
-                    "type":   "presence",
-                    "data":   {"online": online},
-                }))
-                continue
-
-            if not target or not msg_type:
-                continue
-
-            # Never forward server-generated types
-            if msg_type in _SERVER_TYPES:
-                continue
-
-            if target not in active_connections:
-                await websocket.send_text(json.dumps({
-                    "sender": "system",
-                    "type": "error",
-                    "data": f"User '{target}' is offline.",
-                }))
-                continue
-
-            await active_connections[target].send_text(json.dumps({
-                "sender": username,
-                "type": msg_type,
-                "data": payload.get("data"),
-            }))
+            await _handle_websocket_message(websocket, username, payload)
 
     except WebSocketDisconnect:
-        pass
-    finally:
-        active_connections.pop(username, None)
-        room_id = room_of.pop(username, None)
-        if room_id and room_id in rooms:
-            rooms[room_id].discard(username)
-            if not rooms[room_id]:
-                del rooms[room_id]
-            else:
-                for peer in list(rooms[room_id]):
-                    ws = active_connections.get(peer)
-                    if ws:
-                        try:
-                            await ws.send_text(json.dumps({
-                                "type": "peer_left",
-                                "sender": username,
-                            }))
-                        except Exception:
-                            pass
+        logger.info("Websocket disconnected gracefully for '%s'", username)
+    except Exception as e:
+        logger.exception("Websocket connection error for '%s': %s", username, e, exc_info=True)
+
+
+async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
+    # Guard against the reconnect race: if a new socket has already
+    # replaced this one, skip cleanup so we don't clobber the new state.
+    if active_connections.get(username) is not websocket:
+        return
+    _msg_times.pop(username, None)
+    _byte_times.pop(username, None)
+    active_connections.pop(username, None)
+    _session_tokens.pop(username, None)
+    room_id = room_of.pop(username, None)
+    if not room_id or room_id not in rooms:
+        return
+    rooms[room_id].discard(username)
+    if not rooms[room_id]:
+        del rooms[room_id]
+    else:
+        await _notify_peer_left(room_id, username)
+
+
+@app.websocket("/ws/{username}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    username: str,
+    room: str | None = Query(default=None),
+    password: str | None = Query(default=None),
+    session_token: str | None = Query(default=None),
+):
+    try:
+        # Security: validate Origin header if configured (prevents cross-site WS hijacking)
+        if _ALLOWED_ORIGINS:
+            origin = (websocket.headers.get("origin") or "").lower()
+            if origin and origin not in _ALLOWED_ORIGINS:
+                logger.warning("Rejected connection from disallowed origin '%s' for user '%s'", origin, username)
+                await websocket.send_denial_response(
+                    Response(status_code=403, content="Origin not allowed."))
+                return
+
+        client_ip = websocket.client.host if websocket.client else "unknown"
+        if not _conn_rate_ok(client_ip):
+            logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
+            await websocket.send_denial_response(
+                Response(status_code=429, content="Too many connection attempts - slow down."))
+            return
+
+        if not _username_ok(username):
+            logger.warning("Rejecting invalid username %r from IP '%s'", username[:64], client_ip)
+            await websocket.send_denial_response(
+                Response(status_code=400, content="Invalid username (1-32 chars: letters, digits, space, _ . -)."))
+            return
+
+        logger.info("Incoming connection request from '%s'", username)
+
+        if not await _authenticate_and_accept_connection(websocket, username, password):
+            return
+
+        if not await _verify_and_update_session(websocket, username, session_token):
+            return
+
+        await _establish_connection_session(websocket, username)
+
+        try:
+            if room:
+                joined = await _handle_room_joining(websocket, username, room)
+                if not joined:
+                    return
+
+            await _run_message_loop(websocket, username)
+        finally:
+            await _cleanup_connection(websocket, username)
+    except Exception as e:
+        logger.exception("Internal signaling error in websocket_endpoint: %s", e)

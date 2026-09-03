@@ -36,3 +36,9 @@ def test_allowed_when_session_allowed(monkeypatch):
 def test_room_not_gated(monkeypatch):
     monkeypatch.setattr(client, "get_contact", lambda u: None)
     assert _is_allowed(_app(True), "") is True
+
+
+def test_blocked_when_contact_missing_and_not_in_session_allowed(monkeypatch):
+    monkeypatch.setattr(client, "get_contact", lambda u: None)
+    assert _is_allowed(_app(True), "bob") is False
+

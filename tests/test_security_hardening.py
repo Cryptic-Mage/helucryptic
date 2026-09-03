@@ -6,14 +6,13 @@
 - F-09 group key only from the room creator
 """
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import crypto
 import secure_store
 import webrtc_engine
-
 
 # --- F-02: ephemeral DH gives an agreed, forward-secret session key ----------
 
@@ -44,7 +43,7 @@ def test_ephemeral_session_key_agreement(tmp_path, monkeypatch):
 def test_ephemeral_changes_key_each_session(tmp_path, monkeypatch):
     monkeypatch.setattr(crypto, "DATA_DIR", tmp_path)
     a = crypto.generate_and_save_keys()
-    b_eph_priv, b_eph_pub = crypto.generate_ephemeral_x25519()
+    _b_eph_priv, b_eph_pub = crypto.generate_ephemeral_x25519()
     a_eph1_priv, _ = crypto.generate_ephemeral_x25519()
     a_eph2_priv, _ = crypto.generate_ephemeral_x25519()
     # Same statics + same peer ephemeral but a different local ephemeral → a
@@ -108,12 +107,12 @@ def _engine():
 
 def test_hello_iat_fresh_accepts_now():
     e = _engine()
-    assert e._hello_iat_fresh(datetime.now(timezone.utc).isoformat())
+    assert e._hello_iat_fresh(datetime.now(UTC).isoformat())
 
 
 def test_hello_iat_fresh_rejects_old_and_garbage():
     e = _engine()
-    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=3)).isoformat()
     assert not e._hello_iat_fresh(old)
     assert not e._hello_iat_fresh("")
     assert not e._hello_iat_fresh("not-a-date")

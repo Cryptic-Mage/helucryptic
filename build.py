@@ -13,7 +13,7 @@ unrelated heavyweight packages (torch, PyQt5, transformers, …).
 
 NOTE: bundling `.env` embeds whatever secrets it contains into the distributed
 binary. The server password is only a *real* gate because the signaling server
-validates it (see server.py) — never rely on the bundled copy being secret.
+validates it (see server.py) - never rely on the bundled copy being secret.
 """
 import os
 import subprocess
@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 try:
+    # pyrefly: ignore [missing-import]
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
@@ -84,7 +85,7 @@ def _clean_build_dir() -> None:
                 os.chmod(os.path.join(root, f), stat.S_IWRITE)
             except Exception:
                 pass
-    for attempt in range(5):
+    for _ in range(5):
         try:
             shutil.rmtree(build_dir)
             return
@@ -104,7 +105,7 @@ def main(argv: list[str]) -> int:
 
     url = os.getenv("HELUCRYPTIC_SIGNALING_URL")
     if not env_file.exists():
-        print("[WARN] No .env found — building with built-in defaults. "
+        print("[WARN] No .env found - building with built-in defaults. "
               "Copy .env.example to .env to customise.")
     else:
         print(f"[INFO] Building helucryptic (signaling: {url or 'default'})")
@@ -129,7 +130,8 @@ def main(argv: list[str]) -> int:
     cmd.append("main.py")
 
     print("->", " ".join(cmd))
-    return subprocess.run(cmd, cwd=ROOT).returncode
+    result = subprocess.run(cmd, cwd=ROOT, check=False)  # noqa: PLW1510 - returncode checked by caller
+    return result.returncode
 
 
 if __name__ == "__main__":

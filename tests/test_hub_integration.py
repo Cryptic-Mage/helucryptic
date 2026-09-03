@@ -1,5 +1,5 @@
 """
-Task 12 — 3-peer localhost integration test for the star/SFU group-call engine.
+Task 12 - 3-peer localhost integration test for the star/SFU group-call engine.
 
 Topology
 --------
@@ -25,26 +25,24 @@ Assertion path used: CONTROL-PLANE
   data-channel track_origin frame arrives BEFORE audio frames flow (the hub
   sends it immediately when it calls _relay_track_to_others, before the
   renegotiation finishes). The control-plane assertion therefore proves the
-  core goal—origin keying is correct—without depending on DTLS-SRTP timing.
+  core goal-origin keying is correct-without depending on DTLS-SRTP timing.
 """
 
 import asyncio
-import json
-import sys
 import os
+import sys
+
 import pytest
 
 # Ensure repo root is on the path for direct imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from aiortc.mediastreams import AudioStreamTrack
-import webrtc_engine
-from webrtc_engine import WebRTCEngine
-from settings import Settings
 
+from webrtc_engine import WebRTCEngine
 
 # ---------------------------------------------------------------------------
-# Minimal settings for the test — DTLS only (no crypto keys needed for hello)
+# Minimal settings for the test - DTLS only (no crypto keys needed for hello)
 # ---------------------------------------------------------------------------
 
 class _Settings:
@@ -131,7 +129,7 @@ async def test_hub_star_origin_keying():
         eng._ensure_output_stream = lambda: None
         # Deterministic hub election: "hub" always wins
         eng.current_hub = lambda: "hub"
-        # Synthetic mic — return a NEW track each call so relay subscribes work
+        # Synthetic mic - return a NEW track each call so relay subscribes work
         eng._get_mic_source = lambda: AudioStreamTrack()
 
     # Pre-assign each engine's _send_ws so renegotiation offers carry the
@@ -209,7 +207,7 @@ async def test_hub_star_origin_keying():
     while not (hub_forwarded_ok and bbb_origin_ok):
         # Check hub forwarding bookkeeping
         fwd_entries = hub_eng._forwarded.get("aaa", [])
-        hub_forwarded_ok = any(dest == "bbb" for dest, _sub, _sub_id in fwd_entries)
+        hub_forwarded_ok = any(dest == "bbb" for dest, _sub, _sub_id, _src_track_id in fwd_entries)
 
         # Check bbb received the track_origin frame
         bbb_origin_ok = "aaa" in b_eng._origin_map.values()
@@ -222,9 +220,9 @@ async def test_hub_star_origin_keying():
     # Assertions
     # ------------------------------------------------------------------
     fwd_entries = hub_eng._forwarded.get("aaa", [])
-    assert any(dest == "bbb" for dest, _sub, _sid in fwd_entries), (
+    assert any(dest == "bbb" for dest, _sub, _sid, _stid in fwd_entries), (
         f"hub._forwarded['aaa'] has no entry for 'bbb'. "
-        f"Got: {[(d,sid) for d,_,sid in fwd_entries]}. "
+        f"Got: {[(d, sid) for d, _, sid, _ in fwd_entries]}. "
         f"hub pcs: {list(hub_eng.pcs.keys())}. "
         f"aaa voice_peers: {a_eng._voice_peers}"
     )
@@ -237,12 +235,11 @@ async def test_hub_star_origin_keying():
         f"bbb._origin_waiters: {list(b_eng._origin_waiters.keys())}"
     )
 
-    # Bonus: if audio frames also arrived, great — but not required
+    # Bonus: if audio frames also arrived, great - but not required
     if "aaa" in b_eng._play_chunks and len(b_eng._play_chunks["aaa"]) > 0:
         print(f"\n[integration] BONUS: bbb._play_chunks['aaa'] has "
-              f"{len(b_eng._play_chunks['aaa'])} chunk(s) — audio flow confirmed")
+              f"{len(b_eng._play_chunks['aaa'])} chunk(s) - audio flow confirmed")
 
-    # ------------------------------------------------------------------
     # Teardown: close all PeerConnections
     # ------------------------------------------------------------------
     all_engines = [hub_eng, a_eng, b_eng]
@@ -252,3 +249,61 @@ async def test_hub_star_origin_keying():
                 await pc.close()
             except Exception:
                 pass
+
+
+@pytest.mark.asyncio
+async def test_router_routes_offer():
+    calls = []
+    class DummyEngine:
+        async def handle_offer(self, sender, data, ws_send):
+            calls.append(("offer", sender, data))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "offer", "data": "sdp_data"})
+    assert calls == [("offer", "alice", "sdp_data")]
+
+
+@pytest.mark.asyncio
+async def test_router_routes_answer():
+    calls = []
+    class DummyEngine:
+        async def handle_answer(self, data, sender):
+            calls.append(("answer", data, sender))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "answer", "data": "sdp_data"})
+    assert calls == [("answer", "sdp_data", "alice")]
+
+
+@pytest.mark.asyncio
+async def test_router_routes_ice_candidate():
+    calls = []
+    class DummyEngine:
+        async def handle_ice(self, data, sender):
+            calls.append(("ice", data, sender))
+
+    engines = {"bob": DummyEngine()}
+    ws_send = make_router(engines)("alice")
+    
+    await ws_send({"target": "bob", "type": "ice-candidate", "data": "ice_data"})
+    assert calls == [("ice", "ice_data", "alice")]
+
+
+@pytest.mark.asyncio
+async def test_router_unregistered_target_raises_key_error():
+    engines = {}
+    ws_send = make_router(engines)("alice")
+    with pytest.raises(KeyError):
+        await ws_send({"target": "bob", "type": "offer"})
+
+
+def test_integration_settings_defaults():
+    settings = _Settings()
+    assert settings.security_mode == "dtls"
+    assert settings.turn_url == ""
+    assert settings.port_forward_enabled is False
+

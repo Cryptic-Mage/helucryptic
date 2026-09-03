@@ -1,4 +1,4 @@
-"""Tests for membership certificates (feature D) — crypto core."""
+"""Tests for membership certificates (feature D) - crypto core."""
 import crypto
 
 
@@ -58,3 +58,22 @@ def test_garbage_cert_rejected(tmp_path, monkeypatch):
         "not-a-token", creator["ed25519_public"], "ROOM-AB12", "bob", "k")
     assert not crypto.verify_membership_cert(
         "", creator["ed25519_public"], "ROOM-AB12", "bob", "k")
+
+
+def test_cert_bound_to_username(tmp_path, monkeypatch):
+    creator = _keys(tmp_path, "creator", monkeypatch)
+    member = _keys(tmp_path, "member", monkeypatch)
+    cert = crypto.issue_membership_cert(
+        creator["ed25519_private"], creator["ed25519_public"],
+        "ROOM-AB12", "bob", member["ed25519_public"])
+    # cert is for 'bob', we verify against 'charlie' -> rejected
+    assert not crypto.verify_membership_cert(
+        cert, creator["ed25519_public"], "ROOM-AB12", "charlie", member["ed25519_public"])
+
+
+def test_cert_empty_creator_rejected(tmp_path, monkeypatch):
+    member = _keys(tmp_path, "member", monkeypatch)
+    # Empty creator key should immediately fail validation
+    assert not crypto.verify_membership_cert(
+        "some-cert", "", "ROOM-AB12", "bob", member["ed25519_public"])
+

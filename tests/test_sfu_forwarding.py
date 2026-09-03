@@ -1,8 +1,11 @@
 import asyncio
 import json
-import pytest
-import webrtc_engine
 from unittest.mock import AsyncMock
+
+import pytest
+
+import webrtc_engine
+
 
 class MS:
     security_mode = "e2ee"; turn_url = ""
@@ -87,14 +90,14 @@ async def test_remove_peer_clears_forwarding_bookkeeping():
 @pytest.mark.asyncio
 async def test_track_origin_mapping_resolves_origin():
     e = _e()
-    await e._handle_track_origin({"track_id": "t1", "origin": "carol", "kind": "audio"}, "bob")
+    e._handle_track_origin({"track_id": "t1", "origin": "carol", "kind": "audio"})
     assert e._origin_of("t1") == "carol"
 
 @pytest.mark.asyncio
 async def test_origin_unknown_returns_none():
     e = _e()
     assert e._origin_of("t2") is None
-    await e._handle_track_origin({"track_id": "t2", "origin": "dave", "kind": "audio"}, "bob")
+    e._handle_track_origin({"track_id": "t2", "origin": "dave", "kind": "audio"})
     assert e._origin_of("t2") == "dave"
 
 @pytest.mark.asyncio
@@ -119,7 +122,7 @@ async def test_resolve_origin_resolved_by_late_mapping():
     e.current_hub = lambda: "thehub"        # not the hub
     async def feed():
         await asyncio.sleep(0.05)
-        await e._handle_track_origin({"track_id": "tZ", "origin": "carol", "kind": "audio"}, "thehub")
+        e._handle_track_origin({"track_id": "tZ", "origin": "carol", "kind": "audio"})
     task = asyncio.ensure_future(feed())
     got = await e._resolve_origin("tZ", fallback="thehub")
     await task
@@ -138,7 +141,7 @@ async def test_relay_frame_to_others_skips_source():
         def __init__(self, p): self.p = p; self.readyState = "open"
         def send(self, m): out.setdefault(self.p, []).append(m)
     e.data_channels = {"bob": Ch("bob"), "carol": Ch("carol")}
-    await e._relay_frame_to_others(json.dumps({"__type":"chat","token":"CIPHER"}), source="bob")
+    e._relay_frame_to_others(json.dumps({"__type":"chat","token":"CIPHER"}), source="bob")
     assert "carol" in out and "bob" not in out
     assert json.loads(out["carol"][0])["token"] == "CIPHER"
 
@@ -150,7 +153,7 @@ async def test_relay_forwards_binary_bytes():
         def __init__(self, p): self.p = p; self.readyState = "open"
         def send(self, m): out.setdefault(self.p, []).append(m)
     e.data_channels = {"bob": Ch("bob"), "carol": Ch("carol")}
-    await e._relay_frame_to_others(b"\x00\x01\x02", source="bob")
+    e._relay_frame_to_others(b"\x00\x01\x02", source="bob")
     assert out["carol"] == [b"\x00\x01\x02"] and "bob" not in out
 
 @pytest.mark.asyncio

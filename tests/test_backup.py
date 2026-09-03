@@ -79,29 +79,29 @@ def test_emergency_wipe_only_targets(tmp_path, monkeypatch):
 def test_import_backup_cleans_and_restores_sidecars(tmp_path, monkeypatch):
     monkeypatch.setattr(backup, "DATA_DIR", tmp_path)
     _seed(tmp_path)
-    
+
     # Write initial sidecars
     (tmp_path / "history.db-wal").write_text("old-wal")
     (tmp_path / "history.db-shm").write_text("old-shm")
-    
+
     blob = backup.export_backup("hunter2", include_history=True)
-    
+
     # Clear live files, and write new dummy sidecar files that should be clobbered
     (tmp_path / "history.db-wal").write_text("live-wal")
     (tmp_path / "history.db-shm").write_text("live-shm")
-    
+
     # Restore backup
     restored = backup.import_backup(blob, "hunter2")
     assert "history.db" in restored
-    
+
     # Sidecars should be unlinked/deleted so SQLite doesn't recovery-fail
     assert not (tmp_path / "history.db-wal").exists()
     assert not (tmp_path / "history.db-shm").exists()
-    
+
     # Check that backup files for sidecars were created
     assert (tmp_path / "history.db-wal.bak").read_text() == "live-wal"
     assert (tmp_path / "history.db-shm.bak").read_text() == "live-shm"
-    
+
     # Test rollback: corrupt the data and try to restore, which should trigger rollback
     # We will simulate a failure by mocking shutil.copy2 or os.replace to raise an exception
     original_replace = backup.os.replace
@@ -109,22 +109,22 @@ def test_import_backup_cleans_and_restores_sidecars(tmp_path, monkeypatch):
         if "history.db" in str(dst):
             raise OSError("Mock write error")
         return original_replace(src, dst)
-    
+
     monkeypatch.setattr(backup.os, "replace", mock_replace)
-    
+
     # Re-create sidecars to test rollback
     (tmp_path / "history.db-wal").write_text("current-wal")
     (tmp_path / "history.db-shm").write_text("current-shm")
-    
+
     # Remove old .bak files so we can verify if new ones are created during the failed restore
     if (tmp_path / "history.db-wal.bak").exists():
         (tmp_path / "history.db-wal.bak").unlink()
     if (tmp_path / "history.db-shm.bak").exists():
         (tmp_path / "history.db-shm.bak").unlink()
-        
+
     with pytest.raises(ValueError):
         backup.import_backup(blob, "hunter2")
-        
+
     # After failed restore, live sidecars should be restored
     assert (tmp_path / "history.db-wal").read_text() == "current-wal"
     assert (tmp_path / "history.db-shm").read_text() == "current-shm"

@@ -1,8 +1,9 @@
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from webrtc_engine import reachability_tier, elect_hub
+import pytest
+
 import webrtc_engine
+from webrtc_engine import elect_hub, reachability_tier
 
 
 class S:  # minimal settings stand-in

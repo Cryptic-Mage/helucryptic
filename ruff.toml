@@ -1,0 +1,46 @@
+target-version = "py311"
+
+# Exclude generated / vendored / third-party directories
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "cloudflare/.wrangler",
+]
+
+[lint]
+# Enable rules: errors (E), pyflakes (F), pycodestyle (W), isort (I),
+# pygrep-hooks (PGH), pylint convention (PLC), ruff-specific (RUF),
+# bugbear (B), and flake8-2020 (YTT)
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "PGH",  # pygrep-hooks
+    "PLC",  # pylint convention
+    "YTT",  # flake8-2020
+]
+
+# Ignore rules that don't fit this project's style
+ignore = [
+    "E501",  # line-too-long — kept flexible
+    "N802",  # function names with uppercase — some third-party compat
+    "N803",  # argument names with uppercase
+    "N806",  # variable names with uppercase
+    "SIM108", # use ternary — prefer explicit if/else
+    "PLC0414", # import alias unused
+    "RUF012",  # mutable class defaults — used intentionally in dataclasses
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["N801", "N802", "N803", "N806", "N999", "SIM", "PLC"]

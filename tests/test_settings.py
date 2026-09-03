@@ -1,8 +1,10 @@
-import pytest
-from pathlib import Path
 import json
+
+import pytest
+
 import settings
 from settings import Settings
+
 
 @pytest.fixture(autouse=True)
 def patch_settings_dir(tmp_path, monkeypatch):
@@ -26,10 +28,10 @@ def test_save_and_load_settings():
         low_perf_mode=True
     )
     settings.save_settings(s)
-    
+
     # Check if saved to disk correctly
     assert settings._SETTINGS_PATH.exists()
-    
+
     # Load settings back
     loaded = settings.load_settings()
     assert loaded.security_mode == "dtls"
@@ -38,11 +40,26 @@ def test_save_and_load_settings():
     assert loaded.signaling_url == "ws://example.com"
     assert loaded.low_perf_mode is True
 
+def test_noise_reduce_fields_default_off():
+    s = Settings()
+    assert s.noise_reduce is False
+    assert s.noise_reduce_stationary is True
+
+
+def test_noise_reduce_fields_round_trip():
+    s = Settings(noise_reduce=True, noise_reduce_stationary=False)
+    settings.save_settings(s)
+
+    loaded = settings.load_settings()
+    assert loaded.noise_reduce is True
+    assert loaded.noise_reduce_stationary is False
+
+
 def test_load_corrupted_settings():
     # Write invalid JSON to settings file
     settings.DATA_DIR.mkdir(exist_ok=True)
     settings._SETTINGS_PATH.write_text("corrupted json string{")
-    
+
     # It should catch the exception and return default settings
     s = settings.load_settings()
     assert s.security_mode == "e2ee"
@@ -78,10 +95,93 @@ def test_load_partial_or_unknown_fields():
         "security_mode": "dtls",
         "unknown_field": "some_value"
     }))
-    
+
     s = settings.load_settings()
     # Explicitly matched fields are loaded
     assert s.security_mode == "dtls"
     # Unspecified fields use default values
     assert s.retention_days == 30
     assert s.push_to_talk_key == "space"
+
+
+def test_settings_ui_rendering(monkeypatch):
+    pytest.importorskip("flet")
+    import flet as ft
+
+    import client
+    from settings import Settings
+
+    class FakeApp:
+        settings = Settings()
+        def _settings_on_retention_change(self, ev): pass
+        def _settings_on_profile_change(self, ev): pass
+        def _settings_do_test_turn(self, ev): pass
+        def _settings_do_pf_autodetect(self, ev): pass
+        def _settings_do_pf_test(self, ev): pass
+        def _settings_export_keys(self, ev): pass
+        def _settings_import_keys(self, ev): pass
+        def _settings_regen_keys(self, ev): pass
+        def _settings_do_switch_profile(self, ev): pass
+        def _settings_do_create_profile(self, ev): pass
+        def _settings_save(self, ev): pass
+        def _close_dialog(self, dlg): pass
+        def _show_dialog(self, dlg): pass
+        def _reveal(self, card, delay=0): pass
+        def _show_my_identity(self, ev): pass
+        def _show_backup(self, ev): pass
+        def _show_restore(self, ev): pass
+        def _show_wipe(self, ev): pass
+        
+        # Bind the real method from client.HelucrypticApp
+        _settings_section = client.HelucrypticApp._settings_section
+
+    app = FakeApp()
+    client.HelucrypticApp._show_settings(app, None)
+
+    assert isinstance(app._settings_dlg, ft.AlertDialog)
+    assert app._settings_retention_dd.value == "30"
+    assert app._settings_profile_dd.value == "balanced"
+
+
+def test_settings_noise_reduce_checkbox_renders_and_saves(monkeypatch):
+    pytest.importorskip("flet")
+    import client
+
+    monkeypatch.setattr(client, "save_settings", lambda s: None)
+
+    class FakeApp:
+        settings = Settings(noise_reduce=True)
+        def _settings_on_retention_change(self, ev): pass
+        def _settings_on_profile_change(self, ev): pass
+        def _settings_do_test_turn(self, ev): pass
+        def _settings_do_pf_autodetect(self, ev): pass
+        def _settings_do_pf_test(self, ev): pass
+        def _settings_export_keys(self, ev): pass
+        def _settings_import_keys(self, ev): pass
+        def _settings_regen_keys(self, ev): pass
+        def _settings_do_switch_profile(self, ev): pass
+        def _settings_do_create_profile(self, ev): pass
+        def _close_dialog(self, dlg): pass
+        def _show_dialog(self, dlg): pass
+        def _reveal(self, card, delay=0): pass
+        def _show_my_identity(self, ev): pass
+        def _show_backup(self, ev): pass
+        def _show_restore(self, ev): pass
+        def _show_wipe(self, ev): pass
+        def _log(self, msg): pass
+        def _update_perf_parameters(self): pass
+        def _apply_port_forward(self): pass
+        _settings_section = client.HelucrypticApp._settings_section
+        _settings_save = client.HelucrypticApp._settings_save
+
+    app = FakeApp()
+    client.HelucrypticApp._show_settings(app, None)
+
+    # Checkbox reflects the stored setting...
+    assert app._settings_noise_reduce_cb.value is True
+
+    # ...and Save writes the checkbox state back onto settings.
+    app._settings_noise_reduce_cb.value = False
+    client.HelucrypticApp._settings_save(app, None)
+    assert app.settings.noise_reduce is False
+

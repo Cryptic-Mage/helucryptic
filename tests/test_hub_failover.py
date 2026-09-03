@@ -70,3 +70,25 @@ async def test_remove_peer_forgets_capability_and_psk():
     assert "alice" not in e._psk_authed
     assert "alice" not in e._psk_my_nonce
     assert "alice" not in e._pending_call_start
+
+
+def test_elect_hub_empty_members_returns_creator():
+    assert elect_hub({}, creator="alice") == "alice"
+
+
+def test_elect_hub_best_is_zero_returns_creator():
+    assert elect_hub({"bob": 0, "carol": 0}, creator="alice") == "alice"
+
+
+def test_elect_hub_creator_wins_ties():
+    # Tie between alice and bob at tier 3. alice is creator, so she should win.
+    assert elect_hub({"alice": 3, "bob": 3}, creator="alice") == "alice"
+    # Even if bob is alphabetically first, alice wins because she is the creator and is in the top tier
+    assert elect_hub({"bob": 3, "alice": 3}, creator="alice") == "alice"
+
+
+def test_elect_hub_alphabetical_tie_breaker():
+    # Tie between bob and carol at tier 3. alice is creator but at tier 1.
+    # The tie-breaker should choose alphabetically: "bob" before "carol".
+    assert elect_hub({"bob": 3, "carol": 3, "alice": 1}, creator="alice") == "bob"
+

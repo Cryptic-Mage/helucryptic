@@ -1,4 +1,9 @@
-"""Tests for PSK channel authentication (feature C) in WebRTCEngine."""
+"""Tests for PSK channel authentication (feature C) in WebRTCEngine.
+
+The proof is HMAC(psk, nonce | room_id | responder_username): binding the
+RESPONDER's name into the proof is what defeats the reflection attack (echoing
+a victim's own nonce back at them and replaying their answer).
+"""
 import base64
 import json
 import os
@@ -29,19 +34,20 @@ def _engine(name, psk, room="ROOM-AB12"):
     return e
 
 
-def test_proof_is_symmetric_for_same_psk_and_room():
+def test_proof_agrees_for_same_psk_room_and_responder():
     psk = invites.generate_psk()
     a = _engine("alice", psk)
     b = _engine("bob", psk)
     nonce = base64.b64encode(os.urandom(16)).decode()
-    assert a._psk_proof(nonce) == b._psk_proof(nonce)
+    # Both engines derive the same proof for the same responder identity.
+    assert a._psk_proof(nonce, "alice") == b._psk_proof(nonce, "alice")
 
 
 def test_proof_differs_for_wrong_psk():
     nonce = "NONCE"
     a = _engine("alice", invites.generate_psk())
     c = _engine("carol", invites.generate_psk())
-    assert a._psk_proof(nonce) != c._psk_proof(nonce)
+    assert a._psk_proof(nonce, "x") != c._psk_proof(nonce, "x")
 
 
 def test_proof_bound_to_room_id():
@@ -49,7 +55,13 @@ def test_proof_bound_to_room_id():
     nonce = "NONCE"
     a = _engine("alice", psk, room="ROOM-AB12")
     d = _engine("dave", psk, room="ROOM-ZZ99")
-    assert a._psk_proof(nonce) != d._psk_proof(nonce)
+    assert a._psk_proof(nonce, "x") != d._psk_proof(nonce, "x")
+
+
+def test_proof_bound_to_responder_identity():
+    psk = invites.generate_psk()
+    a = _engine("alice", psk)
+    assert a._psk_proof("NONCE", "alice") != a._psk_proof("NONCE", "mallory")
 
 
 def test_set_room_psk_clears():
@@ -74,8 +86,9 @@ async def test_challenge_is_answered_with_valid_proof():
     await a._handle_psk("psk_challenge", {"nonce": "PEERNONCE"}, "bob")
     msg = json.loads(sent[0])
     assert msg["__type"] == "psk_response"
-    # The proof must verify against what a peer holding the same PSK expects.
-    assert msg["proof"] == _engine("bob", psk)._psk_proof("PEERNONCE")
+    # The proof must verify against what a peer holding the same PSK expects
+    # for responder "alice" (the engine answering the challenge).
+    assert msg["proof"] == _engine("bob", psk)._psk_proof("PEERNONCE", "alice")
 
 
 @pytest.mark.asyncio
@@ -87,7 +100,7 @@ async def test_correct_response_authenticates_and_starts_session():
     async def fake_start(p): started.append(p)
     a._start_session = fake_start
 
-    good_proof = _engine("bob", psk)._psk_proof("MYNONCE")
+    good_proof = _engine("bob", psk)._psk_proof("MYNONCE", "bob")
     await a._handle_psk("psk_response", {"proof": good_proof}, "bob")
     assert a._psk_authed["bob"] is True
     assert started == ["bob"]
@@ -104,3 +117,50 @@ async def test_wrong_response_aborts_connection():
     await a._handle_psk("psk_response", {"proof": "deadbeef"}, "bob")
     assert a._psk_authed.get("bob") is not True
     assert removed == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_reflection_attack_is_rejected():
+    """Mallory (no PSK) echoes Alice's own nonce back as a challenge, then
+    replays Alice's answer as her response. The responder binding must make
+    the replayed proof fail."""
+    psk = invites.generate_psk()
+    alice = _engine("alice", psk)
+    alice._psk_my_nonce["mallory"] = "ALICE-NONCE"
+
+    captured = []
+
+    class FakeCh:
+        readyState = "open"
+        def send(self, s): captured.append(s)
+
+    alice.data_channels["mallory"] = FakeCh()
+
+    removed = []
+    async def fake_remove(p): removed.append(p)
+    alice.remove_peer = fake_remove
+
+    # Mallory reflects Alice's own nonce as HER challenge; Alice answers.
+    await alice._handle_psk("psk_challenge", {"nonce": "ALICE-NONCE"}, "mallory")
+    reflected_proof = json.loads(captured[0])["proof"]
+
+    # Mallory replays Alice's answer as her own response to Alice's challenge.
+    await alice._handle_psk("psk_response", {"proof": reflected_proof}, "mallory")
+    assert alice._psk_authed.get("mallory") is not True
+    assert removed == ["mallory"]
+
+
+@pytest.mark.asyncio
+async def test_nonce_is_single_use():
+    """A correct proof consumes the pending nonce - replaying it later must
+    not re-trigger session start against a stale nonce."""
+    psk = invites.generate_psk()
+    a = _engine("alice", psk)
+    a._psk_my_nonce["bob"] = "MYNONCE"
+    started = []
+    async def fake_start(p): started.append(p)
+    a._start_session = fake_start
+
+    good_proof = _engine("bob", psk)._psk_proof("MYNONCE", "bob")
+    await a._handle_psk("psk_response", {"proof": good_proof}, "bob")
+    assert "bob" not in a._psk_my_nonce  # nonce consumed

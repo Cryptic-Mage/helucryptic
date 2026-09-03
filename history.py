@@ -1,15 +1,12 @@
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Optional
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 
 from crypto import paseto_decrypt, paseto_encrypt
-
 from paths import DATA_DIR
+
 _DB_PATH  = DATA_DIR / "history.db"
 
-
-from contextlib import contextmanager
 
 def _connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(exist_ok=True)
@@ -76,17 +73,17 @@ def write_message(
     content: str,
     history_key: bytes,
     security_mode: str,
-    filename: Optional[str] = None,
+    filename: str | None = None,
     verified: bool = False,
-    room_id: Optional[str] = None,
-    sender: Optional[str] = None,
+    room_id: str | None = None,
+    sender: str | None = None,
 ) -> None:
     stored = (
         paseto_encrypt({"text": content}, history_key)
         if security_mode == "e2ee"
         else content
     )
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     with _get_conn() as conn:
         conn.execute(
             "INSERT INTO messages "
@@ -150,8 +147,8 @@ def read_room_messages(
 # Peer-assisted history sync helpers (feature E)
 # ---------------------------------------------------------------------------
 
-def last_room_message_ts(room_id: str) -> Optional[str]:
-    """The newest stored timestamp for a room, or None — our 'since' watermark."""
+def last_room_message_ts(room_id: str) -> str | None:
+    """The newest stored timestamp for a room, or None - our 'since' watermark."""
     with _get_conn() as conn:
         row = conn.execute(
             "SELECT MAX(timestamp) AS ts FROM messages WHERE room_id = ?", (room_id,)
@@ -161,7 +158,7 @@ def last_room_message_ts(room_id: str) -> Optional[str]:
 
 def read_room_messages_since(
     room_id: str,
-    since: Optional[str],
+    since: str | None,
     history_key: bytes,
     security_mode: str,
     my_username: str = "",
@@ -211,7 +208,7 @@ def read_room_message_keys(
 ) -> set:
     """A dedup set of (sender, content) for a room. Keyed on decrypted content
     (not timestamp) because the same logical message has different receive-local
-    timestamps on each peer — content+sender is its stable cross-peer identity."""
+    timestamps on each peer - content+sender is its stable cross-peer identity."""
     with _get_conn() as conn:
         rows = conn.execute(
             "SELECT content, sender FROM messages WHERE room_id = ? AND msg_type = 'chat' "
@@ -233,7 +230,7 @@ def read_room_message_keys(
 def run_retention_policy(retention_days: int) -> int:
     if retention_days == 0:
         return 0
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
     with _get_conn() as conn:
         cur = conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
         return cur.rowcount

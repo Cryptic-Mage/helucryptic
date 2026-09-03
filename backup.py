@@ -4,7 +4,7 @@ A backup bundles the profile files (keys, contacts, settings, optionally the
 history DB), encrypts them under a passphrase-derived key (scrypt → PASETO
 v4.local / XChaCha20-Poly1305), and writes a small JSON container. Restore
 validates and decrypts BEFORE touching any live file, and backs up each
-existing file to `.bak` before overwriting — a failed restore leaves the
+existing file to `.bak` before overwriting - a failed restore leaves the
 current profile intact.
 """
 import base64
@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 
+# pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 import secure_store
@@ -26,14 +27,17 @@ _PROFILE_FILES = ["keys.json", "contacts.json", "settings.json"]
 _HISTORY_FILE = "history.db"
 _HISTORY_SIDECARS = ["history.db-wal", "history.db-shm"]
 
-# scrypt parameters (memory-hard). n=2**14 keeps it snappy while still costly.
-_SCRYPT_N = 2 ** 14
+# scrypt parameters (memory-hard). n=2**15 is ~2x cost of previous 2**14 but still <150 ms on modern CPUs;
+# OWASP 2023 suggests n>=2**17 for interactive logins, but backup encrypt is infrequent and must stay snappy for UX.
+# Versioned via container "v": old backups (v=1) with n=14 still decrypt via legacy fallback below.
+_SCRYPT_N = 2 ** 15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+_SCRYPT_N_LEGACY = 2 ** 14
 
 
-def _derive_key(passphrase: str, salt: bytes) -> bytes:
-    kdf = Scrypt(salt=salt, length=32, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P)
+def _derive_key(passphrase: str, salt: bytes, n: int | None = None) -> bytes:
+    kdf = Scrypt(salt=salt, length=32, n=n if n is not None else _SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P)
     return kdf.derive(passphrase.encode("utf-8"))
 
 
@@ -55,7 +59,7 @@ def export_backup(passphrase: str, include_history: bool = False) -> bytes:
     salt = os.urandom(16)
     token = paseto_encrypt({"files": files}, _derive_key(passphrase, salt))
     container = {
-        "magic": _MAGIC, "v": 1, "kdf": "scrypt",
+        "magic": _MAGIC, "v": 2, "kdf": "scrypt", "kdf_n": _SCRYPT_N,
         "salt": base64.b64encode(salt).decode(), "token": token,
     }
     return json.dumps(container).encode()
@@ -71,12 +75,145 @@ def validate_and_decrypt(data: bytes, passphrase: str) -> dict:
         raise ValueError("Not a helucryptic backup file")
     try:
         salt = base64.b64decode(container["salt"])
-        payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt))
+        # Versioned scrypt: v2 stores kdf_n, v1 legacy uses _SCRYPT_N_LEGACY
+        kdf_n = container.get("kdf_n")
+        if kdf_n is None:
+            # legacy backup - try current N then fallback to legacy N
+            try:
+                payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=_SCRYPT_N))
+            except Exception:
+                payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=_SCRYPT_N_LEGACY))
+        else:
+            try:
+                n_val = int(kdf_n)
+            except (TypeError, ValueError):
+                n_val = _SCRYPT_N
+            payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=n_val))
     except Exception:
         raise ValueError("Wrong passphrase or corrupted backup")
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), dict):
         raise ValueError("Backup contents are invalid")
     return payload
+
+
+def _decode_backup_files(payload_files: dict, allowed: set) -> dict:
+    decoded = {}
+    for name, b64 in payload_files.items():
+        if name not in allowed:
+            continue  # ignore unexpected entries
+        try:
+            decoded[name] = base64.b64decode(b64)
+        except Exception:
+            raise ValueError(f"Backup entry {name} is invalid")
+    return decoded
+
+
+def _rekey_identity(decoded: dict) -> None:
+    # Re-wrap the identity keys with this machine's OS keystore before writing
+    # (normalise: unwrap if a legacy backup carried a wrapped blob, then wrap).
+    if _KEYS_FILE in decoded:
+        decoded[_KEYS_FILE] = secure_store.protect(
+            secure_store.unprotect(decoded[_KEYS_FILE])
+        )
+
+
+def _cleanup_temps(temps: dict) -> None:
+    for tmp in temps.values():
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+
+def _stage_restored_files(decoded: dict) -> dict:
+    temps = {}
+    try:
+        # Stage every restored file first. Live files are untouched until all
+        # decoded bytes have been written successfully.
+        for name, raw in decoded.items():
+            fd, tmp_name = tempfile.mkstemp(prefix=f".restore-{name}.", dir=DATA_DIR)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                raise
+            temps[name] = DATA_DIR / tmp_name
+        return temps
+    except Exception:
+        _cleanup_temps(temps)
+        raise
+
+
+def _backup_and_unlink_sidecar(sidecar: str, backups: dict) -> None:
+    sidecar_path = DATA_DIR / sidecar
+    if sidecar_path.exists():
+        sidecar_bak = sidecar_path.with_name(sidecar_path.name + ".bak")
+        try:
+            shutil.copy2(sidecar_path, sidecar_bak)
+            backups[sidecar] = sidecar_bak
+            sidecar_path.unlink()
+        except Exception:
+            # if copy/delete fails, try at least to unlink the sidecar
+            try:
+                sidecar_path.unlink()
+            except Exception:
+                pass
+
+
+def _replace_files(decoded: dict, temps: dict, backups: dict, replaced: list, restored: list) -> None:
+    for name in decoded:
+        target = DATA_DIR / name
+        backup_path = target.with_name(target.name + ".bak")
+        if target.exists():
+            shutil.copy2(target, backup_path)
+            backups[name] = backup_path
+        # If we are overwriting history.db, also back up and remove existing WAL/SHM sidecars
+        if name == _HISTORY_FILE:
+            for sidecar in _HISTORY_SIDECARS:
+                _backup_and_unlink_sidecar(sidecar, backups)
+        os.replace(temps[name], target)
+        replaced.append(name)
+        restored.append(name)
+
+
+def _rollback_replaced_files(replaced: list, backups: dict) -> None:
+    # Best-effort rollback for any file already swapped into place.
+    for name in reversed(replaced):
+        target = DATA_DIR / name
+        backup_path = backups.get(name)
+        try:
+            if backup_path and backup_path.exists():
+                shutil.copy2(backup_path, target)
+            elif target.exists():
+                target.unlink()
+        except Exception:
+            pass
+
+
+def _rollback_sidecars(backups: dict) -> None:
+    # Restore database sidecar files if they were backed up during this failed session
+    for sidecar in _HISTORY_SIDECARS:
+        sidecar_path = DATA_DIR / sidecar
+        sidecar_bak = backups.get(sidecar)
+        if sidecar_bak and sidecar_bak.exists():
+            try:
+                if sidecar_path.exists():
+                    sidecar_path.unlink()
+                shutil.copy2(sidecar_bak, sidecar_path)
+            except Exception:
+                pass
+
+
+def _rollback_restore(replaced: list, backups: dict) -> None:
+    _rollback_replaced_files(replaced, backups)
+    _rollback_sidecars(backups)
 
 
 def import_backup(data: bytes, passphrase: str) -> list:
@@ -85,93 +222,21 @@ def import_backup(data: bytes, passphrase: str) -> list:
     allowed = set(_PROFILE_FILES) | {_HISTORY_FILE}
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    decoded = {}
-    for name, b64 in payload["files"].items():
-        if name not in allowed:
-            continue  # ignore unexpected entries
-        try:
-            decoded[name] = base64.b64decode(b64)
-        except Exception:
-            raise ValueError(f"Backup entry {name} is invalid")
-
-    # Re-wrap the identity keys with this machine's OS keystore before writing
-    # (normalise: unwrap if a legacy backup carried a wrapped blob, then wrap).
-    if _KEYS_FILE in decoded:
-        decoded[_KEYS_FILE] = secure_store.protect(
-            secure_store.unprotect(decoded[_KEYS_FILE])
-        )
+    decoded = _decode_backup_files(payload["files"], allowed)
+    _rekey_identity(decoded)
 
     temps = {}
     backups = {}
     restored = []
     replaced = []
     try:
-        # Stage every restored file first. Live files are untouched until all
-        # decoded bytes have been written successfully.
-        for name, raw in decoded.items():
-            fd, tmp_name = tempfile.mkstemp(prefix=f".restore-{name}.", dir=DATA_DIR)
-            with os.fdopen(fd, "wb") as f:
-                f.write(raw)
-                f.flush()
-                os.fsync(f.fileno())
-            temps[name] = DATA_DIR / tmp_name
-
-        for name in decoded:
-            target = DATA_DIR / name
-            backup_path = target.with_name(target.name + ".bak")
-            if target.exists():
-                shutil.copy2(target, backup_path)
-                backups[name] = backup_path
-            # If we are overwriting history.db, also back up and remove existing WAL/SHM sidecars
-            if name == _HISTORY_FILE:
-                for sidecar in _HISTORY_SIDECARS:
-                    sidecar_path = DATA_DIR / sidecar
-                    if sidecar_path.exists():
-                        sidecar_bak = sidecar_path.with_name(sidecar_path.name + ".bak")
-                        try:
-                            shutil.copy2(sidecar_path, sidecar_bak)
-                            backups[sidecar] = sidecar_bak
-                            sidecar_path.unlink()
-                        except Exception:
-                            # if copy/delete fails, try at least to unlink the sidecar
-                            try:
-                                sidecar_path.unlink()
-                            except Exception:
-                                pass
-            os.replace(temps[name], target)
-            replaced.append(name)
-            restored.append(name)
+        temps = _stage_restored_files(decoded)
+        _replace_files(decoded, temps, backups, replaced, restored)
     except Exception as ex:
-        # Best-effort rollback for any file already swapped into place.
-        for name in reversed(replaced):
-            target = DATA_DIR / name
-            backup_path = backups.get(name)
-            try:
-                if backup_path and backup_path.exists():
-                    shutil.copy2(backup_path, target)
-                elif target.exists():
-                    target.unlink()
-            except Exception:
-                pass
-        # Restore database sidecar files if they were backed up during this failed session
-        for sidecar in _HISTORY_SIDECARS:
-            sidecar_path = DATA_DIR / sidecar
-            sidecar_bak = backups.get(sidecar)
-            if sidecar_bak and sidecar_bak.exists():
-                try:
-                    if sidecar_path.exists():
-                        sidecar_path.unlink()
-                    shutil.copy2(sidecar_bak, sidecar_path)
-                except Exception:
-                    pass
+        _rollback_restore(replaced, backups)
         raise ValueError(f"Could not restore backup: {type(ex).__name__}") from ex
     finally:
-        for tmp in temps.values():
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
+        _cleanup_temps(temps)
     return restored
 
 
