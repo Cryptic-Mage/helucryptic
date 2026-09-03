@@ -8,9 +8,9 @@ mss>=9.0
 av>=10,<17
 sounddevice>=0.5
 noisereduce>=3.0
-cryptography>=42.0.1,<44.0.0
-pyopenssl==25.0.0
-pyseto==1.8.0
+cryptography>=44.0.0,<45
+pyopenssl>=25.0.0
+pyseto>=1.9.0
 flet>=0.85,<0.86
 flet-desktop>=0.85,<0.86
 Pillow>=10.0,<12
