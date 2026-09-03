@@ -1,8 +1,9 @@
 import asyncio
 import json
+import time
 from collections import deque
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -385,6 +386,185 @@ def test_microphone_track_threadsafe_callback(mock_sd):
         track._queue = MagicMock()
         track._queue_put(dummy_data)
         track._queue.put_nowait.assert_called_once_with(dummy_data)
+
+
+def _fake_frame():
+    return np.zeros((960, 1), dtype=np.int16)
+
+
+@patch("webrtc_engine.sd")
+def test_microphone_track_noise_reduce_off_by_default(mock_sd):
+    mock_sd.InputStream.return_value = MagicMock()
+    from webrtc_engine import MicrophoneTrack
+
+    mock_loop = MagicMock()
+    with patch("asyncio.get_event_loop", return_value=mock_loop):
+        track = MicrophoneTrack(push_to_talk=False)
+
+    assert track._reducer is None
+    # Callback still feeds the asyncio queue directly (unchanged behaviour).
+    track._audio_callback(_fake_frame(), 960, None, None)
+    mock_loop.call_soon_threadsafe.assert_called_once_with(track._queue_put, ANY)
+
+
+@patch("webrtc_engine.sd")
+def test_microphone_track_noise_reduce_routes_frames_to_reducer(mock_sd):
+    mock_sd.InputStream.return_value = MagicMock()
+    from webrtc_engine import MicrophoneTrack
+
+    mock_loop = MagicMock()
+    fake_nr = MagicMock()
+    with patch("asyncio.get_event_loop", return_value=mock_loop), \
+         patch("webrtc_engine._load_noisereduce", return_value=fake_nr), \
+         patch("webrtc_engine._NoiseReducer") as MockReducer:
+        track = MicrophoneTrack(noise_reduce=True)
+
+        assert track._reducer is MockReducer.return_value
+        track._audio_callback(_fake_frame(), 960, None, None)
+
+        track._reducer.submit.assert_called_once()
+        mock_loop.call_soon_threadsafe.assert_not_called()
+
+
+@patch("webrtc_engine.sd")
+def test_microphone_track_noise_reduce_import_failure_falls_back(mock_sd):
+    mock_sd.InputStream.return_value = MagicMock()
+    from webrtc_engine import MicrophoneTrack
+
+    mock_loop = MagicMock()
+    with patch("asyncio.get_event_loop", return_value=mock_loop), \
+         patch("webrtc_engine._load_noisereduce", side_effect=ImportError("nope")):
+        track = MicrophoneTrack(noise_reduce=True)
+
+    assert track._reducer is None
+    track._audio_callback(_fake_frame(), 960, None, None)
+    mock_loop.call_soon_threadsafe.assert_called_once_with(track._queue_put, ANY)
+
+
+@patch("webrtc_engine.sd")
+def test_microphone_track_stop_stops_reducer(mock_sd):
+    mock_sd.InputStream.return_value = MagicMock()
+    from webrtc_engine import MicrophoneTrack
+
+    with patch("asyncio.get_event_loop", return_value=MagicMock()), \
+         patch("webrtc_engine._load_noisereduce", return_value=MagicMock()), \
+         patch("webrtc_engine._NoiseReducer") as MockReducer:
+        track = MicrophoneTrack(noise_reduce=True)
+        track.stop()
+
+    MockReducer.return_value.stop.assert_called_once()
+
+
+def test_noise_reducer_denoises_frame_and_preserves_layout():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y
+    sink = MagicMock()
+    loop = MagicMock()
+
+    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
+    try:
+        out = r._denoise(_fake_frame())
+    finally:
+        r.stop()
+
+    _, kwargs = fake_nr.reduce_noise.call_args
+    assert kwargs["sr"] == 48000
+    assert kwargs["stationary"] is True
+    assert out.dtype == np.int16
+    assert out.shape == (960, 1)
+
+
+def test_noise_reducer_respects_non_stationary_setting():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y
+    r = _NoiseReducer(48000, False, MagicMock(), MagicMock(), fake_nr)
+    try:
+        r._denoise(_fake_frame())
+    finally:
+        r.stop()
+
+    _, kwargs = fake_nr.reduce_noise.call_args
+    assert kwargs["stationary"] is False
+
+
+def test_noise_reducer_denoise_falls_back_to_raw_on_error():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = RuntimeError("boom")
+    r = _NoiseReducer(48000, True, MagicMock(), MagicMock(), fake_nr)
+    frame = _fake_frame()
+    try:
+        out = r._denoise(frame)
+    finally:
+        r.stop()
+
+    assert np.array_equal(out, frame)
+
+
+def test_noise_reducer_skips_denoise_under_backlog():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y
+    sink = MagicMock()
+    loop = MagicMock()
+
+    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
+    r.stop()  # kill the worker thread so we can drive _emit deterministically
+
+    # Drain any shutdown sentinel, then simulate a backlog.
+    while not r._q.empty():
+        r._q.get_nowait()
+    fake_nr.reduce_noise.reset_mock()
+    for _ in range(webrtc_engine._NR_OVERLOAD_FRAMES + 3):
+        r._q.put_nowait(_fake_frame())
+
+    r._emit(_fake_frame())
+
+    fake_nr.reduce_noise.assert_not_called()
+    loop.call_soon_threadsafe.assert_called_once()
+
+
+def test_noise_reducer_emits_denoised_frame_when_not_backlogged():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y
+    sink = MagicMock()
+    loop = MagicMock()
+
+    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
+    r.stop()
+    while not r._q.empty():
+        r._q.get_nowait()
+    fake_nr.reduce_noise.reset_mock()
+
+    r._emit(_fake_frame())
+
+    fake_nr.reduce_noise.assert_called_once()
+    loop.call_soon_threadsafe.assert_called_once_with(sink, ANY)
+
+
+@patch("webrtc_engine.sd")
+def test_get_mic_source_passes_noise_reduce_settings(mock_sd, engine, monkeypatch):
+    engine.settings.noise_reduce = True
+    engine.settings.noise_reduce_stationary = False
+    captured = {}
+
+    class FakeMic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(webrtc_engine, "MicrophoneTrack", FakeMic)
+    engine._get_mic_source()
+
+    assert captured["noise_reduce"] is True
+    assert captured["noise_reduce_stationary"] is False
 
 
 def test_forwarded_port_rewrites_only_matching_bind():

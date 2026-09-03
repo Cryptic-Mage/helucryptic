@@ -40,6 +40,21 @@ def test_save_and_load_settings():
     assert loaded.signaling_url == "ws://example.com"
     assert loaded.low_perf_mode is True
 
+def test_noise_reduce_fields_default_off():
+    s = Settings()
+    assert s.noise_reduce is False
+    assert s.noise_reduce_stationary is True
+
+
+def test_noise_reduce_fields_round_trip():
+    s = Settings(noise_reduce=True, noise_reduce_stationary=False)
+    settings.save_settings(s)
+
+    loaded = settings.load_settings()
+    assert loaded.noise_reduce is True
+    assert loaded.noise_reduce_stationary is False
+
+
 def test_load_corrupted_settings():
     # Write invalid JSON to settings file
     settings.DATA_DIR.mkdir(exist_ok=True)

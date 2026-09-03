@@ -1,13 +1,11 @@
 import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 from crypto import paseto_decrypt, paseto_encrypt
 from paths import DATA_DIR
 
 _DB_PATH  = DATA_DIR / "history.db"
-
-
-from contextlib import contextmanager
 
 
 def _connect() -> sqlite3.Connection:

@@ -342,7 +342,16 @@ class HelucrypticApp:
         ip = await asyncio.to_thread(local_ip_for, gw)
 
         async def request_fn(gateway: str):
-            # Try each candidate in order; stop at the first successful mapping.
+            # Optimized: try UPnP first (most home routers) - stdlib SSDP, no dep
+            try:
+                import upnp as _upnp
+                upnp_res = await asyncio.to_thread(_upnp.try_upnp_mapping, 0, 0)
+                if upnp_res:
+                    _, p = upnp_res
+                    return p
+            except Exception:
+                pass
+            # Try each NAT-PMP candidate in order; stop at the first successful mapping.
             for candidate in candidates:
                 port = await asyncio.to_thread(request_mapping_over_socket, candidate)
                 if port is not None:
@@ -861,7 +870,8 @@ class HelucrypticApp:
 
         # App frame floating over the static backdrop: presence bar across the
         # top, then the nav sidebar + chat panel below it.
-        app_frame = ft.Container(
+        # Responsive: margin fluid (8 on narrow, 16 on wide) via _apply_responsive.
+        self._app_frame = ft.Container(
             expand=True,
             margin=ft.Margin.all(10),
             border_radius=R.LG,
@@ -878,6 +888,7 @@ class HelucrypticApp:
             animate_opacity=_anim(280, _EASE_IO),
             animate_scale=_anim(280, _EASE_IO),
         )
+        app_frame = self._app_frame
 
         # Full-screen screen-share viewer - overlays everything when a tile is
         # maximized; a switcher row flips between multiple shared streams.
@@ -953,6 +964,12 @@ class HelucrypticApp:
         self.page.add(root)
         # Global keyboard shortcuts (Ctrl/Cmd+K command palette, Esc to close).
         self.page.on_keyboard_event = self._on_key
+        self.page.on_resized = self._on_resized
+        # Apply responsive once on load (handles initial narrow window)
+        try:
+            self._apply_responsive()
+        except Exception:
+            pass
 
         # Entrance reveal only. The rebrand drops ambient motion (drifting
         # background + pulsing status halo) in favour of a calm, static surface.
@@ -1065,6 +1082,8 @@ class HelucrypticApp:
 
     def _toggle_sidebar(self) -> None:
         """Collapse / expand the navigation sidebar (Ctrl+B)."""
+        import time as _t_toggle
+        self._last_manual_toggle = _t_toggle.monotonic()
         self._sidebar_collapsed = not getattr(self, "_sidebar_collapsed", False)
         self._sidebar.visible = not self._sidebar_collapsed
         self.btn_sidebar_toggle.icon = (
@@ -1075,15 +1094,75 @@ class HelucrypticApp:
         except Exception:
             pass
 
+    def _apply_responsive(self, e=None) -> None:
+        """Fluid layout: collapse sidebar on narrow viewports, adjust frame margin.
+
+        Optimized: debounce at 100ms to avoid full-page repaints at 60Hz during
+        window drag. Only mutates when breakpoint crosses, not on every pixel.
+        Tracks manual toggles to avoid auto-reopening a user-collapsed sidebar.
+        """
+        import time as _t_responsive
+        now = _t_responsive.monotonic()
+        last = getattr(self, "_responsive_last_run", 0.0)
+        if now - last < 0.1:
+            return
+        # Suppress auto logic shortly after a manual Ctrl+B toggle
+        last_manual = getattr(self, "_last_manual_toggle", 0.0)
+        if now - last_manual < 2.0:
+            return
+        self._responsive_last_run = now
+        try:
+            w = getattr(self.page, "window", None)
+            width = getattr(w, "width", None) or getattr(self.page, "width", 1200) or 1200
+            # Breakpoint: 1080 collapses sidebar (tablet), 768 stacks tighter
+            should_collapse = width < 1080
+            if should_collapse != getattr(self, "_sidebar_collapsed", False):
+                # Only auto-toggle if user hasn't manually toggled recently; simple: respect current but auto-collapse on small
+                if width < 1080 and not self._sidebar_collapsed:
+                    self._sidebar_collapsed = True
+                    self._sidebar.visible = False
+                    self.btn_sidebar_toggle.icon = ft.Icons.MENU
+                elif width >= 1080 and self._sidebar_collapsed and width > 1150:
+                    # Re-open only when comfortably wide, avoids flicker at threshold
+                    self._sidebar_collapsed = False
+                    self._sidebar.visible = True
+                    self.btn_sidebar_toggle.icon = ft.Icons.MENU_OPEN
+                try:
+                    self._sidebar.update()
+                    self.btn_sidebar_toggle.update()
+                except Exception:
+                    pass
+            # Fluid margin: 8 narrow, 10 mid, 16 wide
+            margin = 8 if width < 720 else 10 if width < 1400 else 16
+            if hasattr(self, "_app_frame"):
+                self._app_frame.margin = ft.Margin.all(margin)
+                try:
+                    self._app_frame.update()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_resized(self, e) -> None:
+        self._apply_responsive(e)
+
     def _on_key(self, e) -> None:
-        # Global shortcuts: Ctrl/Cmd+K palette, Esc closes it, Ctrl+B sidebar,
+        # Global shortcuts: Ctrl/Cmd+K palette, Esc closes it/dialog, Ctrl+B sidebar,
         # Ctrl+, settings.
         key = (getattr(e, "key", "") or "")
         mod = getattr(e, "ctrl", False) or getattr(e, "meta", False)
         if mod and key.lower() == "k":
             self._close_palette() if getattr(self, "_palette_open", False) else self._open_palette()
-        elif key == "Escape" and getattr(self, "_palette_open", False):
-            self._close_palette()
+        elif key == "Escape":
+            if getattr(self, "_palette_open", False):
+                self._close_palette()
+                return
+            # Close any open dialog (show_dialog/pop_dialog pattern) + palette
+            try:
+                self._close_dialog()
+                return
+            except Exception:
+                pass
         elif mod and key.lower() == "b":
             self._toggle_sidebar()
         elif mod and key == ",":
@@ -2011,8 +2090,14 @@ class HelucrypticApp:
             await self.engine.handle_offer(sender, data, ws_send)
         elif t == "answer":
             await self.engine.handle_answer(data, sender=sender)
+        elif t == "ice":
+            await self.engine.handle_ice(data, sender=sender)
         elif t == "ice-candidate":
             await self.engine.handle_ice(data, sender=sender)
+        elif t == "punch_at":
+            await self.engine.handle_punch_at(data, sender, ws_send)
+        elif t == "p2p_relay":
+            await self.engine.handle_p2p_relay(data, sender)
         elif t == "connect_request":
             await self._handle_sig_connect_request(sender, ws_send)
         elif t == "peer_joined":
@@ -3427,8 +3512,9 @@ class HelucrypticApp:
                 if self.pip_overlay.visible:
                     self._pip_img.src = tile.src
                     self._pip_img.update()
-        except Exception:
-            pass
+        except Exception as ex:
+            import logging
+            logging.getLogger("helucryptic.client").debug("video tile update failed: %s", ex)
 
     def _add_video_tile(self, sender: str) -> ft.Image:
         img  = ft.Image(
@@ -4597,7 +4683,8 @@ class HelucrypticApp:
             run_retention_policy(self.settings.retention_days)
 
     def _connected_peer(self) -> str:
-        if self.engine.pc and self.engine.pc.connectionState == "connected":
+        pc = self.engine.pcs.get(self.engine.target_peer)
+        if pc and pc.connectionState == "connected":
             return self.engine.target_peer
         return ""
 

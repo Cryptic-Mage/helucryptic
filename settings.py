@@ -17,16 +17,20 @@ _PROFILE_KEYS = ("screen_max_w", "screen_max_h", "screen_fps", "jpeg_quality", "
 _CLAMP = {
     "screen_max_w": (320, 2560), "screen_max_h": (240, 1440),
     "screen_fps": (1, 60), "jpeg_quality": (1, 100), "tile_render_fps": (1, 60),
+    "mic_gain": (0.5, 5.0),
 }
 
 
 @dataclass
 class Settings:
     security_mode: str = "e2ee"           # "dtls" | "e2ee"
-    retention_days: int = 30              # 0 = never delete
+    retention_days: int = 30                # 0 = never delete
     push_to_talk_key: str = "space"
     signaling_url: str = "ws://127.0.0.1:8000"
     low_perf_mode: bool = False
+    mic_gain: float = 1.0                   # microphone input gain (1.0 = unity)
+    noise_reduce: bool = False              # denoise outgoing mic audio (noisereduce)
+    noise_reduce_stationary: bool = True    # True = stationary noise model (lighter)
     # Performance (concrete caps + a label derived from them)
     performance_profile: str = "balanced"
     screen_max_w: int = 1280
@@ -34,10 +38,11 @@ class Settings:
     screen_fps: int = 10
     jpeg_quality: int = 55
     tile_render_fps: int = 10
-    # TURN relay (optional)
+    # TURN relay (optional) - fallback over 443/tcp auto-enabled for strict NAT
     turn_url: str = ""
     turn_username: str = ""
     turn_password: str = ""
+    turn_fallback_enabled: bool = True    # use free 443/tcp relay when strict NAT
     # Port forwarding (VPN/router) - bind ICE to a reachable forwarded port
     port_forward_enabled: bool = False
     forwarded_port: int = 0
@@ -69,7 +74,11 @@ def profile_for_values(vals: dict) -> str:
 def _clamp(s: "Settings") -> None:
     for name, (lo, hi) in _CLAMP.items():
         try:
-            v = int(getattr(s, name))
+            v = getattr(s, name)
+            if isinstance(v, float):
+                v = float(v)
+            else:
+                v = int(v)
         except (TypeError, ValueError):
             v = lo
         setattr(s, name, max(lo, min(hi, v)))
@@ -91,6 +100,7 @@ def _seed_missing(s: "Settings", raw: dict) -> None:
         "screen_fps": config.SCREEN_FPS, "jpeg_quality": config.JPEG_QUALITY,
         "tile_render_fps": config.TILE_RENDER_FPS, "turn_url": config.TURN_URL,
         "turn_username": config.TURN_USERNAME, "turn_password": config.TURN_PASSWORD,
+        "turn_fallback_enabled": getattr(config, "TURN_FALLBACK_ENABLED", True),
         "port_forward_enabled": config.PORT_FORWARD_ENABLED,
         "forwarded_port": config.FORWARDED_PORT,
     }

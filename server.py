@@ -25,6 +25,21 @@ from constants.server_constants import (
 )
 
 logger = logging.getLogger("helucryptic.server")
+
+# Security: max incoming WebSocket message size (bytes). Prevents memory DoS
+# from malicious clients sending multi-MB JSON payloads.
+_MAX_PAYLOAD_BYTES = 65536  # 64 KiB — signaling messages are tiny
+
+# Security: allowed Origin headers for WebSocket upgrade. Empty = no check
+# (self-hosted servers behind reverse proxies may strip Origin). Set
+# HELUCRYPTIC_ALLOWED_ORIGINS="https://app.helucryptic.io,https://helucryptic.io"
+# in production. Native (non-browser) clients send no Origin - allowed intentionally.
+_ALLOWED_ORIGINS: set[str] = set()
+_origins_env = os.getenv("HELUCRYPTIC_ALLOWED_ORIGINS", "")
+if _origins_env.strip():
+    _ALLOWED_ORIGINS = {o.strip().lower() for o in _origins_env.split(",") if o.strip()}
+elif os.getenv("HELUCRYPTIC_ENV", "").lower() == "production":
+    logger.warning("HELUCRYPTIC_ALLOWED_ORIGINS is not set in production - WebSocket Origin checks are disabled. Set this to prevent cross-site WebSocket hijacking.")
 # The signaling server sees every user's username and room. For a privacy-focused
 # tool, allow operators to raise the log level (e.g. WARNING) so those identifiers
 # aren't recorded at INFO. Defaults to INFO for backward compatibility.
@@ -340,6 +355,10 @@ async def _run_message_loop(websocket: WebSocket, username: str) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
+            # Security: reject oversized payloads to prevent memory DoS (count bytes, not chars)
+            if len(raw.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+                logger.warning("Oversized payload (%d bytes) from '%s' - dropping", len(raw.encode("utf-8")), username)
+                continue
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
@@ -381,6 +400,15 @@ async def websocket_endpoint(
     session_token: str | None = Query(default=None),
 ):
     try:
+        # Security: validate Origin header if configured (prevents cross-site WS hijacking)
+        if _ALLOWED_ORIGINS:
+            origin = (websocket.headers.get("origin") or "").lower()
+            if origin and origin not in _ALLOWED_ORIGINS:
+                logger.warning("Rejected connection from disallowed origin '%s' for user '%s'", origin, username)
+                await websocket.send_denial_response(
+                    Response(status_code=403, content="Origin not allowed."))
+                return
+
         client_ip = websocket.client.host if websocket.client else "unknown"
         if not _conn_rate_ok(client_ip):
             logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)

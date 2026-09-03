@@ -52,6 +52,18 @@ def _family(logical: str) -> str:
     return tokens.FONTS.get(logical, tokens.FONTS["sans"])
 
 
+_ROLE_COLORS = {
+    "display": PALETTE.text_primary,
+    "title": PALETTE.text_primary,
+    "subtitle": PALETTE.text_primary,
+    "body": PALETTE.text_primary,
+    "body_strong": PALETTE.text_primary,
+    "label": PALETTE.text_muted,
+    "caption": PALETTE.text_secondary,
+    "mono": PALETTE.text_primary,
+}
+
+
 def text_style(role: str) -> ft.TextStyle:
     """Build an ft.TextStyle for a named type role (e.g. 'title', 'label')."""
     spec = tokens.TYPE[role]
@@ -61,7 +73,7 @@ def text_style(role: str) -> ft.TextStyle:
         height=spec["line_height"],
         letter_spacing=spec["tracking"],
         font_family=_family(spec["family"]),
-        color=PALETTE.text_primary,
+        color=_ROLE_COLORS.get(role, PALETTE.text_primary),
     )
 
 

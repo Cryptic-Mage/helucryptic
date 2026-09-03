@@ -6,9 +6,10 @@ numpy
 mss
 av
 sounddevice
-cryptography
-pyopenssl
-pyseto
+noisereduce
+cryptography==44.0.3
+pyopenssl==25.0.0
+pyseto==1.8.0
 flet>=0.28
 flet-desktop>=0.28
 Pillow>=10.0

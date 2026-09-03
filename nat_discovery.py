@@ -175,12 +175,25 @@ def _resolve(servers: list[tuple[str, int]]) -> list[tuple[str, int]]:
     seen: set[str] = set()
     for host, port in servers:
         try:
-            ip = socket.gethostbyname(host)
+            # Optimized: getaddrinfo for dual-stack (IPv4+IPv6), fallback to gethostbyname
+            try:
+                infos = socket.getaddrinfo(host, port, family=socket.AF_UNSPEC, type=socket.SOCK_DGRAM)
+                for fam, _, _, _, sockaddr in infos:
+                    ip = sockaddr[0]
+                    if ip not in seen:
+                        seen.add(ip)
+                        out.append((ip, port))
+                    if len(out) >= 6:  # keep fast
+                        break
+            except Exception:
+                ip = socket.gethostbyname(host)
+                if ip not in seen:
+                    seen.add(ip)
+                    out.append((ip, port))
         except OSError:
             continue
-        if ip not in seen:
-            seen.add(ip)
-            out.append((ip, port))
+        if len(out) >= 6:
+            break
     return out
 
 

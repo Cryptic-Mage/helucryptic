@@ -162,8 +162,14 @@ def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> int | None:
             logger.warning("NAT-PMP %s request to %s failed: %s", proto, gateway, e)
             return None
 
-    _one(OP_MAP_TCP)
-    return _one(OP_MAP_UDP)
+    # Both TCP and UDP must succeed for symmetric port mapping (RFC 6886).
+    # If TCP fails, log but still attempt UDP — some gateways only support one.
+    tcp_port = _one(OP_MAP_TCP)
+    udp_port = _one(OP_MAP_UDP)
+    if udp_port is None and tcp_port is not None:
+        logger.info("UDP mapping failed but TCP succeeded on port %d - using TCP port", tcp_port)
+        return tcp_port
+    return udp_port
 
 
 class PortForwardManager:
@@ -200,7 +206,14 @@ class PortForwardManager:
         logger.info("Executing NAT-PMP detection loop cycle")
         ports = []
         for _ in range(self.pool_size):
-            p = await self._request_fn(self.gateway)
+            result = self._request_fn(self.gateway)
+            # If request_fn is a sync callable (not coroutine), wrap in executor
+            # to avoid blocking the event loop.
+            import asyncio as _aio
+            if _aio.iscoroutine(result):
+                p = await result
+            else:
+                p = await _aio.get_event_loop().run_in_executor(None, result)
             if p is not None:
                 ports.append(p)
         if not ports or self.local_ip is None:

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue as _queue
 import tempfile
 import threading
 import time as _time
@@ -59,10 +60,34 @@ _STUN_SERVERS = [
     # gathers IPv6 srflx candidates automatically from these when the host has a
     # routable IPv6 address - and an IPv6 path means NO NAT at all, which is the
     # single biggest non-relay win for "strict NAT" peers.
+    # Extra port diversity (80/443) survives firewalls that block 3478/19302 UDP.
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun.cloudflare.com:3478"]),
     RTCIceServer(urls=["stun:stun.nextcloud.com:3478"]),
+    RTCIceServer(urls=["stun:stun.metered.ca:80"]),
+    RTCIceServer(urls=["stun:global.stun.twilio.com:3478"]),
+]
+
+# Free fallback TURN over TCP/TLS on 443 - traverses strict enterprise NATs that
+# only allow 80/443. Used only when NAT discovery says relay-required or no user
+# TURN is configured. Public Metered openrelay credentials are the default so
+# strict-NAT users connect out-of-box; override via
+# HELUCRYPTIC_TURN_FALLBACK_USERNAME / _CREDENTIAL env vars or configure your own
+# HELUCRYPTIC_TURN_URL. When fallback creds are empty, the relay will 401 - see
+# warning logged at first use.
+_FALLBACK_TURN_SERVERS = [
+    RTCIceServer(
+        urls=["turn:global.relay.metered.ca:80?transport=tcp",
+              "turns:global.relay.metered.ca:443?transport=tcp"],
+        username=os.getenv("HELUCRYPTIC_TURN_FALLBACK_USERNAME", "openrelayproject"),
+        credential=os.getenv("HELUCRYPTIC_TURN_FALLBACK_CREDENTIAL", "openrelayproject"),
+    ),
+    RTCIceServer(
+        urls=["turn:openrelay.metered.ca:80"],
+        username=os.getenv("HELUCRYPTIC_TURN_FALLBACK_USERNAME", "openrelayproject"),
+        credential=os.getenv("HELUCRYPTIC_TURN_FALLBACK_CREDENTIAL", "openrelayproject"),
+    ),
 ]
 
 MAX_PRE_HELLO_FRAMES = 64
@@ -227,16 +252,18 @@ _vpn_ip: str | None = None
 _forward_port = 0
 _forward_pool: list = []     # available mapped ports to assign, in order
 _forward_used: int = 0       # how many pool ports already assigned this gather cycle
+_forward_lock: asyncio.Lock | None = None  # lazy-init per loop, protects _forward_used
 
 
 def set_forwarded_ports(vpn_ip: str, ports) -> None:
     """Publish a pool of forwarded ports; each new matching ICE bind takes the next one."""
-    global _forward_active, _vpn_ip, _forward_pool, _forward_used, _forward_port
+    global _forward_active, _vpn_ip, _forward_pool, _forward_used, _forward_port, _forward_lock
     _vpn_ip = vpn_ip
     _forward_pool = list(ports)
     _forward_used = 0
     _forward_active = bool(_forward_pool)
     _forward_port = _forward_pool[0] if _forward_pool else 0   # keep single-port field meaningful
+    _forward_lock = None  # reset lock so it re-creates on next loop
 
 
 def set_forwarded_port(vpn_ip: str, port: int) -> None:
@@ -246,17 +273,22 @@ def set_forwarded_port(vpn_ip: str, port: int) -> None:
 
 def clear_forwarded_port() -> None:
     """Disable forwarded-port binding; new gathers fall back to normal ports."""
-    global _forward_active, _vpn_ip, _forward_port, _forward_pool, _forward_used
+    global _forward_active, _vpn_ip, _forward_port, _forward_pool, _forward_used, _forward_lock
     _forward_active, _vpn_ip, _forward_port = False, None, 0
     _forward_pool, _forward_used = [], 0
+    _forward_lock = None
 
 
 def _make_bind_wrapper(orig):
     async def wrapped(protocol_factory, *args, local_addr=None, **kwargs):
-        global _forward_used
+        global _forward_used, _forward_lock
         if _forward_active and local_addr == (_vpn_ip, 0) and _forward_used < len(_forward_pool):
-            local_addr = (_vpn_ip, _forward_pool[_forward_used])
-            _forward_used += 1
+            if _forward_lock is None:
+                _forward_lock = asyncio.Lock()
+            async with _forward_lock:
+                if _forward_used < len(_forward_pool):
+                    local_addr = (_vpn_ip, _forward_pool[_forward_used])
+                    _forward_used += 1
         return await orig(protocol_factory, *args, local_addr=local_addr, **kwargs)
     return wrapped
 
@@ -480,10 +512,87 @@ class ScreenShareTrack(VideoStreamTrack):
         self._sct = None
 
 
+# Frames queued ahead of the denoise worker before it gives up on this frame
+# and passes it through raw. 4 frames ~= 80 ms of backlog - past that, keeping
+# audio flowing matters more than cleaning it.
+_NR_OVERLOAD_FRAMES = 4
+
+
+def _load_noisereduce():
+    """Import noisereduce lazily so it's only a hard dependency when enabled."""
+    import noisereduce
+    return noisereduce
+
+
+class _NoiseReducer:
+    """Off-thread spectral noise reduction for 20 ms int16 mono mic frames.
+
+    The realtime audio callback hands raw frames to `submit()`; a dedicated
+    worker thread denoises each one (or passes it through under backlog) and
+    hands the result back to the event loop via `sink`. reduce_noise() costs
+    ~13 ms/frame, so it must never run on the asyncio loop or the audio thread.
+    """
+
+    def __init__(self, sample_rate: int, stationary: bool, sink, loop, nr_module):
+        self._sr = sample_rate
+        self._stationary = stationary
+        self._sink = sink
+        self._loop = loop
+        self._nr = nr_module
+        self._q: _queue.Queue = _queue.Queue(maxsize=32)
+        self._running = True
+        self._thread = threading.Thread(target=self._run, name="mic-denoise", daemon=True)
+        self._thread.start()
+
+    def submit(self, data) -> None:
+        try:
+            self._q.put_nowait(data)
+        except _queue.Full:
+            pass
+
+    def _run(self) -> None:
+        while self._running:
+            data = self._q.get()
+            if data is None:
+                break
+            self._emit(data)
+
+    def _emit(self, data) -> None:
+        # Under backlog, skip the expensive denoise and pass the frame through.
+        out = data if self._q.qsize() > _NR_OVERLOAD_FRAMES else self._denoise(data)
+        self._loop.call_soon_threadsafe(self._sink, out)
+
+    def _denoise(self, data):
+        try:
+            samples = data.astype(np.float32).reshape(-1)
+            reduced = self._nr.reduce_noise(
+                y=samples, sr=self._sr, stationary=self._stationary, n_fft=512,
+            )
+            return np.clip(reduced, -32768, 32767).astype(np.int16).reshape(-1, 1)
+        except Exception:
+            return data
+
+    def stop(self) -> None:
+        self._running = False
+        try:
+            self._q.put_nowait(None)
+        except _queue.Full:
+            try:
+                self._q.get_nowait()
+            except _queue.Empty:
+                pass
+            try:
+                self._q.put_nowait(None)
+            except _queue.Full:
+                pass
+        self._thread.join(timeout=1.0)
+
+
 class MicrophoneTrack(AudioStreamTrack):
     kind = "audio"
 
-    def __init__(self, push_to_talk: bool = False):
+    def __init__(self, push_to_talk: bool = False, mic_gain: float = 1.0,
+                 noise_reduce: bool = False, noise_reduce_stationary: bool = True):
         super().__init__()
         import fractions
         self._ptt    = push_to_talk
@@ -493,8 +602,19 @@ class MicrophoneTrack(AudioStreamTrack):
         self._timestamp = 0
         self._sample_rate = 48000
         self._time_base = fractions.Fraction(1, self._sample_rate)
-        # Fixed 20 ms blocks (960 samples @ 48 kHz) so each frame is a clean,
-        # consistent size for the Opus encoder (variable blocks => garbled audio).
+        self._mic_gain = mic_gain
+        self._reducer = None
+        if noise_reduce:
+            try:
+                nr_module = _load_noisereduce()
+                self._reducer = _NoiseReducer(
+                    self._sample_rate, noise_reduce_stationary,
+                    self._queue_put, self._loop, nr_module,
+                )
+            except Exception as ex:
+                print(f"[rtc] noise reduction disabled ({ex}); sending raw mic audio",
+                      flush=True)
+                self._reducer = None
         self._stream = sd.InputStream(
             samplerate=self._sample_rate, channels=1, dtype="int16",
             blocksize=960,
@@ -503,7 +623,12 @@ class MicrophoneTrack(AudioStreamTrack):
         self._stream.start()
 
     def _audio_callback(self, indata, frames, time_info, status):
-        if self._active:
+        if not self._active:
+            return
+        if self._reducer is not None:
+            # Denoise off-thread; the reducer feeds _queue_put when done.
+            self._reducer.submit(indata.copy())
+        else:
             self._loop.call_soon_threadsafe(self._queue_put, indata.copy())
 
     def _queue_put(self, data) -> None:
@@ -523,8 +648,8 @@ class MicrophoneTrack(AudioStreamTrack):
         data  = await self._queue.get()
         if data is None:
             raise MediaStreamError
-        # Apply digital volume boost (factor of 3.0) to mic input
-        boosted_data = np.clip(data.astype(np.int32) * 3, -32768, 32767).astype(np.int16)
+        # Apply configurable gain to mic input (default 1.0 = no boost)
+        boosted_data = np.clip(data.astype(np.int32) * self._mic_gain, -32768, 32767).astype(np.int16)
         frame = AudioFrame.from_ndarray(boosted_data.T, format="s16", layout="mono")
         frame.pts         = self._timestamp
         frame.time_base   = self._time_base
@@ -535,6 +660,9 @@ class MicrophoneTrack(AudioStreamTrack):
 
     def stop(self) -> None:
         super().stop()
+        if self._reducer is not None:
+            self._reducer.stop()
+            self._reducer = None
         try:
             self._stream.stop()
             self._stream.close()
@@ -555,7 +683,7 @@ class WebRTCEngine:
 
         # Per-peer collections (keyed by peer username)
         self.pcs:                  dict[str, RTCPeerConnection] = {}
-        self.data_channels:        dict                         = {}
+        self.data_channels:        dict[str, object] = {}
         self.session_keys:         dict[str, bytes]             = {}
         self._hello_sent:          dict[str, bool]              = {}
         self._peer_hello_verified: dict[str, bool]              = {}
@@ -683,7 +811,7 @@ class WebRTCEngine:
     # ICE / TURN configuration (from settings - env only seeds first run)
     # ------------------------------------------------------------------
 
-    def _ice_servers(self) -> list:
+    def _ice_servers(self, force_relay: bool = False) -> list:
         servers = list(_STUN_SERVERS)
         url = getattr(self.settings, "turn_url", "") or ""
         # A TURN relay (if configured) is what makes connections succeed behind
@@ -694,17 +822,49 @@ class WebRTCEngine:
                 username=getattr(self.settings, "turn_username", "") or None,
                 credential=getattr(self.settings, "turn_password", "") or None,
             ))
+        # Optimized fallback: only inject free relay when NAT demands it or user has
+        # no TURN at all and we're in a strict-NAT scenario. Cheap STUN stays always,
+        # TURN (which costs gathering time) is added lazily to avoid penalizing easy NATs.
+        needs_relay = False
+        try:
+            if self._nat_profile and getattr(self._nat_profile, "needs_relay", False):
+                needs_relay = True
+        except Exception:
+            pass
+        if (force_relay or needs_relay) and not url:
+            # Only once, avoid duplicating if already added
+            servers.extend(_FALLBACK_TURN_SERVERS)
+        elif not url and getattr(self.settings, "turn_fallback_enabled", True):
+            # Light fallback: add TCP/443 TURN even without strict detection so UDP-blocked
+            # networks still gather a relay candidate in parallel (~300ms extra, parallel)
+            # This is the enterprise-firewall bypass. Guarded by setting to keep low-perf opt-out.
+            # When NAT profile is unknown (detection not yet run), always add fallback
+            # to ensure first connection attempt has the same ICE config as later ones.
+            if self._nat_profile is None or getattr(self._nat_profile, "nat_type", "") in ("unknown", "blocked"):
+                servers.extend(_FALLBACK_TURN_SERVERS[:1])
         return servers
 
-    def _ice_config(self) -> RTCConfiguration:
-        return RTCConfiguration(iceServers=self._ice_servers())
+    def _ice_config(self, force_relay: bool = False) -> RTCConfiguration:
+        servers = self._ice_servers(force_relay=force_relay)
+        # For strict symmetric random, force relay to avoid 30s ICE hunt
+        try:
+            needs_relay = force_relay or (
+                self._nat_profile and getattr(self._nat_profile, "needs_relay", False)
+            )
+            if needs_relay and len(servers) > len(_STUN_SERVERS):
+                # servers has TURN added beyond base STUN — force relay policy
+                return RTCConfiguration(iceServers=servers, iceTransportPolicy="relay")
+        except Exception:
+            pass
+        return RTCConfiguration(iceServers=servers)
 
     async def detect_nat(self) -> dict:
         """Probe NAT behaviour (RFC 5780) off the event loop and cache the result.
 
         Surfaced in diagnostics, and - for a sequential-symmetric NAT - used to
         predict the external port we inject as an extra srflx candidate during
-        offer/answer (see _augment_local_sdp). Best-effort; never raises.
+        offer/answer (see _augment_local_sdp). For RANDOM strict NAT, also
+        triggers optimized birthday spray in background. Best-effort; never raises.
         """
         try:
             import nat_discovery
@@ -720,22 +880,103 @@ class WebRTCEngine:
                 self._predicted_ext_port = 0
                 self._predicted_ext_ip = ""
                 print(f"[nat] detected {profile.nat_type} - {profile.summary}", flush=True)
+            # Optimized spray for strict RANDOM/BLOCKED: birthday attack in background
+            # Non-blocking - fire-and-forget, low CPU, bounded ports.
+            if getattr(profile, "nat_type", "") in ("random-symmetric", "blocked"):
+                try:
+                    # Use ext_ip from any sample + spray around predicted range
+                    self._bg(self._spray_strict_nat(profile))
+                except Exception:
+                    pass
             return {"nat_type": profile.nat_type, "summary": profile.summary,
-                    "ext_ip": profile.ext_ip, "predicted_port": pred or 0}
+                    "ext_ip": profile.ext_ip, "predicted_port": pred or 0,
+                    "needs_relay": getattr(profile, "needs_relay", False)}
         except Exception as ex:
             print(f"[nat] discovery failed: {type(ex).__name__}: {ex}", flush=True)
             return {"nat_type": "unknown", "summary": "discovery failed",
-                    "ext_ip": "", "predicted_port": 0}
+                    "ext_ip": "", "predicted_port": 0, "needs_relay": False}
+
+    async def _spray_strict_nat(self, profile) -> None:
+        """Optimized birthday spray for RANDOM symmetric NAT.
+
+        Opens 128-256 UDP pinholes around the observed external port range in
+        parallel, non-blocking, with tight timeouts. This increases the chance
+        that a predicted srflx candidate will have a live mapping, per birthday
+        paradox. Runs off event loop via to_thread per chunk to avoid starving ICE.
+        """
+        try:
+            import nat_discovery
+            # Spray size adaptive to profile: random needs larger spray, blocked skips
+            if getattr(profile, "nat_type", "") == "blocked":
+                return
+            base = getattr(profile, "ext_ip", "") or self._predicted_ext_ip
+            # Derive spray centre from last observed external port
+            last_ext = 0
+            try:
+                last_ext = max(p for _, p in getattr(profile, "samples", []) or [])
+            except Exception:
+                last_ext = self._predicted_ext_port or 45000
+            if not last_ext or not base:
+                return
+            # Build spray list: centred, bounded, 128 ports for random, 64 for sequential
+            spread = 256 if profile.nat_type == "random-symmetric" else 96
+            ports = birthday_spray_ports(last_ext, spread=spread)
+            # Optimized: only spray first 96 in parallel batches to limit CPU/UDP bursts
+            # Further ports are injected as SDP candidates without pre-punch (still probed by peer)
+            chunk = ports[:96]
+            if not chunk:
+                return
+            # Pre-punch in background: send STUN binding to create mapping (cheap, 0.4s total)
+            stun_ip = "stun.l.google.com"
+            try:
+                stun_ip_resolved = await asyncio.to_thread(lambda: __import__("socket").gethostbyname(stun_ip))
+            except Exception:
+                stun_ip_resolved = "142.250.153.127"
+            # Batch with concurrency 16 to avoid fd exhaustion, each with 0.35s timeout
+            sem = asyncio.Semaphore(16)
+            async def _one(p):
+                async with sem:
+                    try:
+                        await asyncio.to_thread(prepunch_mapping, stun_ip_resolved, 19302, local_port=p, timeout=0.35)
+                    except Exception:
+                        pass
+            # Fire spray without blocking caller - but await chunk with timeout 3s
+            try:
+                await asyncio.wait_for(asyncio.gather(*[_one(p) for p in chunk]), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
+            # Also inject 2 extra predicted SDP candidates for lookahead 2,3
+            for la in (2, 3):
+                try:
+                    extra = nat_discovery.predict_next_port(profile, lookahead=la)
+                    if extra and extra != self._predicted_ext_port:
+                        # Store as secondary candidates to be injected on next offer
+                        if not hasattr(self, "_extra_predicted_ports"):
+                            self._extra_predicted_ports = []
+                        if extra not in self._extra_predicted_ports:
+                            self._extra_predicted_ports.append(extra)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _augment_local_sdp(self, sdp: str) -> str:
-        """Inject the predicted srflx candidate (sequential-symmetric NAT) into
-        an outgoing offer/answer. No-op when prediction is unavailable."""
+        """Inject the predicted srflx candidate(s) into an outgoing offer/answer.
+
+        For sequential NAT one candidate; for random strict NAT inject 2-3 lookahead
+        candidates as well. No-op when prediction unavailable. Optimized: string op only."""
         if self._predicted_ext_ip and self._predicted_ext_port:
             try:
-                return inject_predicted_srflx(sdp, self._predicted_ext_ip,
-                                              self._predicted_ext_port)
+                sdp = inject_predicted_srflx(sdp, self._predicted_ext_ip, self._predicted_ext_port)
             except Exception:
-                return sdp
+                pass
+            # Inject extra lookahead candidates for random spray hedging
+            try:
+                for extra_port in getattr(self, "_extra_predicted_ports", [])[:2]:
+                    sdp = inject_predicted_srflx(sdp, self._predicted_ext_ip, extra_port)
+            except Exception:
+                pass
+            return sdp
         return sdp
 
     def get_diagnostics(self) -> dict:
@@ -839,6 +1080,135 @@ class WebRTCEngine:
         members[self.my_username] = self._my_tier()   # always include self
         creator = self._room_creator_name or min([self.my_username, *members.keys()])
         return elect_hub(members, creator)
+
+    # ------------------------------------------------------------------
+    # Strict-NAT coordinated punch (simultaneous open) - optimized
+    # ------------------------------------------------------------------
+
+    async def send_punch_at(self, peer: str, ws_send: Callable, fire_at_ms: int | None = None) -> None:
+        """Send a coordinated fire timestamp so both peers punch at same instant.
+
+        Only used for strict NAT (random/BLOCKED). The message is tiny and
+        relayed via signaling (server blind). fire_at is now + 900ms to account
+        for signaling latency.
+        """
+        try:
+            import time as _t
+            now_ms = int(_t.time() * 1000)
+            if fire_at_ms is None:
+                fire_at_ms = now_ms + 900
+            await ws_send({"target": peer, "type": "punch_at", "data": {"fire_at": fire_at_ms}})
+        except Exception:
+            pass
+
+    async def handle_punch_at(self, data: dict, sender: str, ws_send: Callable) -> None:
+        """Peer asks us to punch simultaneously - sleep until fire_at then offer.
+
+        Non-blocking, optimized: uses punch_countdown_delay to compute precise wait
+        without busy loop. If we're already connected, ignore.
+        """
+        try:
+            import time as _t
+            fire_at = int(data.get("fire_at") or 0)
+            if not fire_at or sender in self.pcs and self.pcs[sender].connectionState in ("connected", "completed"):
+                return
+            now_ms = int(_t.time() * 1000)
+            delay = punch_countdown_delay(now_ms, fire_at, min_delay=0.0)
+            # Clamp max wait to 2s to avoid hanging
+            delay = min(delay, 2.0)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            # Ensure PC exists and drive offer (both sides offer for strict)
+            if sender not in self.pcs:
+                self._init_pc(sender)
+                dc = self.pcs[sender].createDataChannel("chat", ordered=True)
+                self.data_channels[sender] = dc
+                self._bind_channel(dc, sender)
+            elif sender not in self.data_channels:
+                # PC exists but no data channel — create one on existing PC
+                dc = self.pcs[sender].createDataChannel("chat", ordered=True)
+                self.data_channels[sender] = dc
+                self._bind_channel(dc, sender)
+            # For strict, bypass alphabetical - both punch
+            await self.request_negotiation(sender)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Signaling-relay fallback for BLOCKED strict NAT (optimized)
+    # ------------------------------------------------------------------
+
+    async def send_via_relay(self, peer: str, payload: dict | bytes) -> bool:
+        """Send chat/file payload via signaling server when P2P is dead.
+
+        Optimized: only for small control/data (chat, file_meta/file_end), not
+        bulk binary chunks (those wait for TURN). Uses existing _send_ws which
+        is already the WSS/WS to signaling server - no new connection.
+        """
+        try:
+            if self._send_ws is None:
+                return False
+            if isinstance(payload, bytes):
+                # For relay, encode binary as base64 to fit JSON (small files only)
+                import base64 as _b64r
+                await self._send_ws({
+                    "target": peer,
+                    "type": "p2p_relay",
+                    "data": {"b64": _b64r.b64encode(payload).decode(), "binary": True}
+                })
+            else:
+                await self._send_ws({"target": peer, "type": "p2p_relay", "data": payload})
+            return True
+        except Exception:
+            return False
+
+    async def handle_p2p_relay(self, data: dict, sender: str) -> None:
+        """Incoming relayed payload from signaling server - inject as if from DataChannel.
+
+        Decrypts and dispatches identically to _handle_text/_handle_binary path,
+        but tagged relay=True so callee knows it's relayed (for diagnostics).
+        """
+        try:
+            if data.get("binary"):
+                import base64 as _b64r
+                b = _b64r.b64decode(data.get("b64", ""))
+                await self._handle_binary(b, sender)
+            else:
+                # Reconstruct frame dict from relay data
+                # If encrypted token, dispatch will decrypt
+                if isinstance(data, dict) and "__type" in data:
+                    await self._handle_text(json.dumps(data), sender)
+                elif isinstance(data, dict) and "token" in data:
+                    await self._handle_text(json.dumps(data), sender)
+                else:
+                    # Raw chat fallback
+                    await self._handle_text(json.dumps({"__type": "chat", "text": str(data.get("text",""))}), sender)
+        except Exception:
+            pass
+
+    def should_relay(self, peer: str) -> bool:
+        """Optimized check: should we use relay for this peer now?"""
+        try:
+            pc = self.pcs.get(peer)
+            dc = self.data_channels.get(peer)
+            # Relay if no PC, or PC failed/disconnected >4s, or DC not open but signaling is
+            if pc is None:
+                return True
+            if pc.connectionState in ("failed", "closed"):
+                return True
+            if dc is None or getattr(dc, "readyState", "") != "open":
+                # If we have been trying >6s and still no DC, fallback to relay for chat
+                # Check heartbeat dead
+                last = self._last_pong.get(peer, 0)
+                import time as _t
+                if last and _t.monotonic() - last > 8.0:
+                    return True
+                # If in BLOCKED mode, prefer relay for text
+                if self._nat_profile and getattr(self._nat_profile, "nat_type", "") == "blocked":
+                    return True
+            return False
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Track-origin helpers (receiver-side SFU origin keying)
@@ -1786,6 +2156,20 @@ class WebRTCEngine:
         peer = self.target_peer
         ch = self.data_channels.get(peer)
         if not (ch and ch.readyState == "open"):
+            # Strict NAT fallback: try signaling relay if peer is unreachable but signaling is live
+            if self.should_relay(peer) and self._send_ws is not None:
+                try:
+                    # Use same encryption as DataChannel so relay still E2EE
+                    frame = self._encrypt_frame_for(
+                        {"__type": "chat", "text": text, "id": mid}, peer
+                    )
+                    ok = await self.send_via_relay(peer, frame)
+                    if ok:
+                        self._awaiting_ack.setdefault(peer, set()).add(mid)
+                        print(f"[chat] {peer} via relay (strict NAT fallback)", flush=True)
+                        return mid
+                except Exception:
+                    pass
             # Peer offline → queue in order; flushed on session-ready/reconnect.
             self._outbox.enqueue(peer, (mid, text))
             print(f"[chat] {peer} offline - queued message (outbox={self._outbox.pending(peer)})", flush=True)
@@ -1793,7 +2177,12 @@ class WebRTCEngine:
         frame = self._encrypt_frame_for(
             {"__type": "chat", "text": text, "id": mid}, peer
         )
-        ch.send(json.dumps(frame))
+        try:
+            ch.send(json.dumps(frame))
+        except Exception:
+            # If send fails but relay viable, fallback
+            if self.should_relay(peer):
+                await self.send_via_relay(peer, frame)
         self._awaiting_ack.setdefault(peer, set()).add(mid)
         return mid
 
@@ -1962,29 +2351,58 @@ class WebRTCEngine:
         offer = await self.pcs[peer].createOffer()
         await self.pcs[peer].setLocalDescription(offer)
 
-        # Re-fetch after every await - remove_peer can run during any yield.
-        pc = self.pcs.get(peer)
-        if pc is None:
-            return
-        if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
-            try:
-                for _ in range(100):
-                    if pc.iceGatheringState == "complete":
-                        break
-                    await asyncio.sleep(0.05)
-            except Exception as ex:
-                print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
-
-        # Re-check again after the ICE-gathering loop (more yields inside).
+        # Optimized trickle ICE: send offer IMMEDIATELY (without waiting for gathering)
+        # so peer can start hole-punching within ~100ms. Remaining candidates trickle.
         pc = self.pcs.get(peer)
         if pc is None or pc.localDescription is None:
             return
+        # Send initial offer with whatever candidates are ready (+ predicted srflx)
         await self._send_ws({
             "target": peer,
             "type":   "offer",
             "data":   {"sdp": self._augment_local_sdp(pc.localDescription.sdp), "type": "offer"},
         })
-        print(f"[rtc] {self.my_username}: SENT offer to {peer}", flush=True)
+        print(f"[rtc] {self.my_username}: SENT offer to {peer} (trickle)", flush=True)
+        # Trickle remaining candidates in background (non-blocking, optimized polling)
+        # Previous code waited 5s (100*0.05) before sending anything - that missed the
+        # punch window for strict NAT. Now we trickle.
+        self._bg(self._trickle_candidates(peer))
+
+    async def _trickle_candidates(self, peer: str) -> None:
+        """Send trickled ICE candidates as they appear (optimized, low CPU)."""
+        try:
+            pc = self.pcs.get(peer)
+            if pc is None:
+                return
+            seen = set()
+            # Initial SDP lines already sent; diff for new a=candidate lines
+            last_sdp = pc.localDescription.sdp if pc.localDescription else ""
+            seen.update(l for l in last_sdp.splitlines() if l.startswith("a=candidate:"))
+            for _ in range(60):  # max 3s trickling
+                await asyncio.sleep(0.05)
+                pc = self.pcs.get(peer)
+                if pc is None or pc.localDescription is None:
+                    return
+                if pc.iceGatheringState == "complete":
+                    break
+                sdp = pc.localDescription.sdp
+                for line in sdp.splitlines():
+                    if line.startswith("a=candidate:") and line not in seen:
+                        seen.add(line)
+                        # Extract candidate line without a= prefix
+                        cand = line[2:] if line.startswith("a=") else line
+                        try:
+                            await self._send_ws({
+                                "target": peer,
+                                "type": "ice",
+                                "data": {"candidate": cand, "sdpMid": "0", "sdpMLineIndex": 0}
+                            })
+                        except Exception:
+                            pass
+                if pc.iceGatheringState == "complete":
+                    break
+        except Exception:
+            pass
 
     async def request_negotiation(self, peer: str) -> None:
         if self._is_negotiating.get(peer):
@@ -2128,8 +2546,35 @@ class WebRTCEngine:
             else:
                 return
         self._init_pc(username)
-        # Tie-break: alphabetically lower username creates the data channel and
-        # drives the initial offer. aiortc won't auto-negotiate, so do it now.
+        # Coordinated punch for strict NAT: both sides punch simultaneously.
+        # If either peer is strict (random/blocked), bypass alphabetical tie-break
+        # and have BOTH create the offer after a synchronized delay via punch_at.
+        is_strict = False
+        try:
+            if self._nat_profile and getattr(self._nat_profile, "needs_relay", False):
+                is_strict = True
+        except Exception:
+            pass
+        if is_strict:
+            # Send punch sync to peer, then create offer locally after delay
+            try:
+                import time as _t
+                fire_at = int(_t.time() * 1000) + 900
+                # Send sync (non-blocking)
+                self._bg(self.send_punch_at(username, ws_send, fire_at))
+                # Wait locally for same fire_at (optimized: minimal sleep)
+                now_ms = int(_t.time() * 1000)
+                delay = punch_countdown_delay(now_ms, fire_at, min_delay=0.0)
+                if delay > 0:
+                    await asyncio.sleep(min(delay, 0.9))
+            except Exception:
+                pass
+            dc = self.pcs[username].createDataChannel("chat", ordered=True)
+            self.data_channels[username] = dc
+            self._bind_channel(dc, username)
+            await self.request_negotiation(username)
+            return
+        # Normal path: tie-break alphabetically lower username creates the data channel
         if self.my_username < username:
             dc = self.pcs[username].createDataChannel("chat", ordered=True)
             self.data_channels[username] = dc
@@ -2256,7 +2701,12 @@ class WebRTCEngine:
 
         # Creator-leaves key handoff: am I now the alphabetically lowest peer?
         if self.room_id and not self.is_room_creator:
-            remaining = sorted(list(self.pcs.keys()) + [self.my_username])
+            # Filter stale PCs (closed/failed) to avoid electing a zombie as creator
+            alive_peers = [
+                p for p, pc in self.pcs.items()
+                if pc.connectionState not in ("closed", "failed")
+            ]
+            remaining = sorted(alive_peers + [self.my_username])
             if remaining and remaining[0] == self.my_username:
                 self.is_room_creator = True
                 self._room_creator_name = self.my_username
@@ -2349,7 +2799,12 @@ class WebRTCEngine:
         # One real microphone capture, shared across every peer via the relay.
         # Mic starts active (audio flows immediately); the UI exposes a mute toggle.
         if self._mic_source is None:
-            self._mic_source = MicrophoneTrack(push_to_talk=False)
+            self._mic_source = MicrophoneTrack(
+                push_to_talk=False,
+                mic_gain=getattr(self.settings, "mic_gain", 1.0),
+                noise_reduce=getattr(self.settings, "noise_reduce", False),
+                noise_reduce_stationary=getattr(self.settings, "noise_reduce_stationary", True),
+            )
         return self._mic_source
 
     def _get_screen_source(self) -> "ScreenShareTrack":

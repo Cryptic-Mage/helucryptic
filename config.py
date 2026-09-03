@@ -81,10 +81,12 @@ TILE_RENDER_FPS   = _int_range("HELUCRYPTIC_TILE_RENDER_FPS",   5 if LOW_PERF_MO
 
 # --- TURN (optional NAT relay) ----------------------------------------------
 # Public STUN alone fails behind symmetric / carrier-grade NAT. Provide a TURN
-# relay here to make those connections succeed.
+# relay here to make those connections succeed. Fallback over 443/tcp is auto-
+# enabled for strict NAT so enterprise firewalls (UDP blocked) still connect.
 TURN_URL      = os.getenv("HELUCRYPTIC_TURN_URL", "")
 TURN_USERNAME = os.getenv("HELUCRYPTIC_TURN_USERNAME", "")
 TURN_PASSWORD = os.getenv("HELUCRYPTIC_TURN_PASSWORD", "")
+TURN_FALLBACK_ENABLED = _bool(os.getenv("HELUCRYPTIC_TURN_FALLBACK"), True)
 
 # --- Port forwarding (optional) ---------------------------------------------
 # When a user has a genuinely reachable forwarded port (Proton VPN P2P port

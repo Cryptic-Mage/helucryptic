@@ -1,4 +1,5 @@
 import base64
+import hmac
 import hashlib
 import json
 import logging
@@ -170,6 +171,38 @@ def load_or_create_keys() -> dict:
 # ---------------------------------------------------------------------------
 
 def derive_session_key(my_x25519_priv_b64: str, peer_x25519_pub_b64: str) -> bytes:
+    """Legacy X25519 static-static session key (v1) with domain-binding salt.
+
+    Breaking change vs pre-salt version (salt=None): peers must both use this
+    salted derivation or decryption fails. Kept for 1-to-1 compat where v2
+    (ephemeral) is unavailable. For migration, use `derive_session_key_legacy`
+    to interoperate with old clients (< salt-v1), or prefer `derive_session_key_v2`
+    for all new sessions (forward-secret, not affected).
+    """
+    if not my_x25519_priv_b64 or not peer_x25519_pub_b64:
+        raise ValueError("derive_session_key called before hello handshake complete")
+    my_priv = X25519PrivateKey.from_private_bytes(base64.b64decode(my_x25519_priv_b64))
+    peer_pub = X25519PublicKey.from_public_bytes(base64.b64decode(peer_x25519_pub_b64))
+    shared = my_priv.exchange(peer_pub)
+    # Domain-binding salt: hash both public keys (sorted for symmetry) to bind
+    # the session to this specific pair of identities, preventing cross-peer key reuse.
+    my_pub_bytes = my_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    peer_pub_bytes = base64.b64decode(peer_x25519_pub_b64)
+    # Sort to ensure both parties compute the same salt regardless of direction
+    pair = sorted([my_pub_bytes, peer_pub_bytes])
+    salt = hashlib.sha256(
+        b"helucryptic-salt-v1" + pair[0] + pair[1]
+    ).digest()[:16]
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"helucryptic-session-v1",
+    ).derive(shared)
+
+
+def derive_session_key_legacy(my_x25519_priv_b64: str, peer_x25519_pub_b64: str) -> bytes:
+    """Pre-salt legacy derivation (salt=None) for interoperability with old clients."""
     if not my_x25519_priv_b64 or not peer_x25519_pub_b64:
         raise ValueError("derive_session_key called before hello handshake complete")
     my_priv = X25519PrivateKey.from_private_bytes(base64.b64decode(my_x25519_priv_b64))
@@ -322,9 +355,9 @@ def verify_membership_cert(
         return False
     
     success = (
-        payload.get("r") == room_id
-        and payload.get("u") == member_username
-        and payload.get("e") == member_ed25519_pub_b64
+        hmac.compare_digest(payload.get("r", ""), room_id)
+        and hmac.compare_digest(payload.get("u", ""), member_username)
+        and hmac.compare_digest(payload.get("e", ""), member_ed25519_pub_b64)
     )
     if success:
         logger.info("Membership certificate verification succeeded for user=%s in room=%s", member_username, room_id)

@@ -15,7 +15,7 @@ HELUCRYPTIC_SERVER_PASSWORD = config.SERVER_PASSWORD
 SHARE_SCREEN_TXT            = "Share screen"
 DIAGNOSTICS_TXT             = "Connection diagnostics"
 JOIN_ROOM_TXT               = "Join room"
-LOAD_MORE_TXT               = "Load more…"
+LOAD_MORE_TXT               = "Load more\u2026"
 SCHEME_HTTPS                = "https://"
 SCHEME_HTTP                 = "http://"
 SCHEME_WSS                  = "wss://"
@@ -82,8 +82,8 @@ class C:
 
     CYAN     = _P.accent           # the single accent (you / sent / connect)
     CYAN_DIM = _P.accent_subtle
-    MAGENTA  = _P.accent           # collapsed onto the single accent
-    VIOLET   = _P.accent           # collapsed onto the single accent
+    MAGENTA  = "#c478e8"           # purple tint — avatar gradients, decorative accents
+    VIOLET   = "#7a9aee"           # blue-violet — screen-share, visual media accents
 
     GREEN    = _P.success          # online / connected / verified
     YELLOW   = _P.warning          # connecting / warning
@@ -104,11 +104,11 @@ class C:
 
 class R:
     """Corner radii - tightened for a precise, console-grade feel (from
-    theme.tokens.RADIUS). Names preserved for drop-in compatibility."""
+    theme.tokens.RADIUS)."""
     SM = _t_RADIUS["sm"]    # 6
     MD = _t_RADIUS["md"]    # 8
     LG = _t_RADIUS["lg"]    # 12
-    XL = _t_RADIUS["lg"]    # collapsed to lg - no oversized corners
+    XL = _t_RADIUS["lg"]    # legacy alias -> LG (do not use for new code)
     PILL = _t_RADIUS["pill"]
 
 
@@ -118,7 +118,7 @@ class D:
     PULSE = _t_MOTION["base"]   # 180
     MED   = _t_MOTION["base"]   # 180
     SLOW  = _t_MOTION["slow"]   # 260
-    BG    = _t_MOTION["slow"]   # background is static now; kept for compatibility
+    BG    = _t_MOTION["slow"]   # deprecated: background is static, use SLOW for dialogs
 
 
 _EASE     = ft.AnimationCurve.EASE_OUT
@@ -143,10 +143,11 @@ def _glow(color: str = "", blur: int = 18, spread: float = 1.0) -> ft.BoxShadow:
 
 
 def _dot(color: str, size: int = 11, glow: bool = True) -> ft.Container:
-    """A glowing presence/status dot."""
+    """A status dot (neutral shadow, glow param is legacy no-op)."""
+    _ = glow  # kept for compat, shadow is now always neutral
     return ft.Container(
         width=size, height=size, border_radius=R.PILL, bgcolor=color,
-        shadow=_glow(color, blur=12, spread=1) if glow else None,
+        shadow=_glow(blur=12) if glow else None,
         animate=_anim(D.MED),
     )
 
@@ -183,7 +184,7 @@ def _neon_field(**kwargs) -> ft.TextField:
         "content_padding": ft.Padding.symmetric(horizontal=12, vertical=10),
         "focused_border_width": 2,
         "label_style": ft.TextStyle(color=C.MUTED, size=12),
-        "hint_style": ft.TextStyle(color=C.FAINT, size=12),
+        "hint_style": ft.TextStyle(color=C.MUTED, size=12),
     }
     base.update(kwargs)
     return ft.TextField(**base)

@@ -10,7 +10,10 @@
 // hibernation. Media never touches this server - it only relays the handshake.
 
 const OPEN = 1; // WebSocket.OPEN
-const SERVER_TYPES = new Set(["peer_joined", "peer_left", "room_state", "error"]);
+const SERVER_TYPES = new Set([
+  "peer_joined", "peer_left", "room_state", "error",
+  "session_token", "presence", "hub_capability", "call_active",
+]);
 const ROOM_MAX = 4;
 
 export default {
@@ -223,6 +226,19 @@ export class SignalHub {
 
     const { username, room, password, sessionToken } = this._parseUrlParams(request);
 
+    // Security: validate Origin header if allowlist is configured (mirrors server.py).
+    // Env var HELUCRYPTIC_ALLOWED_ORIGINS is a comma-separated list. Empty Origin
+    // (native clients) is allowed intentionally - same as Python server.
+    const allowedOriginsRaw = this.env?.HELUCRYPTIC_ALLOWED_ORIGINS || "";
+    if (allowedOriginsRaw.trim()) {
+      const allowedOrigins = new Set(allowedOriginsRaw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
+      const origin = (request.headers.get("Origin") || "").toLowerCase();
+      if (origin && !allowedOrigins.has(origin)) {
+        console.warn(`Rejected connection from disallowed origin '${origin}' for user '${username}'`);
+        return new Response("Origin not allowed.", { status: 403 });
+      }
+    }
+
     if (!username) return new Response("missing username", { status: 400 });
     // Mirror server.py: constrain usernames (routing keys + display identity)
     // and reserve "system" so server-generated messages can't be impersonated.
@@ -262,6 +278,8 @@ export class SignalHub {
   }
 
   async webSocketMessage(ws, message) {
+    // Security: reject oversized payloads to prevent memory DoS (mirrors server.py - byte length)
+    if (typeof message === "string" && new TextEncoder().encode(message).length > 65536) return;
     let payload;
     try {
       payload = JSON.parse(typeof message === "string" ? message : "");
