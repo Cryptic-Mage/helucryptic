@@ -23,17 +23,19 @@ import string
 import sys
 import time
 import urllib.parse
-from collections import deque
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
 # pyrefly: ignore [missing-import]
 import flet as ft
+
 # pyrefly: ignore [missing-import]
 import numpy as np
+
 # pyrefly: ignore [missing-import]
 import websockets
+
 # pyrefly: ignore [missing-import]
 from PIL import Image
 
@@ -49,6 +51,31 @@ import identity
 import invites
 import paths
 import profiles
+from constants.client_constants import (
+    _EASE_IO,
+    DIAGNOSTICS_TXT,
+    HELUCRYPTIC_SERVER_PASSWORD,
+    HELUCRYPTIC_SERVER_URL,
+    JOIN_ROOM_TXT,
+    LOAD_MORE_TXT,
+    LOG_BUFFER,
+    SCHEME_HTTP,
+    SCHEME_HTTPS,
+    SCHEME_WS,
+    SCHEME_WSS,
+    SHARE_SCREEN_TXT,
+    C,
+    D,
+    R,
+    _anim,
+    _dot,
+    _filled_style,
+    _ghost_style,
+    _glow,
+    _install_log_capture,
+    _neon_field,
+    _redact_url,
+)
 from contacts import (
     delete_contact,
     get_contact,
@@ -90,33 +117,6 @@ from webrtc_engine import (
     WebRTCEngine,
     clear_forwarded_port,
     set_forwarded_ports,
-)
-
-from constants.client_constants import (
-    HELUCRYPTIC_SERVER_URL,
-    HELUCRYPTIC_SERVER_PASSWORD,
-    SHARE_SCREEN_TXT,
-    DIAGNOSTICS_TXT,
-    JOIN_ROOM_TXT,
-    LOAD_MORE_TXT,
-    SCHEME_HTTPS,
-    SCHEME_HTTP,
-    SCHEME_WSS,
-    SCHEME_WS,
-    LOG_BUFFER,
-    _install_log_capture,
-    _redact_url,
-    C,
-    R,
-    D,
-    _EASE,
-    _EASE_IO,
-    _anim,
-    _glow,
-    _dot,
-    _filled_style,
-    _ghost_style,
-    _neon_field,
 )
 
 
@@ -299,8 +299,26 @@ class HelucrypticApp:
             self._bg_tasks.append(asyncio.ensure_future(self._status_pulse_loop()))
         self._apply_port_forward()
 
-    def _fire_and_forget(self, coro) -> asyncio.Task:
-        task = asyncio.ensure_future(coro)
+    def _fire_and_forget(self, coro) -> asyncio.Task | None:
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+            # get_event_loop may return a closed loop in tests – guard it
+            if loop.is_closed():
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
+            task = loop.create_task(coro)
+        except Exception:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
         self._running_tasks.add(task)
         task.add_done_callback(self._task_done)
         return task
@@ -573,7 +591,7 @@ class HelucrypticApp:
         self.btn_create_room  = ft.FilledButton(
             "Create", icon=ft.Icons.ADD,
             on_click=self._create_room, expand=True, height=40,
-            style=_filled_style(C.VIOLET, "#ffffff", radius=R.MD, pad_h=0, pad_v=10),
+            style=_filled_style(C.VIOLET, C.BTN_CYAN, radius=R.MD, pad_h=0, pad_v=10),
         )
         self.btn_join_room    = ft.FilledButton(
             "Join", icon=ft.Icons.LOGIN,
@@ -721,7 +739,7 @@ class HelucrypticApp:
                                             bgcolor=C.ELEV, border_radius=R.PILL, height=4)
 
         self.btn_send     = ft.IconButton(ft.Icons.SEND_ROUNDED, on_click=self._send_chat,
-                                          icon_color="#ffffff", tooltip="Send",
+                                          icon_color=C.BTN_CYAN, tooltip="Send",
                                           icon_size=18, disabled=True)
         # Accent send button: a quiet filled circle that dims while sending is
         # disabled (toggled alongside btn_send.disabled). Deliberately restrained
@@ -1132,6 +1150,15 @@ class HelucrypticApp:
                     self.btn_sidebar_toggle.update()
                 except Exception:
                     pass
+            # Right insights rail steals chat width on tablets - hide it below 1080
+            if hasattr(self, "_insights_panel"):
+                insights_should_visible = width >= 1080
+                if self._insights_panel.visible != insights_should_visible:
+                    self._insights_panel.visible = insights_should_visible
+                    try:
+                        self._insights_panel.update()
+                    except Exception:
+                        pass
             # Fluid margin: 8 narrow, 10 mid, 16 wide
             margin = 8 if width < 720 else 10 if width < 1400 else 16
             if hasattr(self, "_app_frame"):
@@ -2090,14 +2117,14 @@ class HelucrypticApp:
             await self.engine.handle_offer(sender, data, ws_send)
         elif t == "answer":
             await self.engine.handle_answer(data, sender=sender)
-        elif t == "ice":
-            await self.engine.handle_ice(data, sender=sender)
-        elif t == "ice-candidate":
+        elif t == "ice" or t == "ice-candidate":
             await self.engine.handle_ice(data, sender=sender)
         elif t == "punch_at":
             await self.engine.handle_punch_at(data, sender, ws_send)
-        elif t == "p2p_relay":
-            await self.engine.handle_p2p_relay(data, sender)
+        elif t in ("p2p_relay", "relay_e2ee"):
+            await self.engine.handle_relay_message(data, sender)
+        elif t == "hello_signaling":
+            await self.engine.handle_signaling_hello(data, sender)
         elif t == "connect_request":
             await self._handle_sig_connect_request(sender, ws_send)
         elif t == "peer_joined":
@@ -2120,6 +2147,7 @@ class HelucrypticApp:
             self._ws_session_token = (data or {}).get("token", "")
             self._reflected_host = str((data or {}).get("reflected_host") or "")
             self._reflected_port = int((data or {}).get("reflected_port") or 0)
+            self.engine.server_capabilities = (data or {}).get("capabilities", [])
             if self._reflected_host:
                 print(f"[nat] server reflects us as {self._reflected_host}:{self._reflected_port}",
                       flush=True)
@@ -2650,7 +2678,7 @@ class HelucrypticApp:
 
     def _avatar(self, display: str, verified: bool, size: int = 34) -> ft.Container:
         return ft.Container(
-            content=ft.Text((display or "?")[0].upper(), color="#ffffff",
+            content=ft.Text((display or "?")[0].upper(), color=C.BTN_CYAN if verified else "#ffffff",
                             weight=ft.FontWeight.W_800, size=int(size * 0.4)),
             width=size, height=size, border_radius=R.PILL,
             alignment=ft.Alignment.CENTER, gradient=self._avatar_gradient(verified),
@@ -2773,7 +2801,14 @@ class HelucrypticApp:
             except Exception:
                 pass
         tile.on_hover = on_hover
-        return tile
+        # Accessibility: Semantics wrapper for screen readers
+        try:
+            return ft.Semantics(
+                label=f"Chat with {display}, {'online' if is_online else 'offline'}{', verified' if verified else ''}",
+                button=True, container=True, child=tile,
+            )
+        except Exception:
+            return tile
 
     def _participant_card(self, username: str, state: str) -> ft.Control:
         online   = state == "connected"
@@ -2835,7 +2870,7 @@ class HelucrypticApp:
         online   = self._is_contact_online(username)
         self.chat_header_lead.visible = False
         self.chat_header_avatar.visible = True
-        self.chat_header_avatar.content = ft.Text(display[0].upper(), color="#ffffff",
+        self.chat_header_avatar.content = ft.Text(display[0].upper(), color=C.BTN_CYAN if verified else "#ffffff",
                                                   weight=ft.FontWeight.W_800)
         self.chat_header_avatar.gradient = self._avatar_gradient(verified)
         self.chat_header_title.value = display
@@ -2865,7 +2900,7 @@ class HelucrypticApp:
     def _update_chat_header_room(self, code: str) -> None:
         self.chat_header_lead.visible = False
         self.chat_header_avatar.visible = True
-        self.chat_header_avatar.content = ft.Icon(ft.Icons.GROUPS, color="#ffffff", size=18)
+        self.chat_header_avatar.content = ft.Icon(ft.Icons.GROUPS, color=C.BTN_CYAN, size=18)
         self.chat_header_avatar.gradient = ft.LinearGradient(colors=[C.VIOLET, C.MAGENTA])
         self.chat_header_title.value = f"Room {code}"
         self.chat_header_status_dot.visible = False
@@ -3236,22 +3271,32 @@ class HelucrypticApp:
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        files = await picker.pick_files()
-        if not files:
-            return
-        self.file_progress.visible = True
-        self.file_progress.value   = 0
-        self.page.update()
         try:
-            await self.engine.send_file(files[0].path, target=peer)
-            self._log(f"[File sent] {Path(files[0].path).name}")
-        except (RuntimeError, OSError) as ex:
-            # Surface the failure instead of letting it bubble to the loop
-            # exception handler (which auto-restarts the whole app).
-            self._toast(f"File send failed: {ex}", "error")
-        finally:
-            self.file_progress.visible = False
+            files = await picker.pick_files()
+            if not files:
+                return
+            self.file_progress.visible = True
+            self.file_progress.value   = 0
             self.page.update()
+            try:
+                await self.engine.send_file(files[0].path, target=peer)
+                self._log(f"[File sent] {Path(files[0].path).name}")
+            except (RuntimeError, OSError) as ex:
+                # Surface the failure instead of letting it bubble to the loop
+                # exception handler (which auto-restarts the whole app).
+                self._toast(f"File send failed: {ex}", "error")
+            finally:
+                self.file_progress.visible = False
+                self.page.update()
+        finally:
+            try:
+                self.page.services.remove(picker)
+            except ValueError:
+                pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
     async def _choose_file_target(self):
         """Return the peer username to send a file to, or None if cancelled."""
@@ -3292,9 +3337,19 @@ class HelucrypticApp:
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        dest = await picker.save_file(file_name=fname)
-        if dest:
-            shutil.copyfile(tmp_path, dest)
+        try:
+            dest = await picker.save_file(file_name=fname)
+            if dest:
+                shutil.copyfile(tmp_path, dest)
+        finally:
+            try:
+                self.page.services.remove(picker)
+            except ValueError:
+                pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
         try:
             Path(tmp_path).unlink()
         except OSError:
@@ -3696,7 +3751,7 @@ class HelucrypticApp:
             ft.FilledButton(
                 s, on_click=lambda e, u=s: self._open_fullscreen(u),
                 style=_filled_style(C.MAGENTA if s == self._fullscreen_sender else C.ELEV2,
-                                    "#ffffff", pad_h=12, pad_v=8),
+                                    C.BTN_CYAN if s == self._fullscreen_sender else C.TEXT, pad_h=12, pad_v=8),
             )
             for s in self._video_tiles
         ]
@@ -3835,8 +3890,18 @@ class HelucrypticApp:
             picker = ft.FilePicker()
             self.page.services.append(picker)
             self.page.update()
-            await picker.save_file(file_name="helucryptic-backup.helu", src_bytes=blob)
-            self._log("Encrypted backup saved.")
+            try:
+                await picker.save_file(file_name="helucryptic-backup.helu", src_bytes=blob)
+                self._log("Encrypted backup saved.")
+            finally:
+                try:
+                    self.page.services.remove(picker)
+                except ValueError:
+                    pass
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
 
         dlg = ft.AlertDialog(
             title=ft.Text("Backup profile"),
@@ -3863,24 +3928,33 @@ class HelucrypticApp:
             picker = ft.FilePicker()
             self.page.services.append(picker)
             self.page.update()
-            files = await picker.pick_files(allowed_extensions=["helu"])
-            if not files:
-                return
             try:
-                data = Path(files[0].path).read_bytes()
-                restored = backup.import_backup(data, pw.value)
-            except ValueError as ex:
-                err.value = str(ex); err.visible = True; self.page.update(); return
-            # Reload everything from the restored files.
-            self.keys        = load_or_create_keys()
-            self.history_key = derive_history_key(self.keys["ed25519_private"])
-            self.engine.keys = self.keys
-            self.settings    = load_settings()
-            self.engine.settings = self.settings
-            self._update_perf_parameters()
-            self._refresh_contact_list()
-            self._close_dialog(dlg)
-            self._log(f"Restored: {', '.join(restored)}. Previous files saved as .bak")
+                files = await picker.pick_files(allowed_extensions=["helu"])
+                if not files:
+                    return
+                try:
+                    data = Path(files[0].path).read_bytes()
+                    restored = backup.import_backup(data, pw.value)
+                except ValueError as ex:
+                    err.value = str(ex); err.visible = True; self.page.update(); return
+                # Reload everything from the restored files.
+                self.keys        = load_or_create_keys()
+                self.history_key = derive_history_key(self.keys["ed25519_private"])
+                self.engine.keys = self.keys
+                self.settings    = load_settings()
+                self.engine.settings = self.settings
+                self._refresh_contact_list()
+                self._close_dialog(dlg)
+                self._log(f"Restored: {', '.join(restored)}. Previous files saved as .bak")
+            finally:
+                try:
+                    self.page.services.remove(picker)
+                except ValueError:
+                    pass
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
 
         dlg = ft.AlertDialog(
             title=ft.Text("Restore profile"),
@@ -4251,27 +4325,47 @@ class HelucrypticApp:
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        dest = await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
-        if dest:
-            self._log("[Keys] Keypair exported as plaintext JSON - store it somewhere safe "
-                      "(anyone with this file owns your identity).")
+        try:
+            dest = await picker.save_file(file_name="helucryptic-keys.json", src_bytes=data)
+            if dest:
+                self._log("[Keys] Keypair exported as plaintext JSON - store it somewhere safe "
+                          "(anyone with this file owns your identity).")
+        finally:
+            try:
+                self.page.services.remove(picker)
+            except ValueError:
+                pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
     async def _settings_import_keys(self, ev) -> None:
         picker = ft.FilePicker()
         self.page.services.append(picker)
         self.page.update()
-        files = await picker.pick_files(allowed_extensions=["json"])
-        if files:
-            from crypto import import_keys_plaintext
+        try:
+            files = await picker.pick_files(allowed_extensions=["json"])
+            if files:
+                from crypto import import_keys_plaintext
+                try:
+                    import_keys_plaintext(Path(files[0].path).read_bytes())
+                except (ValueError, OSError) as ex:
+                    self._toast(f"Key import failed: {ex}", "error")
+                    return
+                self.keys = load_or_create_keys()
+                self.history_key = derive_history_key(self.keys["ed25519_private"])
+                self.engine.keys = self.keys
+                self._log("[Keys] Keypair imported successfully. Rebuilding active profile against new keys.")
+        finally:
             try:
-                import_keys_plaintext(Path(files[0].path).read_bytes())
-            except (ValueError, OSError) as ex:
-                self._toast(f"Key import failed: {ex}", "error")
-                return
-            self.keys = load_or_create_keys()
-            self.history_key = derive_history_key(self.keys["ed25519_private"])
-            self.engine.keys = self.keys
-            self._log("[Keys] Keypair imported successfully. Rebuilding active profile against new keys.")
+                self.page.services.remove(picker)
+            except ValueError:
+                pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
     def _settings_regen_keys(self, ev) -> None:
         confirm_dlg = ft.AlertDialog(
@@ -4457,7 +4551,7 @@ class HelucrypticApp:
                 ft.Row([self._settings_prof_dd, ft.FilledButton("Switch", on_click=self._settings_do_switch_profile,
                                                  style=_filled_style(C.CYAN))]),
                 ft.Row([self._settings_new_prof, ft.FilledButton("Create & switch", on_click=self._settings_do_create_profile,
-                                                  style=_filled_style(C.VIOLET, "#ffffff"))]),
+                                                  style=_filled_style(C.VIOLET, C.BTN_CYAN))]),
                 self._settings_prof_err,
             ]),
             ("Security & privacy", ft.Icons.SHIELD_MOON, C.CYAN,
@@ -4911,9 +5005,17 @@ class HelucrypticApp:
         clipboard = ft.Clipboard()
         self.page.services.append(clipboard)
         self.page.update()
-        await clipboard.set(text)
-        self.page.services.remove(clipboard)
-        self.page.update()
+        try:
+            await clipboard.set(text)
+        finally:
+            try:
+                self.page.services.remove(clipboard)
+            except ValueError:
+                pass
+            try:
+                self.page.update()
+            except Exception:
+                pass
 
 
 
@@ -5115,8 +5217,18 @@ class StartupScreen:
 
         self.page.add(bg)
 
-        # Entrance animation.
-        self._reveal_task = asyncio.ensure_future(self._reveal_entrance())
+        # Entrance animation – safe wrapper so tests without a running loop don't leak.
+        try:
+            try:
+                _loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _loop = asyncio.get_event_loop()
+            if _loop.is_closed():
+                self._reveal_task = None
+            else:
+                self._reveal_task = _loop.create_task(self._reveal_entrance())
+        except Exception:
+            self._reveal_task = None
 
     def _on_radio_change(self, e) -> None:
         self._selected = self._radio_group.value

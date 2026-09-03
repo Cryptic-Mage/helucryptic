@@ -316,6 +316,7 @@ async def test_sctp_filter_unhandled_exception(monkeypatch):
 
 def test_entry_point_exception_handling_non_dev(monkeypatch):
     import sys
+
     import flet as ft
     
     def fake_app(target):
@@ -352,6 +353,7 @@ except Exception as e:
 
 def test_entry_point_exception_handling_dev(monkeypatch):
     import sys
+
     import flet as ft
     
     def fake_app(target):

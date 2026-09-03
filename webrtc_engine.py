@@ -13,13 +13,13 @@ import uuid as _uuid
 from collections import deque
 from collections.abc import Callable
 
-from outbox import Outbox
-
 import mss
 import numpy as np
 import sounddevice as sd
 from av import AudioFrame, VideoFrame
 from PIL import Image
+
+from outbox import Outbox
 
 try:
     import cv2
@@ -92,7 +92,7 @@ _FALLBACK_TURN_SERVERS = [
 
 MAX_PRE_HELLO_FRAMES = 64
 MAX_PRE_HELLO_BYTES = 1 * 1024 * 1024
-MAX_INCOMING_FILE_SIZE = 2 * 1024 * 1024 * 1024
+MAX_INCOMING_FILE_SIZE = 1 * 1024 * 1024 * 1024  # 1 GiB cap per file (down from 2 GiB) + per-peer single slot mitigates disk DoS; global total capped at 4 GiB implicitly via 4 peers
 
 # App-layer heartbeat (see docs/WIRE_PROTOCOL.md). Ping cadence + the silence
 # window after which an "open" channel is declared dead and self-healed.
@@ -195,6 +195,7 @@ def prepunch_mapping(stun_ip: str, stun_port: int, local_port: int = 0,
     """
     import secrets as _secrets
     import socket as _socket
+
     from aioice import stun as _stun
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
     try:
@@ -244,26 +245,84 @@ MAX_HELLO_SKEW_SECONDS = 24 * 3600
 # once and rewrite ONLY that exact bind. The bound socket is a normal host
 # socket, so aioice's existing STUN step auto-advertises the public mapping
 # (ExitIP:forwarded_port) as a srflx candidate - no candidate injection. The
-# feature is purely additive: if the bind fails (e.g. port already in use by
-# another peer connection), aioice's own ``except OSError`` skips it and normal
-# gathering continues.
+# feature is purely additive: if the bind fails or pool is exhausted, normal
+# gathering continues seamlessly with ephemeral ports.
+
+class PortPoolAllocator:
+    """Thread-safe port pool allocator for aioice datagram endpoint bindings.
+
+    Keyed by id(pc) so concurrent PeerConnection gathers do not collide.
+    Releases ports on PC closure or close_peer, but retains them through
+    connectionstatechange == 'failed' to support subsequent ICE restarts.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._free: list[int] = []
+        self._allocated: dict[int, int] = {}  # id(pc) -> port
+        self._active: bool = False
+        self._vpn_ip: str | None = None
+
+    def configure(self, vpn_ip: str, ports: list[int]) -> None:
+        with self._lock:
+            self._vpn_ip = vpn_ip
+            self._free = list(ports)
+            self._allocated.clear()
+            self._active = bool(self._free)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._active = False
+            self._vpn_ip = None
+            self._free.clear()
+            self._allocated.clear()
+
+    def allocate(self, pc_id: int | None = None) -> int | None:
+        """Claim a port from the free pool. Returns None if pool is exhausted
+        (allowing seamless fallback to ephemeral port)."""
+        with self._lock:
+            if not self._active or not self._free:
+                return None
+            port = self._free.pop(0)
+            if pc_id is not None:
+                self._allocated[pc_id] = port
+            return port
+
+    def release(self, pc_id: int) -> None:
+        """Release a claimed port back into the free list."""
+        with self._lock:
+            port = self._allocated.pop(pc_id, None)
+            if port is not None and port not in self._free:
+                self._free.append(port)
+
+    @property
+    def vpn_ip(self) -> str | None:
+        return self._vpn_ip
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def current_port(self) -> int:
+        with self._lock:
+            if self._free:
+                return self._free[0]
+            if self._allocated:
+                return next(iter(self._allocated.values()))
+            return 0
+
+
+_port_allocator = PortPoolAllocator()
 _forward_active = False
-_vpn_ip: str | None = None
 _forward_port = 0
-_forward_pool: list = []     # available mapped ports to assign, in order
-_forward_used: int = 0       # how many pool ports already assigned this gather cycle
-_forward_lock: asyncio.Lock | None = None  # lazy-init per loop, protects _forward_used
 
 
 def set_forwarded_ports(vpn_ip: str, ports) -> None:
     """Publish a pool of forwarded ports; each new matching ICE bind takes the next one."""
-    global _forward_active, _vpn_ip, _forward_pool, _forward_used, _forward_port, _forward_lock
-    _vpn_ip = vpn_ip
-    _forward_pool = list(ports)
-    _forward_used = 0
-    _forward_active = bool(_forward_pool)
-    _forward_port = _forward_pool[0] if _forward_pool else 0   # keep single-port field meaningful
-    _forward_lock = None  # reset lock so it re-creates on next loop
+    global _forward_active, _forward_port
+    _port_allocator.configure(vpn_ip, list(ports))
+    _forward_active = _port_allocator.is_active
+    _forward_port = _port_allocator.current_port
 
 
 def set_forwarded_port(vpn_ip: str, port: int) -> None:
@@ -273,22 +332,18 @@ def set_forwarded_port(vpn_ip: str, port: int) -> None:
 
 def clear_forwarded_port() -> None:
     """Disable forwarded-port binding; new gathers fall back to normal ports."""
-    global _forward_active, _vpn_ip, _forward_port, _forward_pool, _forward_used, _forward_lock
-    _forward_active, _vpn_ip, _forward_port = False, None, 0
-    _forward_pool, _forward_used = [], 0
-    _forward_lock = None
+    global _forward_active, _forward_port
+    _port_allocator.clear()
+    _forward_active = False
+    _forward_port = 0
 
 
 def _make_bind_wrapper(orig):
     async def wrapped(protocol_factory, *args, local_addr=None, **kwargs):
-        global _forward_used, _forward_lock
-        if _forward_active and local_addr == (_vpn_ip, 0) and _forward_used < len(_forward_pool):
-            if _forward_lock is None:
-                _forward_lock = asyncio.Lock()
-            async with _forward_lock:
-                if _forward_used < len(_forward_pool):
-                    local_addr = (_vpn_ip, _forward_pool[_forward_used])
-                    _forward_used += 1
+        if _port_allocator.is_active and local_addr == (_port_allocator.vpn_ip, 0):
+            assigned = _port_allocator.allocate()
+            if assigned is not None:
+                local_addr = (_port_allocator.vpn_ip, assigned)
         return await orig(protocol_factory, *args, local_addr=local_addr, **kwargs)
     return wrapped
 
@@ -347,13 +402,16 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
             async def wait_gathering():
                 while pc.iceGatheringState != "complete":
                     await asyncio.sleep(0.05)
-            await asyncio.wait_for(wait_gathering(), timeout=8.0)
+            try:
+                await asyncio.wait_for(wait_gathering(), timeout=8.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                return (False, "Timed out contacting TURN server")
 
         sdp = pc.localDescription.sdp if pc.localDescription else ""
         if "typ relay" in sdp:
             return (True, "Relay reachable")
         return (False, "No relay candidate - check URL/credentials")
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return (False, "Timed out contacting TURN server")
     except Exception as ex:
         return (False, f"Error: {type(ex).__name__}")
@@ -400,8 +458,8 @@ def test_forwarded_port(vpn_ip: str, port: int,
         ext_ip, ext_port = resp.attributes["XOR-MAPPED-ADDRESS"]
         if ext_port == port:
             return (True, f"Reachable: {ext_ip}:{ext_port}")
-        return (False, f"Public port {ext_port} ≠ forwarded {port} "
-                       "(split-tunnel or NAT not preserving port)")
+        return (False, (f"Public port {ext_port} ≠ forwarded {port} "
+                       "(split-tunnel or NAT not preserving port)"))
     except Exception as ex:
         return (False, f"Error: {type(ex).__name__}")
     finally:
@@ -794,6 +852,15 @@ class WebRTCEngine:
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
 
+        # Signaling-relay and sequencing state
+        self._signaling_hello_sent: dict[str, bool] = {}
+        self._epoch_ids: dict[str, str] = {}
+        self._send_seq: dict[str, int] = {}
+        self._recv_window: dict[str, dict[str, tuple[int, int]]] = {}
+        self._delivered_msg_ids: deque = deque(maxlen=1000)
+        self._direct_stable_since: dict[str, float] = {}
+        self.server_capabilities: list[str] = []
+
         # Callbacks set by client.py - on_state_change(peer, state)
         self.on_state_change:  Callable | None = None  # (peer: str, state: str)
         self.on_message:       Callable | None = None  # (sender, text, verified)
@@ -894,14 +961,22 @@ class WebRTCEngine:
 
     def _ice_config(self, force_relay: bool = False) -> RTCConfiguration:
         servers = self._ice_servers(force_relay=force_relay)
-        # For strict symmetric random, force relay to avoid 30s ICE hunt
+        # aiortc does not expose the browser ``iceTransportPolicy`` option.
+        # For a strict NAT, omit STUN servers so gathering concentrates on TURN
+        # candidates instead of spending time on server-reflexive candidates
+        # that cannot form a pair. aiortc still gathers host candidates, hence
+        # this is relay-preferred rather than an absolute relay-only policy.
         try:
             needs_relay = force_relay or (
                 self._nat_profile and getattr(self._nat_profile, "needs_relay", False)
             )
             if needs_relay and len(servers) > len(_STUN_SERVERS):
-                # servers has TURN added beyond base STUN — force relay policy
-                return RTCConfiguration(iceServers=servers, iceTransportPolicy="relay")
+                relay_servers = [
+                    server for server in servers
+                    if any(url.startswith(("turn:", "turns:")) for url in server.urls)
+                ]
+                if relay_servers:
+                    return RTCConfiguration(iceServers=relay_servers)
         except Exception:
             pass
         return RTCConfiguration(iceServers=servers)
@@ -1183,92 +1258,122 @@ class WebRTCEngine:
             pass
 
     # ------------------------------------------------------------------
-    # Signaling-relay fallback for BLOCKED strict NAT (optimized)
+    # Signaling-relay fallback & Relay-First transport
     # ------------------------------------------------------------------
 
-    async def send_via_relay(self, peer: str, payload: dict | bytes) -> bool:
-        """Send chat/file payload via signaling server when P2P is dead.
+    def is_direct_stable(self, peer: str) -> bool:
+        """True if DataChannel is open and has been stable for >= 3.0 s."""
+        dc = self.data_channels.get(peer)
+        if dc and getattr(dc, "readyState", None) == "open":
+            opened_at = self._direct_stable_since.get(peer)
+            if opened_at is not None and (_time.monotonic() - opened_at) >= 3.0:
+                return True
+        return False
 
-        Optimized: only for small control/data (chat, file_meta/file_end), not
-        bulk binary chunks (those wait for TURN). Uses existing _send_ws which
-        is already the WSS/WS to signaling server - no new connection.
+    def should_relay(self, peer: str) -> bool:
+        """True if message should travel over signaling relay (Relay-First or fallback)."""
+        return not self.is_direct_stable(peer)
+
+    async def send_via_relay(self, peer: str, payload: dict | bytes | str) -> bool:
+        """Send chat/control payload via signaling server.
+
+        Enforces wire size cap (24 KiB) and uses existing _send_ws connection.
         """
         try:
             if self._send_ws is None:
                 return False
-            if isinstance(payload, bytes):
-                # For relay, encode binary as base64 to fit JSON (small files only)
-                import base64 as _b64r
+            data_to_send = json.dumps(payload) if isinstance(payload, dict) else payload
+            if isinstance(data_to_send, str):
+                encoded = data_to_send.encode("utf-8")
+                if len(encoded) > 24576:
+                    print(f"[relay] Payload exceeds 24 KiB wire cap ({len(encoded)} bytes); dropping.", flush=True)
+                    return False
                 await self._send_ws({
                     "target": peer,
-                    "type": "p2p_relay",
-                    "data": {"b64": _b64r.b64encode(payload).decode(), "binary": True}
+                    "type": "relay_e2ee",
+                    "data": data_to_send,
                 })
-            else:
-                await self._send_ws({"target": peer, "type": "p2p_relay", "data": payload})
-            return True
-        except Exception:
-            return False
-
-    async def handle_p2p_relay(self, data: dict, sender: str) -> None:
-        """Incoming relayed payload from signaling server - inject as if from DataChannel.
-
-        Decrypts and dispatches identically to _handle_text/_handle_binary path,
-        but tagged relay=True so callee knows it's relayed (for diagnostics).
-        """
-        try:
-            if data.get("binary"):
-                import base64 as _b64r
-                b = _b64r.b64decode(data.get("b64", ""))
-                await self._handle_binary(b, sender)
-            else:
-                # Reconstruct frame dict from relay data
-                # If encrypted token, dispatch will decrypt
-                if isinstance(data, dict) and "__type" in data:
-                    await self._handle_text(json.dumps(data), sender)
-                elif isinstance(data, dict) and "token" in data:
-                    await self._handle_text(json.dumps(data), sender)
-                else:
-                    # Raw chat fallback
-                    await self._handle_text(json.dumps({"__type": "chat", "text": str(data.get("text",""))}), sender)
-        except Exception:
-            pass
-
-    def should_relay(self, peer: str) -> bool:
-        """Optimized check: should we use relay for this peer now?"""
-        try:
-            pc = self.pcs.get(peer)
-            dc = self.data_channels.get(peer)
-            # Relay if no PC, or PC failed/disconnected >4s, or DC not open but signaling is
-            if pc is None:
                 return True
-            if pc.connectionState in ("failed", "closed"):
-                return True
-            if dc is None or getattr(dc, "readyState", "") != "open":
-                # If we have been trying >6s and still no DC, fallback to relay for chat
-                # Check heartbeat dead
-                last = self._last_pong.get(peer, 0)
-                import time as _t
-                if last and _t.monotonic() - last > 8.0:
-                    return True
-                # If in BLOCKED mode, prefer relay for text
-                if self._nat_profile and getattr(self._nat_profile, "nat_type", "") == "blocked":
-                    return True
             return False
-        except Exception:
+        except Exception as ex:
+            print(f"[relay] Failed sending via relay to {peer}: {ex}", flush=True)
             return False
+
+    async def handle_relay_message(self, data, sender: str) -> None:
+        """Incoming relayed payload from signaling server - inject as if from DataChannel."""
+        try:
+            if isinstance(data, str):
+                if len(data.encode("utf-8")) > 24576:
+                    print(f"[relay] Dropping oversized relay frame from {sender}", flush=True)
+                    return
+                await self._handle_text(data, sender)
+            elif isinstance(data, dict):
+                raw = json.dumps(data)
+                if len(raw.encode("utf-8")) > 24576:
+                    print(f"[relay] Dropping oversized relay frame from {sender}", flush=True)
+                    return
+                await self._handle_text(raw, sender)
+        except Exception as ex:
+            print(f"[relay] Exception in handle_relay_message: {ex}", flush=True)
+
+    # Alias for backward compatibility
+    handle_p2p_relay = handle_relay_message
 
     # ------------------------------------------------------------------
     # Track-origin helpers (receiver-side SFU origin keying)
     # ------------------------------------------------------------------
 
-    def _bg(self, coro) -> "asyncio.Task":
+    def _bg(self, coro) -> "asyncio.Task | None":
         """Schedule a coroutine as a background task, holding a strong reference
         so the GC cannot collect it before it finishes (Python ≥ 3.12 risk)."""
-        t = asyncio.ensure_future(coro)
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                return None
+            t = loop.create_task(coro)
+        except Exception:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
         self._bg_tasks.add(t)
         t.add_done_callback(self._bg_tasks.discard)
         return t
+
+    async def shutdown(self) -> None:
+        """Cancel all background tasks and close peer connections – idempotent."""
+        for t in list(self._bg_tasks):
+            if not t.done():
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+        self._bg_tasks.clear()
+        if self._hb_task is not None and not self._hb_task.done():
+            self._hb_task.cancel()
+            try:
+                await self._hb_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._hb_task = None
+        for peer in list(self.pcs.keys()):
+            try:
+                await self.remove_peer(peer)
+            except Exception:
+                pass
 
     def _origin_of(self, track_id: str):
         return self._origin_map.get(track_id)
@@ -1331,18 +1436,20 @@ class WebRTCEngine:
         def on_state():
             state = pc.connectionState
             print(f"[rtc] {self.my_username}: pc[{peer}] connection -> {state}", flush=True)
+            if state != "connected":
+                self._direct_stable_since.pop(peer, None)
             if self.on_state_change:
                 self.on_state_change(peer, state)
 
             if state == "failed":
                 # Signaling may still be alive - attempt self-healing renegotiation
-                # before giving up. Only fall back to remove_peer when there is no
-                # send channel (signaling is also gone).
+                # before giving up. Retain allocated port for subsequent ICE restart.
                 if self._send_ws is not None:
                     self._bg(self._heal_peer(peer))
                 else:
                     self._bg(self.remove_peer(peer))
             elif state == "closed":
+                _port_allocator.release(id(pc))
                 self._bg(self.remove_peer(peer))
             elif state == "disconnected":
                 # ICE has its own short recovery timers, so give it a grace
@@ -1394,6 +1501,7 @@ class WebRTCEngine:
 
     def _bind_channel(self, channel, peer: str) -> None:
         async def _on_open():
+            self._direct_stable_since[peer] = _time.monotonic()
             if self.room_psk:
                 # PSK-protected room: prove knowledge of the pre-shared key FIRST.
                 # The hello (and everything after) is gated until the peer answers
@@ -1582,6 +1690,46 @@ class WebRTCEngine:
         ch.send(json.dumps(hello))
         self._hello_sent[peer] = True
 
+    async def _send_signaling_hello(self, peer: str) -> None:
+        """Send authenticated identity and ephemeral X25519 key over signaling WebSocket.
+
+        Completes X25519 ECDH handshake out-of-band so session keys are available
+        immediately before or without WebRTC DataChannel connectivity (DERP/Relay-First).
+        """
+        if not self._send_ws or self.settings.security_mode != "e2ee":
+            return
+        try:
+            from datetime import UTC, datetime
+            payload = {
+                "username":    self.my_username,
+                "x25519_pub":  self.keys["x25519_public"],
+                "ed25519_pub": self.keys["ed25519_public"],
+                "eph_x25519_pub": self._ephemeral_pub(peer),
+                "iat":         datetime.now(UTC).isoformat(),
+            }
+            token = paseto_sign(payload, self.keys["ed25519_private"], self.keys["ed25519_public"])
+            data = {"__type": "hello", "token": token}
+            if self.my_membership_cert:
+                data["cert"] = self.my_membership_cert
+            await self._send_ws({
+                "target": peer,
+                "type": "hello_signaling",
+                "data": data,
+            })
+            self._signaling_hello_sent[peer] = True
+            self._hello_sent[peer] = True
+        except Exception as ex:
+            print(f"[crypto] Failed to send signaling hello to {peer}: {ex}", flush=True)
+
+    async def handle_signaling_hello(self, data: dict, sender: str) -> None:
+        """Process incoming signaling hello, derive session key, and reply if needed."""
+        try:
+            await self._handle_hello(data, sender)
+            if not self._signaling_hello_sent.get(sender):
+                await self._send_signaling_hello(sender)
+        except Exception as ex:
+            print(f"[crypto] Failed processing signaling hello from {sender}: {ex}", flush=True)
+
     def _hello_iat_fresh(self, iat: str) -> bool:
         """Defence-in-depth: reject a signed hello with an implausible timestamp."""
         if not iat:
@@ -1709,6 +1857,7 @@ class WebRTCEngine:
                 self.keys["x25519_private"], self._eph_priv[peer],
                 payload["x25519_pub"], peer_eph_pub,
             )
+            self._epoch_ids[peer] = hashlib.sha256(self.session_keys[peer]).digest()[:8].hex()
             upsert_contact(peer,
                            x25519_pub=payload["x25519_pub"],
                            ed25519_pub=payload["ed25519_pub"])
@@ -1986,16 +2135,35 @@ class WebRTCEngine:
                 if not key:
                     return
                 try:
-                    payload = paseto_decrypt(frame["token"], key)
+                    payload = self._decrypt_dict(frame, peer)
+                    # Authentication failures must drop the frame.  In
+                    # particular, never turn a rejected relay token into a
+                    # user-visible blank message (or an acknowledgement).
+                    if not isinstance(payload, dict) or not payload:
+                        print(f"[crypto] Invalid or unauthenticated chat frame from {peer}; dropping.", flush=True)
+                        return
                     text = payload.get("text", "")
                     sender = payload.get("from") or peer
                     msg_id = payload.get("id")
+                    seq = int(payload.get("seq", 0))
+                    epoch = str(payload.get("epoch") or frame.get("epoch", ""))
+                    if seq > 0 and not self._check_and_update_recv_window(peer, epoch, seq):
+                        print(f"[crypto] Replay detected from {peer} (epoch={epoch}, seq={seq}); dropping.", flush=True)
+                        return
                 except Exception:
                     text = "[decryption failed]"
             else:
                 text = frame.get("text", "")
                 sender = frame.get("from") or peer
                 msg_id = frame.get("id")
+
+            # Deduplication across parallel transports (Relay vs Direct)
+            if msg_id:
+                if msg_id in self._delivered_msg_ids:
+                    print(f"[chat] Deduplicated duplicate msg_id {msg_id} from {peer}.", flush=True)
+                    return
+                self._delivered_msg_ids.append(msg_id)
+
             if self.on_message:
                 self.on_message(sender, text, frame.get("verified", False))
             # Send a delivery receipt for a 1-to-1 message that carried an id.
@@ -2090,13 +2258,60 @@ class WebRTCEngine:
     # Encrypt / decrypt helpers
     # ------------------------------------------------------------------
 
+    def _build_aad(self, sender: str, recipient: str, epoch: str = "") -> bytes:
+        room_str = self.room_id or ""
+        return (b"heluv1|" + sender.encode("utf-8") + b"|" +
+                recipient.encode("utf-8") + b"|" + room_str.encode("utf-8") + b"|" +
+                epoch.encode("utf-8"))
+
+    def _next_send_seq(self, peer: str) -> int:
+        self._send_seq[peer] = self._send_seq.get(peer, 0) + 1
+        return self._send_seq[peer]
+
+    def _check_and_update_recv_window(self, peer: str, epoch: str, seq: int) -> bool:
+        if peer not in self._recv_window:
+            self._recv_window[peer] = {}
+        if epoch not in self._recv_window[peer]:
+            self._recv_window[peer][epoch] = (0, 0)
+
+        last_seq, mask = self._recv_window[peer][epoch]
+        if seq <= 0:
+            return True
+        if seq > last_seq:
+            diff = seq - last_seq
+            if diff >= 64:
+                mask = 1
+            else:
+                mask = ((mask << diff) | 1) & 0xFFFFFFFFFFFFFFFF
+            self._recv_window[peer][epoch] = (seq, mask)
+            return True
+        else:
+            diff = last_seq - seq
+            if diff >= 64:
+                return False
+            if (mask & (1 << diff)) != 0:
+                return False
+            mask |= (1 << diff)
+            self._recv_window[peer][epoch] = (last_seq, mask)
+            return True
+
     def _decrypt_dict(self, frame: dict, peer: str) -> dict:
         if self.settings.security_mode == "e2ee" and "token" in frame:
-            key = self.group_key if self.room_id else self.session_keys.get(peer)
-            if key:
+            if self.room_id and self.group_key:
                 try:
-                    return paseto_decrypt(frame["token"], key)
+                    return paseto_decrypt(frame["token"], self.group_key)
                 except Exception:
+                    return {}
+            key = self.session_keys.get(peer)
+            if key:
+                epoch = frame.get("epoch") or self._epoch_ids.get(peer, "")
+                aad = self._build_aad(peer, self.my_username, epoch)
+                try:
+                    return paseto_decrypt(frame["token"], key, implicit_assertion=aad)
+                except Exception:
+                    # Do not fall back to unauthenticated legacy frames: doing so
+                    # would turn the new sender/recipient/room binding into an
+                    # optional property and permit a protocol downgrade.
                     return {}
         return frame
 
@@ -2107,18 +2322,23 @@ class WebRTCEngine:
         if self.settings.security_mode == "e2ee" and "token" in frame:
             key = self.session_keys.get(peer)
             if key:
+                epoch = frame.get("epoch") or self._epoch_ids.get(peer, "")
+                aad = self._build_aad(peer, self.my_username, epoch)
                 try:
-                    return paseto_decrypt(frame["token"], key)
+                    return paseto_decrypt(frame["token"], key, implicit_assertion=aad)
                 except Exception:
                     return {}
         return frame
 
-    def _encrypt_frame_for(self, payload: dict, peer: str) -> dict:
+    def _encrypt_frame_for(self, payload: dict, peer: str, is_relay: bool = False) -> dict:
         frame = {"__type": payload["__type"]}
         if self.settings.security_mode == "e2ee":
             key = self.session_keys.get(peer)
             if key:
-                frame["token"] = paseto_encrypt(payload, key)
+                epoch = self._epoch_ids.get(peer, "")
+                aad = self._build_aad(self.my_username, peer, epoch)
+                frame["token"] = paseto_encrypt(payload, key, implicit_assertion=aad)
+                frame["epoch"] = epoch
                 return frame
         frame.update(payload)
         return frame
@@ -2203,35 +2423,36 @@ class WebRTCEngine:
         mid = msg_id or _uuid.uuid4().hex
         peer = self.target_peer
         ch = self.data_channels.get(peer)
-        if not (ch and ch.readyState == "open"):
-            # Strict NAT fallback: try signaling relay if peer is unreachable but signaling is live
-            if self.should_relay(peer) and self._send_ws is not None:
-                try:
-                    # Use same encryption as DataChannel so relay still E2EE
-                    frame = self._encrypt_frame_for(
-                        {"__type": "chat", "text": text, "id": mid}, peer
-                    )
-                    ok = await self.send_via_relay(peer, frame)
-                    if ok:
-                        self._awaiting_ack.setdefault(peer, set()).add(mid)
-                        print(f"[chat] {peer} via relay (strict NAT fallback)", flush=True)
-                        return mid
-                except Exception:
-                    pass
-            # Peer offline → queue in order; flushed on session-ready/reconnect.
-            self._outbox.enqueue(peer, (mid, text))
-            print(f"[chat] {peer} offline - queued message (outbox={self._outbox.pending(peer)})", flush=True)
-            return mid
-        frame = self._encrypt_frame_for(
-            {"__type": "chat", "text": text, "id": mid}, peer
-        )
-        try:
-            ch.send(json.dumps(frame))
-        except Exception:
-            # If send fails but relay viable, fallback
-            if self.should_relay(peer):
-                await self.send_via_relay(peer, frame)
-        self._awaiting_ack.setdefault(peer, set()).add(mid)
+
+        # 1. Direct P2P transport (promoted after 3.0s continuous stable DataChannel)
+        if self.is_direct_stable(peer) and ch and getattr(ch, "readyState", None) == "open":
+            seq = self._next_send_seq(peer)
+            payload = {"__type": "chat", "text": text, "id": mid, "seq": seq}
+            frame = self._encrypt_frame_for(payload, peer)
+            try:
+                ch.send(json.dumps(frame))
+                self._awaiting_ack.setdefault(peer, set()).add(mid)
+                return mid
+            except Exception:
+                pass
+
+        # 2. Relay-First / Strict NAT fallback over signaling WebSocket
+        if self._send_ws is not None and (peer in self.session_keys or self.settings.security_mode != "e2ee"):
+            seq = self._next_send_seq(peer)
+            payload = {"__type": "chat", "text": text, "id": mid, "seq": seq}
+            frame = self._encrypt_frame_for(payload, peer, is_relay=True)
+            try:
+                ok = await self.send_via_relay(peer, frame)
+                if ok:
+                    self._awaiting_ack.setdefault(peer, set()).add(mid)
+                    print(f"[chat] {peer} sent via E2EE relay (seq={seq})", flush=True)
+                    return mid
+            except Exception:
+                pass
+
+        # 3. Offline outbox fallback (when signaling is also down)
+        self._outbox.enqueue(peer, (mid, text))
+        print(f"[chat] {peer} offline - queued message (outbox={self._outbox.pending(peer)})", flush=True)
         return mid
 
     def peer_channel_open(self, peer: str) -> bool:
@@ -2255,24 +2476,35 @@ class WebRTCEngine:
                 pass
 
     async def _send_ack(self, peer: str, msg_id: str) -> None:
-        ch = self.data_channels.get(peer)
-        if not (ch and ch.readyState == "open"):
-            return
         frame = self._encrypt_frame_for({"__type": "ack", "id": msg_id}, peer)
-        try:
-            ch.send(json.dumps(frame))
-        except Exception:
-            pass
+        ch = self.data_channels.get(peer)
+        if self.is_direct_stable(peer) and ch and getattr(ch, "readyState", None) == "open":
+            try:
+                ch.send(json.dumps(frame))
+                return
+            except Exception:
+                pass
+        if self._send_ws is not None:
+            try:
+                await self.send_via_relay(peer, frame)
+            except Exception:
+                pass
 
     async def _flush_outbox(self, peer: str) -> None:
-        """Send everything queued for ``peer`` once its channel is usable."""
+        """Send everything queued for ``peer`` once a transport (direct or relay) is usable."""
         ch = self.data_channels.get(peer)
-        if not (ch and ch.readyState == "open"):
+        is_direct = self.is_direct_stable(peer) and ch and getattr(ch, "readyState", None) == "open"
+        is_relay = self._send_ws is not None and (peer in self.session_keys or self.settings.security_mode != "e2ee")
+        if not (is_direct or is_relay):
             return
         for mid, text in self._outbox.drain(peer):
+            seq = self._next_send_seq(peer)
             try:
-                frame = self._encrypt_frame_for({"__type": "chat", "text": text, "id": mid}, peer)
-                ch.send(json.dumps(frame))
+                frame = self._encrypt_frame_for({"__type": "chat", "text": text, "id": mid, "seq": seq}, peer, is_relay=not is_direct)
+                if is_direct and ch:
+                    ch.send(json.dumps(frame))
+                else:
+                    await self.send_via_relay(peer, frame)
                 self._awaiting_ack.setdefault(peer, set()).add(mid)
                 if self.on_sent:
                     try:
@@ -2280,7 +2512,6 @@ class WebRTCEngine:
                     except Exception:
                         pass
             except Exception:
-                # Re-queue the rest and stop; we'll retry on the next ready event.
                 self._outbox.enqueue(peer, (mid, text))
                 break
 
@@ -2438,7 +2669,7 @@ class WebRTCEngine:
                     if line.startswith("a=candidate:") and line not in seen:
                         seen.add(line)
                         # Extract candidate line without a= prefix
-                        cand = line[2:] if line.startswith("a=") else line
+                        cand = line.removeprefix("a=")
                         try:
                             await self._send_ws({
                                 "target": peer,
@@ -2475,12 +2706,14 @@ class WebRTCEngine:
         dc = self.pcs[target].createDataChannel("chat", ordered=True)
         self.data_channels[target] = dc
         self._bind_channel(dc, target)
+        self._bg(self._send_signaling_hello(target))
         await self.request_negotiation(target)
 
     async def handle_offer(self, sender: str, data: dict, ws_send: Callable) -> None:
         print(f"[rtc] {self.my_username}: RECEIVED offer from {sender}", flush=True)
         self.target_peer = sender
         self._send_ws    = ws_send
+        self._bg(self._send_signaling_hello(sender))
         if sender in self.pcs:
             if self.pcs[sender].connectionState in ("closed", "failed"):
                 await self.remove_peer(sender)
@@ -2699,10 +2932,16 @@ class WebRTCEngine:
     async def remove_peer(self, username: str) -> None:
         pc = self.pcs.pop(username, None)
         if pc:
+            _port_allocator.release(id(pc))
             try:
                 await pc.close()
             except Exception:
                 pass
+        self._direct_stable_since.pop(username, None)
+        self._signaling_hello_sent.pop(username, None)
+        self._epoch_ids.pop(username, None)
+        self._send_seq.pop(username, None)
+        self._recv_window.pop(username, None)
         self.data_channels.pop(username, None)
         self.session_keys.pop(username, None)
         self._hello_sent.pop(username, None)
@@ -3069,7 +3308,7 @@ class WebRTCEngine:
             except Exception as ex:
                 self.last_error = f"Audio output error: {ex}"
                 print(f"[rtc] Failed to open audio output stream: {ex}", flush=True)
-                raise ex
+                raise
 
     async def _handle_incoming_audio(self, track, peer: str) -> None:
         MAX_BUFFERED = 48000   # ~1 s @ 48 kHz; drop oldest beyond this

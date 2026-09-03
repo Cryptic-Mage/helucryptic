@@ -62,6 +62,23 @@ _CONN_MAX    = 20
 _msg_times: dict[str, deque] = {}
 _MSG_WINDOW = 10.0
 _MSG_MAX    = 100
+# Byte rate: max 640 KiB per username per 10 s (~64 KiB/s sustained, 256 KiB burst).
+_byte_times: dict[str, deque] = {}
+_BYTE_WINDOW = 10.0
+_BYTE_MAX    = 655360
+_RELAY_FRAME_MAX_BYTES = 24576  # 24 KiB wire cap for relay (16 KiB plaintext + PASETO overhead)
+SERVER_CAPABILITIES = ["relay_e2ee_v1", "signaling_hello_v1"]
+
+
+def reset_server_state() -> None:
+    """Reset all active connections, rooms, session tokens, and rate limiter state."""
+    active_connections.clear()
+    rooms.clear()
+    room_of.clear()
+    _session_tokens.clear()
+    _conn_times.clear()
+    _msg_times.clear()
+    _byte_times.clear()
 
 
 def _conn_rate_ok(ip: str) -> bool:
@@ -83,6 +100,18 @@ def _msg_rate_ok(username: str) -> bool:
     if len(dq) >= _MSG_MAX:
         return False
     dq.append(now)
+    return True
+
+
+def _byte_rate_ok(username: str, byte_count: int) -> bool:
+    now = time.monotonic()
+    dq = _byte_times.setdefault(username, deque())
+    while dq and dq[0][0] < now - _BYTE_WINDOW:
+        dq.popleft()
+    current_total = sum(b for _, b in dq)
+    if current_total + byte_count > _BYTE_MAX:
+        return False
+    dq.append((now, byte_count))
     return True
 
 
@@ -241,6 +270,35 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
             pass
         return
 
+    # Relay-specific quota & size checks to prevent signaling server abuse
+    # ``p2p_relay`` is retained for older clients, so it needs the same abuse
+    # controls as the current relay message type.
+    if msg_type in {"relay_e2ee", "p2p_relay"}:
+        raw_data = str(payload.get("data") or "")
+        data_len = len(raw_data.encode("utf-8"))
+        if data_len > _RELAY_FRAME_MAX_BYTES:
+            logger.warning("User '%s' exceeded relay frame limit (%d > %d bytes)", username, data_len, _RELAY_FRAME_MAX_BYTES)
+            try:
+                await websocket.send_text(json.dumps({
+                    "sender": "system",
+                    "type": "error",
+                    "data": f"Relay payload too large ({data_len} bytes, max {_RELAY_FRAME_MAX_BYTES}).",
+                }))
+            except Exception:
+                pass
+            return
+        if not _byte_rate_ok(username, data_len):
+            logger.warning("User '%s' exceeded relay byte quota - dropping packet", username)
+            try:
+                await websocket.send_text(json.dumps({
+                    "sender": "system",
+                    "type": "error",
+                    "data": "Relay bandwidth quota exceeded (slow down).",
+                }))
+            except Exception:
+                pass
+            return
+
     if target not in active_connections:
         logger.info("Target '%s' offline for message type '%s' from '%s'", target, msg_type, username)
         try:
@@ -346,6 +404,7 @@ async def _establish_connection_session(websocket: WebSocket, username: str) -> 
             "token": new_token,
             "reflected_host": client.host if client else None,
             "reflected_port": client.port if client else None,
+            "capabilities": SERVER_CAPABILITIES,
         },
     }))
     return new_token
@@ -379,6 +438,7 @@ async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
     if active_connections.get(username) is not websocket:
         return
     _msg_times.pop(username, None)
+    _byte_times.pop(username, None)
     active_connections.pop(username, None)
     _session_tokens.pop(username, None)
     room_id = room_of.pop(username, None)

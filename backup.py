@@ -27,14 +27,17 @@ _PROFILE_FILES = ["keys.json", "contacts.json", "settings.json"]
 _HISTORY_FILE = "history.db"
 _HISTORY_SIDECARS = ["history.db-wal", "history.db-shm"]
 
-# scrypt parameters (memory-hard). n=2**14 keeps it snappy while still costly.
-_SCRYPT_N = 2 ** 14
+# scrypt parameters (memory-hard). n=2**15 is ~2x cost of previous 2**14 but still <150 ms on modern CPUs;
+# OWASP 2023 suggests n>=2**17 for interactive logins, but backup encrypt is infrequent and must stay snappy for UX.
+# Versioned via container "v": old backups (v=1) with n=14 still decrypt via legacy fallback below.
+_SCRYPT_N = 2 ** 15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+_SCRYPT_N_LEGACY = 2 ** 14
 
 
-def _derive_key(passphrase: str, salt: bytes) -> bytes:
-    kdf = Scrypt(salt=salt, length=32, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P)
+def _derive_key(passphrase: str, salt: bytes, n: int | None = None) -> bytes:
+    kdf = Scrypt(salt=salt, length=32, n=n if n is not None else _SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P)
     return kdf.derive(passphrase.encode("utf-8"))
 
 
@@ -56,7 +59,7 @@ def export_backup(passphrase: str, include_history: bool = False) -> bytes:
     salt = os.urandom(16)
     token = paseto_encrypt({"files": files}, _derive_key(passphrase, salt))
     container = {
-        "magic": _MAGIC, "v": 1, "kdf": "scrypt",
+        "magic": _MAGIC, "v": 2, "kdf": "scrypt", "kdf_n": _SCRYPT_N,
         "salt": base64.b64encode(salt).decode(), "token": token,
     }
     return json.dumps(container).encode()
@@ -72,7 +75,20 @@ def validate_and_decrypt(data: bytes, passphrase: str) -> dict:
         raise ValueError("Not a helucryptic backup file")
     try:
         salt = base64.b64decode(container["salt"])
-        payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt))
+        # Versioned scrypt: v2 stores kdf_n, v1 legacy uses _SCRYPT_N_LEGACY
+        kdf_n = container.get("kdf_n")
+        if kdf_n is None:
+            # legacy backup - try current N then fallback to legacy N
+            try:
+                payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=_SCRYPT_N))
+            except Exception:
+                payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=_SCRYPT_N_LEGACY))
+        else:
+            try:
+                n_val = int(kdf_n)
+            except (TypeError, ValueError):
+                n_val = _SCRYPT_N
+            payload = paseto_decrypt(container["token"], _derive_key(passphrase, salt, n=n_val))
     except Exception:
         raise ValueError("Wrong passphrase or corrupted backup")
     if not isinstance(payload, dict) or not isinstance(payload.get("files"), dict):

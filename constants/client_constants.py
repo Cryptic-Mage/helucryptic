@@ -1,14 +1,15 @@
+import re as _re
 import sys
 import time
-import re as _re
 from collections import deque
+
 # pyrefly: ignore [missing-import]
 import flet as ft
 
 import config
+from theme.tokens import MOTION as _t_MOTION
 from theme.tokens import PALETTE as _P
 from theme.tokens import RADIUS as _t_RADIUS
-from theme.tokens import MOTION as _t_MOTION
 
 HELUCRYPTIC_SERVER_URL      = config.DEFAULT_SIGNALING_URL
 HELUCRYPTIC_SERVER_PASSWORD = config.SERVER_PASSWORD

@@ -43,7 +43,7 @@ def test_ephemeral_session_key_agreement(tmp_path, monkeypatch):
 def test_ephemeral_changes_key_each_session(tmp_path, monkeypatch):
     monkeypatch.setattr(crypto, "DATA_DIR", tmp_path)
     a = crypto.generate_and_save_keys()
-    b_eph_priv, b_eph_pub = crypto.generate_ephemeral_x25519()
+    _b_eph_priv, b_eph_pub = crypto.generate_ephemeral_x25519()
     a_eph1_priv, _ = crypto.generate_ephemeral_x25519()
     a_eph2_priv, _ = crypto.generate_ephemeral_x25519()
     # Same statics + same peer ephemeral but a different local ephemeral → a

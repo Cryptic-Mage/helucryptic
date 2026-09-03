@@ -36,8 +36,8 @@ def test_session_key_derivation():
     keys_a = crypto.generate_and_save_keys()
 
     # Generate B keys
-    import cryptography.hazmat.primitives.asymmetric.x25519 as x25519
     import cryptography.hazmat.primitives.serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import x25519
     priv_b = x25519.X25519PrivateKey.generate()
     pub_b_bytes = priv_b.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw)
     priv_b_bytes = priv_b.private_bytes(ser.Encoding.Raw, ser.PrivateFormat.Raw, ser.NoEncryption())

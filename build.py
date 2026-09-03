@@ -130,7 +130,8 @@ def main(argv: list[str]) -> int:
     cmd.append("main.py")
 
     print("->", " ".join(cmd))
-    return subprocess.run(cmd, cwd=ROOT).returncode
+    result = subprocess.run(cmd, cwd=ROOT, check=False)  # noqa: PLW1510 - returncode checked by caller
+    return result.returncode
 
 
 if __name__ == "__main__":

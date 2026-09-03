@@ -1,5 +1,4 @@
 import asyncio
-import pytest
 
 import webrtc_engine as W
 
@@ -10,7 +9,7 @@ def test_rejects_bad_scheme():
 
 
 def test_rejects_empty():
-    ok, msg = asyncio.run(W.test_turn(""))
+    ok, _msg = asyncio.run(W.test_turn(""))
     assert ok is False
 
 
@@ -74,6 +73,10 @@ def test_turn_timeout(monkeypatch):
     
     # We can patch asyncio.wait_for to raise TimeoutError to run instantly
     async def mock_wait_for(coro, timeout):
+        try:
+            coro.close()
+        except Exception:
+            pass
         raise asyncio.TimeoutError()
         
     monkeypatch.setattr(asyncio, "wait_for", mock_wait_for)

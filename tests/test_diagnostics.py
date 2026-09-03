@@ -1,4 +1,5 @@
 import pytest
+
 import webrtc_engine as W
 
 
@@ -33,6 +34,19 @@ def test_ice_servers_stun_only_without_turn():
     servers = e._ice_servers()
     stun_urls = [s.urls for s in servers if any(u.startswith("stun:") for u in s.urls)]
     assert len(stun_urls) >= 1  # STUN servers are present
+
+
+def test_strict_nat_uses_turn_servers_without_unsupported_transport_policy():
+    e = _engine()
+    e._nat_profile = type("StrictNat", (), {"needs_relay": True})()
+
+    config = e._ice_config()
+
+    assert config.iceServers
+    assert all(
+        any(url.startswith(("turn:", "turns:")) for url in server.urls)
+        for server in config.iceServers
+    )
 
 
 def test_get_diagnostics_shape_and_redaction():
@@ -98,8 +112,9 @@ def test_get_diagnostics_peer_details():
 
 def test_diagnostics_ui_rendering(monkeypatch):
     pytest.importorskip("flet")
-    import client
     import flet as ft
+
+    import client
 
     class FakeClipboard:
         def set(self, text):
@@ -130,7 +145,10 @@ def test_diagnostics_ui_rendering(monkeypatch):
             self.dialog = dlg
 
         def _fire_and_forget(self, coro):
-            pass
+            try:
+                coro.close()
+            except Exception:
+                pass
 
         async def _set_clipboard(self, text):
             pass

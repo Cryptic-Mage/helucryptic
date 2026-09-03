@@ -1,4 +1,4 @@
-target-version = "py313"
+target-version = "py311"
 
 # Exclude generated / vendored / third-party directories
 exclude = [

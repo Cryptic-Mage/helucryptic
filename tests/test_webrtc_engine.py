@@ -28,7 +28,32 @@ def mock_keys():
 @pytest.fixture
 def engine(mock_keys):
     settings = MockSettings()
-    return webrtc_engine.WebRTCEngine("alice", settings, mock_keys)
+    eng = webrtc_engine.WebRTCEngine("alice", settings, mock_keys)
+    yield eng
+    # Sync teardown: try to cancel background tasks via the running loop if any
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Schedule shutdown as a task and let the autouse fixture await it
+            # (cannot await here in sync fixture). Instead, cancel directly.
+            for t in list(eng._bg_tasks):
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
+            if eng._hb_task is not None:
+                try:
+                    eng._hb_task.cancel()
+                except Exception:
+                    pass
+        else:
+            try:
+                asyncio.run(eng.shutdown())
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def test_engine_init(engine):
     assert engine.my_username == "alice"

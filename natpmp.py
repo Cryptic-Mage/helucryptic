@@ -88,7 +88,7 @@ def discover_gateway() -> str | None:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(1.0)
         try:
-            s.connect((".".join(["8", "8", "8", "8"]), 53))
+            s.connect(("8.8.8.8", 53))
             ip = s.getsockname()[0]
         finally:
             s.close()

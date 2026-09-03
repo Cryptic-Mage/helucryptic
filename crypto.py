@@ -1,6 +1,6 @@
 import base64
-import hmac
 import hashlib
+import hmac
 import json
 import logging
 import sys
@@ -8,17 +8,22 @@ from datetime import UTC, datetime
 
 # pyrefly: ignore [missing-import]
 import pyseto
+
 # pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives import hashes
+
 # pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 # pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
+
 # pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 # pyrefly: ignore [missing-import]
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
@@ -26,12 +31,13 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+
 # pyrefly: ignore [missing-import]
 from pyseto import Key
 
 import secure_store
-from paths import DATA_DIR, harden_dir, write_private_bytes
 from constants.crypto_constants import KEYS_FILE, REQUIRED_KEY_FIELDS
+from paths import DATA_DIR, harden_dir, write_private_bytes
 
 # Configure standard logger
 logger = logging.getLogger("helucryptic.crypto")
@@ -264,6 +270,8 @@ def derive_session_key_v2(
         dh_a = my_eph_priv.exchange(peer_x_pub)    # low_static × high_eph
         dh_b = my_x_priv.exchange(peer_eph_pub)    # low_eph × high_static
 
+    # salt=None is intentional: IKM is 96 bytes of DH output (3 x 32 uniform X25519 shares) already high entropy;
+    # info binds the domain. A random salt would need out-of-band sync and gives no extract benefit here.
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -274,6 +282,10 @@ def derive_session_key_v2(
 
 def derive_history_key(ed25519_priv_b64: str) -> bytes:
     raw = base64.b64decode(ed25519_priv_b64)
+    # salt=None is intentional: IKM is 32 uniform random bytes (ed25519 seed) already high entropy,
+    # and info=b"helucryptic-history-v1" provides domain separation. Adding a random salt would
+    # require persisting it alongside the derived key and offers no extract security gain here
+    # (RFC5869 salt is optional when IKM is uniform).
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -367,17 +379,23 @@ def verify_membership_cert(
     return success
 
 
-def paseto_encrypt(payload: dict, symmetric_key: bytes) -> str:
+def paseto_encrypt(payload: dict, symmetric_key: bytes, implicit_assertion: bytes = b"") -> str:
     logger.debug("Encrypting payload using PASETO v4 local")
     key = Key.new(version=4, purpose="local", key=symmetric_key)
-    token = pyseto.encode(key, payload=json.dumps(payload).encode())
+    kwargs = {}
+    if implicit_assertion:
+        kwargs["implicit_assertion"] = implicit_assertion
+    token = pyseto.encode(key, payload=json.dumps(payload).encode(), **kwargs)
     return token.decode() if isinstance(token, bytes) else token
 
 
-def paseto_decrypt(token_str: str, symmetric_key: bytes) -> dict:
+def paseto_decrypt(token_str: str, symmetric_key: bytes, implicit_assertion: bytes = b"") -> dict:
     logger.debug("Decrypting token using PASETO v4 local")
     key = Key.new(version=4, purpose="local", key=symmetric_key)
-    decoded = pyseto.decode(key, token_str.encode() if isinstance(token_str, str) else token_str)
+    kwargs = {}
+    if implicit_assertion:
+        kwargs["implicit_assertion"] = implicit_assertion
+    decoded = pyseto.decode(key, token_str.encode() if isinstance(token_str, str) else token_str, **kwargs)
     return json.loads(decoded.payload)
 
 

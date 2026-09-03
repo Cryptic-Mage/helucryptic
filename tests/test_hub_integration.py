@@ -207,7 +207,7 @@ async def test_hub_star_origin_keying():
     while not (hub_forwarded_ok and bbb_origin_ok):
         # Check hub forwarding bookkeeping
         fwd_entries = hub_eng._forwarded.get("aaa", [])
-        hub_forwarded_ok = any(dest == "bbb" for dest, _sub, _sub_id in fwd_entries)
+        hub_forwarded_ok = any(dest == "bbb" for dest, _sub, _sub_id, _src_track_id in fwd_entries)
 
         # Check bbb received the track_origin frame
         bbb_origin_ok = "aaa" in b_eng._origin_map.values()
@@ -220,9 +220,9 @@ async def test_hub_star_origin_keying():
     # Assertions
     # ------------------------------------------------------------------
     fwd_entries = hub_eng._forwarded.get("aaa", [])
-    assert any(dest == "bbb" for dest, _sub, _sid in fwd_entries), (
+    assert any(dest == "bbb" for dest, _sub, _sid, _stid in fwd_entries), (
         f"hub._forwarded['aaa'] has no entry for 'bbb'. "
-        f"Got: {[(d,sid) for d,_,sid in fwd_entries]}. "
+        f"Got: {[(d, sid) for d, _, sid, _ in fwd_entries]}. "
         f"hub pcs: {list(hub_eng.pcs.keys())}. "
         f"aaa voice_peers: {a_eng._voice_peers}"
     )

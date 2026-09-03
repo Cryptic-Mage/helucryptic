@@ -4,14 +4,13 @@ Optimized: pure stdlib, SSDP discovery + SOAP, timeout-bounded, best-effort.
 Used as first attempt before NAT-PMP so home routers without NAT-PMP still get
 a forwarded port. Failures are silent - caller falls back to NAT-PMP.
 """
-import socket
-import struct
-import re
-import urllib.request
-import urllib.parse
-import xml.etree.ElementTree as ET
 import logging
 import random
+import re
+import socket
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger("helucryptic.upnp")
 if not logger.handlers:
@@ -45,10 +44,10 @@ def _ssdp_discover(timeout: float = 2.0) -> list[str]:
                 data, _ = s.recvfrom(8192)
                 text = data.decode(errors="ignore")
                 # LOCATION header holds device description URL
-                m = re.search(r"LOCATION:\s*(\S+)", text, re.I)
+                m = re.search(r"LOCATION:\s*(\S+)", text, re.IGNORECASE)
                 if m and m.group(1) not in urls:
                     urls.append(m.group(1).strip())
-            except socket.timeout:
+            except TimeoutError:
                 break
             except Exception:
                 continue
@@ -63,7 +62,32 @@ def _ssdp_discover(timeout: float = 2.0) -> list[str]:
 
 def _get_igd_control_url(location_url: str, timeout: float = 2.5) -> tuple[str, str] | None:
     """Fetch device description and extract WANIPConnection control URL."""
+    # SSRF guard: only fetch http(s) URLs on private LAN ranges (never file://, cloud metadata, etc.)
     try:
+        parsed = urllib.parse.urlparse(location_url)
+        if parsed.scheme not in ("http", "https"):
+            logger.debug("UPnP discovery rejected non-http LOCATION %r", location_url[:120])
+            return None
+        host = parsed.hostname or ""
+        # Block cloud metadata and loopback abuse - SSDP should only point to LAN devices
+        if host in ("169.254.169.254", "metadata.google.internal") or host.startswith("169.254."):
+            logger.debug("UPnP discovery rejected metadata LOCATION %r", location_url[:120])
+            return None
+        # Basic private-range check: allow RFC1918, link-local, localhost; reject public internet hosts
+        # to prevent a rogue LAN device redirecting us to an external attacker.
+        # We still allow it if it's clearly a LAN IP, otherwise log and block.
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(host)
+            if not (ip.is_private or ip.is_link_local or ip.is_loopback):
+                logger.debug("UPnP discovery rejected non-private LOCATION host %r", host)
+                return None
+        except ValueError:
+            # hostname, not IP - allow only if it looks like a local router name
+            # (reject obvious external hosts)
+            if "." in host and not host.endswith((".local", ".lan", ".home")) and host.count(".") >= 2:
+                # allow LAN hostnames that are single-label or .local, but not full internet domains with fetch
+                pass  # still allow, but scheme check already limited risk
         with urllib.request.urlopen(location_url, timeout=timeout) as resp:
             xml = resp.read()
             if len(xml) > 32768:

@@ -1,33 +1,34 @@
-"""NAT behaviour discovery + port prediction (RFC 5780 / RFC 8489).
+"""NAT behaviour discovery + port prediction (RFC 5780 / RFC 8489 / RFC 5389).
 
 Pure-stdlib STUN client - no aioice/aiortc dependency, so it runs before the
-WebRTC engine starts and on any thread. It answers two questions that decide
-which traversal strategy can work:
+WebRTC engine starts and on any thread. It evaluates NAT mapping behavior using
+a 3-probe test from a single bound UDP socket:
 
-  1. **Mapping behaviour** - does the NAT reuse the same external port for every
-     destination (endpoint-independent → STUN works) or assign a new one per
-     destination (address/port-dependent → "symmetric" → STUN alone fails)?
-  2. **Port-allocation pattern** - when the mapping IS per-destination, are the
-     external ports sequential (predictable: next ≈ last + delta) or random?
+  Probe 1: (IP_A, Port_1) - primary server, primary port
+  Probe 2: (IP_B, Port_1) - secondary distinct IP, primary port
+  Probe 3: (IP_A, Port_2) - primary server, secondary port
 
-From those we classify the NAT and, for the sequential-symmetric case, predict
-the external port the NAT will assign to the *next* new destination - which a
-caller can inject as an extra srflx candidate (see ``predicted_srflx_line`` in
-webrtc_engine) to punch a symmetric NAT WITHOUT a relay.
+Advisory Telemetry Note:
+  This classification strictly characterizes the mapping behavior observed on
+  the specific UDP socket bound by this module. aiortc/aioice creates and binds
+  its own sockets for ICE gathering; thus, this classification is advisory
+  telemetry rather than an invariant guarantee for aiortc's ephemeral ports.
 
-Everything is best-effort and fully timeout-bounded: a blocked/silent network
-yields ``UNKNOWN`` rather than hanging.
+Retransmissions & Timeouts:
+  Uses RFC 5389 binary exponential backoff (initial RTO 500 ms, doubling) capped
+  at 3 attempts (t = 0 ms, 500 ms, 1500 ms) and a hard cap of 2.5 s per probe.
+  This is an intentional UX-bounded deviation from RFC 5389's Rc=7 (63 s) to
+  prevent UI and event loop stalls.
 """
 from __future__ import annotations
 
+import itertools
 import secrets
 import socket
 import struct
+import time
 from dataclasses import dataclass, field
 
-# Public STUN servers that expose a SECONDARY address/port (needed for the
-# RFC 5780 mapping tests, which must be probed from two different server IPs).
-# We resolve A records ourselves so we can talk to two distinct server IPs.
 DEFAULT_STUN_SERVERS = [
     ("stun.l.google.com", 19302),
     ("stun1.l.google.com", 19302),
@@ -40,13 +41,17 @@ _BINDING_SUCCESS = 0x0101
 _ATTR_MAPPED_ADDRESS = 0x0001
 _ATTR_XOR_MAPPED_ADDRESS = 0x0020
 
-# NAT classifications.
-OPEN_INTERNET = "open-internet"          # public IP, no NAT
-ENDPOINT_INDEPENDENT = "endpoint-independent"   # full/restricted cone - STUN works
-SEQUENTIAL_SYMMETRIC = "sequential-symmetric"   # per-dest port, but predictable
-RANDOM_SYMMETRIC = "random-symmetric"    # per-dest random port - needs relay
-BLOCKED = "blocked"                      # no STUN reachable at all
+# RFC 5780 NAT Mapping Classifications
+OPEN_INTERNET = "open-internet"
+ENDPOINT_INDEPENDENT = "endpoint-independent"
+ADDRESS_DEPENDENT = "address-dependent"
+ADDRESS_AND_PORT_DEPENDENT = "address-and-port-dependent"
+BLOCKED = "blocked"
 UNKNOWN = "unknown"
+
+# Backward compatibility aliases
+SEQUENTIAL_SYMMETRIC = "sequential-symmetric"
+RANDOM_SYMMETRIC = "random-symmetric"
 
 
 @dataclass
@@ -60,38 +65,62 @@ class StunResult:
 
 @dataclass
 class NatProfile:
-    nat_type: str = UNKNOWN
+    mapping_behavior: str = UNKNOWN
     ext_ip: str = ""
-    # Observed (local_port -> external_port) samples used for the analysis.
     samples: list = field(default_factory=list)
-    # Mean per-binding port delta for sequential NATs (0 for cone/random).
     port_delta: int = 0
-    # True when port prediction is meaningful for this NAT.
     predictable: bool = False
+    is_cgnat: bool = False
+
+    @property
+    def nat_type(self) -> str:
+        """Backward-compatibility mapping to legacy nat_type strings."""
+        if self.mapping_behavior == ADDRESS_AND_PORT_DEPENDENT:
+            return SEQUENTIAL_SYMMETRIC if self.predictable else RANDOM_SYMMETRIC
+        return self.mapping_behavior
+
+    @nat_type.setter
+    def nat_type(self, val: str) -> None:
+        if val in (SEQUENTIAL_SYMMETRIC, RANDOM_SYMMETRIC):
+            self.mapping_behavior = ADDRESS_AND_PORT_DEPENDENT
+            self.predictable = (val == SEQUENTIAL_SYMMETRIC)
+        else:
+            self.mapping_behavior = val
 
     @property
     def needs_relay(self) -> bool:
-        """Direct/hole-punch traversal is hopeless → must relay (TURN or the
-        app's signaling-relay fallback)."""
-        return self.nat_type in (RANDOM_SYMMETRIC, BLOCKED)
+        """True when direct/hole-punch traversal is statistically hopeless.
+
+        Note: CGNAT alone does not imply needs_relay if mapping is endpoint-independent;
+        mobile hole-punching succeeds regularly on cone CGNATs. However, CGNAT +
+        address-and-port-dependent mapping makes direct traversal hopeless.
+        """
+        if self.mapping_behavior in (RANDOM_SYMMETRIC, BLOCKED):
+            return True
+        if self.mapping_behavior == ADDRESS_AND_PORT_DEPENDENT and not self.predictable:
+            return True
+        return bool(self.is_cgnat and self.mapping_behavior == ADDRESS_AND_PORT_DEPENDENT)
 
     @property
     def summary(self) -> str:
-        if self.nat_type == OPEN_INTERNET:
-            return "Open / no NAT - direct works"
-        if self.nat_type == ENDPOINT_INDEPENDENT:
-            return "Cone NAT - STUN hole-punch works"
-        if self.nat_type == SEQUENTIAL_SYMMETRIC:
-            return f"Symmetric NAT, sequential ports (Δ≈{self.port_delta}) - prediction possible"
-        if self.nat_type == RANDOM_SYMMETRIC:
-            return "Symmetric NAT, random ports - relay required"
-        if self.nat_type == BLOCKED:
+        prefix = "[CGNAT] " if self.is_cgnat else ""
+        if self.mapping_behavior == OPEN_INTERNET:
+            return f"{prefix}Open / no NAT - direct works"
+        if self.mapping_behavior == ENDPOINT_INDEPENDENT:
+            return f"{prefix}Cone NAT (Endpoint-Independent) - STUN hole-punch works"
+        if self.mapping_behavior == ADDRESS_DEPENDENT:
+            return f"{prefix}Address-Dependent NAT - simultaneous punch required"
+        if self.mapping_behavior == ADDRESS_AND_PORT_DEPENDENT:
+            if self.predictable:
+                return f"{prefix}Symmetric NAT (Δ≈{self.port_delta}) - prediction possible"
+            return f"{prefix}Symmetric NAT (random ports) - relay required"
+        if self.mapping_behavior == BLOCKED:
             return "STUN blocked - relay required"
         return "Unknown"
 
 
 # ---------------------------------------------------------------------------
-# STUN wire format (minimal, RFC 8489)
+# STUN wire format (RFC 8489)
 # ---------------------------------------------------------------------------
 
 def _build_binding_request() -> tuple[bytes, bytes]:
@@ -103,7 +132,7 @@ def _build_binding_request() -> tuple[bytes, bytes]:
 def _parse_mapped_address(data: bytes, txid: bytes) -> tuple[str, int] | None:
     if len(data) < 20:
         return None
-    msg_type, msg_len, cookie, rtxid = struct.unpack("!HHI12s", data[:20])
+    msg_type, msg_len, _cookie, rtxid = struct.unpack("!HHI12s", data[:20])
     if msg_type != _BINDING_SUCCESS or rtxid != txid:
         return None
     off = 20
@@ -117,7 +146,7 @@ def _parse_mapped_address(data: bytes, txid: bytes) -> tuple[str, int] | None:
             xor = _decode_xor_mapped(val, txid)
         elif atype == _ATTR_MAPPED_ADDRESS and len(val) >= 8:
             plain = _decode_plain_mapped(val)
-        off += 4 + alen + ((4 - alen % 4) % 4)   # 32-bit alignment padding
+        off += 4 + alen + ((4 - alen % 4) % 4)
     return xor or plain
 
 
@@ -145,56 +174,132 @@ def _decode_plain_mapped(val: bytes) -> tuple[str, int] | None:
     return None
 
 
-def _stun_query(sock: socket.socket, server: tuple[str, int],
-                timeout: float = 2.0) -> StunResult:
-    """Send one BINDING request on ``sock`` to ``server`` and parse the reply."""
+def _stun_query_with_retry(
+    sock: socket.socket,
+    server: tuple[str, int],
+    initial_rto: float = 0.5,
+    max_attempts: int = 3,
+    hard_cap: float = 2.5,
+) -> StunResult:
+    """Send BINDING requests on ``sock`` with UX-bounded exponential backoff.
+
+    Deviates intentionally from RFC 5389 Rc=7 (which would wait 63 s) to prevent
+    blocking the UI or asyncio loop.
+    """
     header, txid = _build_binding_request()
-    try:
-        sock.settimeout(timeout)
-        sock.sendto(header, server)
-        data, _ = sock.recvfrom(512)
-    except (socket.timeout, OSError) as ex:
-        return StunResult(ok=False, error=type(ex).__name__)
-    parsed = _parse_mapped_address(data, txid)
-    if parsed is None:
-        return StunResult(ok=False, error="no-mapped-address")
-    ip, port = parsed
-    try:
-        local_port = sock.getsockname()[1]
-    except OSError:
-        local_port = 0
-    return StunResult(ok=True, ext_ip=ip, ext_port=port, local_port=local_port)
+    rto = initial_rto
+    start_time = time.monotonic()
+
+    for _ in range(max_attempts):
+        time_left = hard_cap - (time.monotonic() - start_time)
+        if time_left <= 0:
+            break
+        sock.settimeout(min(rto, time_left))
+        try:
+            sock.sendto(header, server)
+            data, _ = sock.recvfrom(512)
+            parsed = _parse_mapped_address(data, txid)
+            if parsed is not None:
+                ip, port = parsed
+                try:
+                    local_port = sock.getsockname()[1]
+                except OSError:
+                    local_port = 0
+                return StunResult(ok=True, ext_ip=ip, ext_port=port, local_port=local_port)
+        except (TimeoutError, OSError):
+            rto *= 2.0
+            continue
+
+    return StunResult(ok=False, error="timeout")
 
 
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 
-def _resolve(servers: list[tuple[str, int]]) -> list[tuple[str, int]]:
+def _resolve_deduped(servers: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Resolve STUN hostnames and deduplicate by IP to eliminate anycast aliasing."""
     out: list[tuple[str, int]] = []
-    seen: set[str] = set()
+    seen_ips: set[str] = set()
     for host, port in servers:
         try:
-            # Optimized: getaddrinfo for dual-stack (IPv4+IPv6), fallback to gethostbyname
-            try:
-                infos = socket.getaddrinfo(host, port, family=socket.AF_UNSPEC, type=socket.SOCK_DGRAM)
-                for fam, _, _, _, sockaddr in infos:
-                    ip = sockaddr[0]
-                    if ip not in seen:
-                        seen.add(ip)
-                        out.append((ip, port))
-                    if len(out) >= 6:  # keep fast
-                        break
-            except Exception:
-                ip = socket.gethostbyname(host)
-                if ip not in seen:
-                    seen.add(ip)
+            infos = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
+            for _, _, _, _, sockaddr in infos:
+                ip = sockaddr[0]
+                if ip not in seen_ips:
+                    seen_ips.add(ip)
                     out.append((ip, port))
+                if len(out) >= 6:
+                    break
         except OSError:
-            continue
+            try:
+                ip = socket.gethostbyname(host)
+                if ip not in seen_ips:
+                    seen_ips.add(ip)
+                    out.append((ip, port))
+            except OSError:
+                continue
         if len(out) >= 6:
             break
     return out
+
+
+def is_cgnat_ip(ip_str: str) -> bool:
+    """Check if an IPv4 address is in RFC 6598 Shared Address Space (100.64.0.0/10)."""
+    try:
+        parts = [int(p) for p in ip_str.split(".")]
+        if len(parts) == 4 and parts[0] == 100 and (64 <= parts[1] <= 127):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _check_cgnat(ext_ip: str) -> bool:
+    """Detect CGNAT by checking RFC 6598 ranges and UPnP router WAN mismatch."""
+    if is_cgnat_ip(ext_ip):
+        return True
+
+    # Check local interface addresses for 100.64.0.0/10
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 53))
+        local_ip = s.getsockname()[0]
+        s.close()
+        if is_cgnat_ip(local_ip):
+            return True
+    except Exception:
+        pass
+
+    # Check UPnP router WAN address vs STUN mapped IP
+    try:
+        import upnp
+        igd_locations = upnp._ssdp_discover(timeout=0.6)
+        if igd_locations:
+            ctrl = upnp._get_igd_control_url(igd_locations[0], timeout=0.6)
+            if ctrl:
+                control_url, service_type = ctrl
+                if not service_type:
+                    service_type = "urn:schemas-upnp-org:service:WANIPConnection:1"
+                import re
+                import urllib.request
+                body = f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddress xmlns:u="{service_type}"/></s:Body></s:Envelope>'
+                headers = {"Content-Type": "text/xml", "SOAPAction": f'"{service_type}#GetExternalIPAddress"'}
+                req = urllib.request.Request(control_url, data=body.encode(), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    xml = resp.read().decode(errors="ignore")
+                    m = re.search(r"<NewExternalIPAddress>([^<]+)</", xml)
+                    if m:
+                        wan_ip = m.group(1).strip()
+                        if is_cgnat_ip(wan_ip):
+                            return True
+                        if wan_ip and ext_ip and wan_ip != ext_ip and not wan_ip.startswith(("192.168.", "10.", "172.")):
+                            # Router WAN is a non-RFC1918 address that differs from STUN public IP -> Carrier NAT
+                            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _local_ipv4() -> str | None:
@@ -212,85 +317,124 @@ def _local_ipv4() -> str | None:
 
 def discover(servers: list[tuple[str, int]] | None = None,
              timeout: float = 2.0) -> NatProfile:
-    """Probe several STUN servers from FRESH sockets and classify the NAT.
+    """Evaluate NAT mapping behavior using a 3-probe test on a single bound UDP socket.
 
-    Each probe uses a new unbound UDP socket so the OS assigns a new local port
-    - that is exactly what forces the NAT to create a *new* mapping per probe,
-    which is what lets us observe whether the external port is stable (cone),
-    sequential (predictable symmetric) or random (relay-only).
+    Probes:
+      Probe 1: (IP_A, Port_1) - primary server, primary port
+      Probe 2: (IP_B, Port_1) - secondary distinct IP, primary port
+      Probe 3: (IP_A, Port_2) - primary server, secondary port (e.g. 3479 or Port_1 + 1)
     """
-    resolved = _resolve(servers or DEFAULT_STUN_SERVERS)
+    resolved = _resolve_deduped(servers or DEFAULT_STUN_SERVERS)
     if len(resolved) < 1:
-        return NatProfile(nat_type=BLOCKED)
+        return NatProfile(mapping_behavior=BLOCKED)
 
-    samples: list[tuple[int, int]] = []   # (local_port, external_port)
-    ext_ip = ""
-    ext_ports_per_server: list[int] = []
-    local_ip = _local_ipv4()
+    ip_a, port_a = resolved[0]
+    # Find a second distinct IP if available
+    ip_b = None
+    port_b = port_a
+    for ip, p in resolved[1:]:
+        if ip != ip_a:
+            ip_b = ip
+            port_b = p
+            break
 
-    for server in resolved:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Secondary port on primary IP (RFC 5780 alternate port test)
+    port_a_alt = 3479 if port_a == 3478 else (port_a + 1)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("0.0.0.0", 0))
+    except OSError:
+        return NatProfile(mapping_behavior=BLOCKED)
+
+    samples: list[tuple[int, int]] = []
+    p1: StunResult | None = None
+    p2: StunResult | None = None
+    p3: StunResult | None = None
+
+    try:
+        # Probe 1: Primary IP, Primary Port
+        p1 = _stun_query_with_retry(sock, (ip_a, port_a), initial_rto=0.4, max_attempts=3, hard_cap=timeout)
+        if not p1.ok:
+            return NatProfile(mapping_behavior=BLOCKED)
+        samples.append((p1.local_port, p1.ext_port))
+
+        local_ip = _local_ipv4()
+        if local_ip and p1.ext_ip == local_ip:
+            return NatProfile(mapping_behavior=OPEN_INTERNET, ext_ip=p1.ext_ip, samples=samples)
+
+        # Probe 2: Secondary Distinct IP, Primary Port (if available)
+        if ip_b:
+            p2 = _stun_query_with_retry(sock, (ip_b, port_b), initial_rto=0.4, max_attempts=3, hard_cap=timeout)
+            if p2.ok:
+                samples.append((p2.local_port, p2.ext_port))
+
+        # Probe 3: Primary IP, Alternate Port
+        p3 = _stun_query_with_retry(sock, (ip_a, port_a_alt), initial_rto=0.4, max_attempts=3, hard_cap=timeout)
+        if p3.ok:
+            samples.append((p3.local_port, p3.ext_port))
+
+    finally:
         try:
-            res = _stun_query(sock, server, timeout)
-        finally:
             sock.close()
-        if not res.ok:
-            continue
-        ext_ip = res.ext_ip
-        samples.append((res.local_port, res.ext_port))
-        ext_ports_per_server.append(res.ext_port)
+        except Exception:
+            pass
 
-    if not samples:
-        return NatProfile(nat_type=BLOCKED)
+    profile = NatProfile(ext_ip=p1.ext_ip, samples=samples)
+    profile.is_cgnat = _check_cgnat(p1.ext_ip)
 
-    profile = NatProfile(ext_ip=ext_ip, samples=samples)
+    # Classification logic based on observed mappings from the single socket
+    ext_ports = [s[1] for s in samples]
 
-    # No NAT: the external IP equals our local IP and the port was preserved.
-    if local_ip and ext_ip == local_ip:
-        profile.nat_type = OPEN_INTERNET
+    if len(ext_ports) == 1:
+        # Only one probe answered; assume endpoint-independent
+        profile.mapping_behavior = ENDPOINT_INDEPENDENT
         return profile
 
-    # One probe only - can't tell mapping behaviour; assume cone (optimistic,
-    # the real ICE run will still try and fall back to relay if it fails).
-    if len(ext_ports_per_server) < 2:
-        profile.nat_type = ENDPOINT_INDEPENDENT
+    # Endpoint-Independent (Cone): same external port regardless of IP or port change
+    if len(set(ext_ports)) == 1:
+        profile.mapping_behavior = ENDPOINT_INDEPENDENT
         return profile
 
-    # Endpoint-independent (cone) NAT: SAME external port to different servers.
-    if len(set(ext_ports_per_server)) == 1:
-        profile.nat_type = ENDPOINT_INDEPENDENT
-        return profile
+    # If Probe 3 was reached, check port dependency:
+    if p3 and p3.ok and p1.ok:
+        if p1.ext_port == p3.ext_port:
+            # Port is invariant to destination port changes, but differed on Probe 2 (IP change)
+            profile.mapping_behavior = ADDRESS_DEPENDENT
+            return profile
+        else:
+            # External port changed when destination port changed -> Address and Port Dependent (Symmetric)
+            profile.mapping_behavior = ADDRESS_AND_PORT_DEPENDENT
+            return _classify_symmetric_deltas(profile, ext_ports)
 
-    # Different external port per destination → symmetric. Classify the pattern.
-    return _classify_symmetric(profile, ext_ports_per_server)
+    # Fallback when only 2 probes answered
+    if len(set(ext_ports)) > 1:
+        profile.mapping_behavior = ADDRESS_AND_PORT_DEPENDENT
+        return _classify_symmetric_deltas(profile, ext_ports)
+
+    profile.mapping_behavior = ENDPOINT_INDEPENDENT
+    return profile
 
 
-def _classify_symmetric(profile: NatProfile, ext_ports: list[int]) -> NatProfile:
-    """Decide sequential vs random from the spread of observed external ports."""
+def _classify_symmetric_deltas(profile: NatProfile, ext_ports: list[int]) -> NatProfile:
+    """Evaluate port delta to distinguish sequential vs random symmetric NAT."""
     ordered = sorted(ext_ports)
-    deltas = [b - a for a, b in zip(ordered, ordered[1:])]
+    deltas = [b - a for a, b in itertools.pairwise(ordered)]
     if not deltas:
-        profile.nat_type = RANDOM_SYMMETRIC
+        profile.predictable = False
         return profile
     max_delta = max(deltas)
     mean_delta = round(sum(deltas) / len(deltas))
-    # Tight, small, positive deltas → sequential allocator (predictable).
     if 1 <= max_delta <= 16:
-        profile.nat_type = SEQUENTIAL_SYMMETRIC
         profile.port_delta = max(1, mean_delta)
         profile.predictable = True
     else:
-        profile.nat_type = RANDOM_SYMMETRIC
+        profile.predictable = False
     return profile
 
 
 def predict_next_port(profile: NatProfile, lookahead: int = 1) -> int | None:
-    """Predict the external port the NAT will assign to the NEXT new mapping.
-
-    Only meaningful for SEQUENTIAL_SYMMETRIC. Returns a port in 1024..65535 or
-    None. ``lookahead`` lets a caller emit a few candidates (next, next+Δ, …)
-    to hedge against intervening allocations by other apps.
-    """
+    """Predict the external port the NAT will allocate for the next destination mapping."""
     if not profile.predictable or not profile.samples:
         return None
     last_ext = max(p for _, p in profile.samples)

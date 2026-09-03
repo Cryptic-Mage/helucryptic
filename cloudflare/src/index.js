@@ -30,6 +30,10 @@ const MSG_WINDOW_MS = 10_000;  // 10 s
 const MSG_MAX = 100;     // max signaling messages per user per window
 const CONN_WINDOW_MS = 60_000; // 60 s
 const CONN_MAX = 20;     // max new connections per IP per window
+const BYTE_WINDOW_MS = 10_000; // 10 s
+const BYTE_MAX = 655360; // 640 KiB per 10 s (~64 KiB/s sustained, 256 KiB burst)
+const RELAY_FRAME_MAX_BYTES = 24576; // 24 KiB wire cap for relay frames
+const SERVER_CAPABILITIES = ["relay_e2ee_v1", "signaling_hello_v1"];
 
 export class SignalHub {
   constructor(state, env) {
@@ -38,6 +42,7 @@ export class SignalHub {
     this._sessionTokens = new Map(); // username → session token (prevents impersonation)
     this._msgTimes = new Map(); // username → number[] (message timestamps, ms)
     this._connTimes = new Map(); // ip → number[] (connection timestamps, ms)
+    this._byteTimes = new Map(); // username → [timestamp, byteCount][]
   }
 
   // ---- helpers -----------------------------------------------------------
@@ -68,8 +73,21 @@ export class SignalHub {
     return true;
   }
 
+  _byteRateOk(username, byteCount) {
+    const now = Date.now();
+    let times = this._byteTimes.get(username);
+    if (!times) { times = []; this._byteTimes.set(username, times); }
+    const cutoff = now - BYTE_WINDOW_MS;
+    while (times.length && times[0][0] < cutoff) times.shift();
+    const currentTotal = times.reduce((acc, t) => acc + t[1], 0);
+    if (currentTotal + byteCount > BYTE_MAX) return false;
+    times.push([now, byteCount]);
+    return true;
+  }
+
   _msgRateCleanup(username) {
     this._msgTimes.delete(username);
+    this._byteTimes.delete(username);
   }
 
   _attach(ws) {
@@ -269,7 +287,12 @@ export class SignalHub {
     const reflectedHost = request.headers.get("CF-Connecting-IP") || null;
     server.send(JSON.stringify({
       type: "session_token",
-      data: { token: newToken, reflected_host: reflectedHost, reflected_port: null },
+      data: {
+        token: newToken,
+        reflected_host: reflectedHost,
+        reflected_port: null,
+        capabilities: SERVER_CAPABILITIES,
+      },
     }));
 
     this._notifyRoomJoin(room, username, server);
@@ -324,6 +347,30 @@ export class SignalHub {
           ws.send(JSON.stringify({ sender: "system", type: "error", data: `User '${target}' is not in your room.` }));
           return;
         }
+      }
+    }
+
+    // Relay-specific quota & size checks to prevent signaling server abuse (mirrors server.py)
+    // ``p2p_relay`` is retained for older clients, so it needs the same abuse
+    // controls as the current relay message type.
+    if (type === "relay_e2ee" || type === "p2p_relay") {
+      const rawData = String(payload.data || "");
+      const dataLen = new TextEncoder().encode(rawData).length;
+      if (dataLen > RELAY_FRAME_MAX_BYTES) {
+        ws.send(JSON.stringify({
+          sender: "system",
+          type: "error",
+          data: `Relay payload too large (${dataLen} bytes, max ${RELAY_FRAME_MAX_BYTES}).`,
+        }));
+        return;
+      }
+      if (me.username && !this._byteRateOk(me.username, dataLen)) {
+        ws.send(JSON.stringify({
+          sender: "system",
+          type: "error",
+          data: "Relay bandwidth quota exceeded (slow down).",
+        }));
+        return;
       }
     }
 

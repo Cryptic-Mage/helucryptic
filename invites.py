@@ -22,7 +22,6 @@ import base64
 import hashlib
 import json
 import logging
-import re
 import sys
 
 # Configure standard logger

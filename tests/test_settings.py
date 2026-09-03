@@ -106,8 +106,9 @@ def test_load_partial_or_unknown_fields():
 
 def test_settings_ui_rendering(monkeypatch):
     pytest.importorskip("flet")
-    import client
     import flet as ft
+
+    import client
     from settings import Settings
 
     class FakeApp:

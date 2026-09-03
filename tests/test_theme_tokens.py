@@ -7,6 +7,7 @@ rather than literal colour values, so the palette can be tuned without the
 suite becoming a change-detector. They run without Flet installed because the
 token layer has zero framework dependencies.
 """
+import itertools
 import re
 
 import pytest
@@ -157,7 +158,7 @@ def test_radii_present_and_ascending():
         assert key in tokens.RADIUS
     non_pill = [tokens.RADIUS[k] for k in ("xs", "sm", "md", "lg")]
     assert non_pill == sorted(non_pill)
-    assert all(b > a for a, b in zip(non_pill, non_pill[1:]))
+    assert all(b > a for a, b in itertools.pairwise(non_pill))
     assert tokens.RADIUS["pill"] >= 999
     # Console aesthetic: corners stay tight.
     assert tokens.RADIUS["lg"] <= 14

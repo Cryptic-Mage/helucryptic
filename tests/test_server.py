@@ -20,15 +20,12 @@ def patch_password(pw):
 @pytest.fixture(autouse=True)
 def clear_server_state():
     # Reset in-memory signaling state before each test
-    server.active_connections.clear()
-    server.rooms.clear()
-    server.room_of.clear()
+    server.reset_server_state()
 
 def test_signaling_websocket_connect():
     client = TestClient(server.app)
-    with patch_password(""):
-        with client.websocket_connect("/ws/alice") as ws:
-            assert "alice" in server.active_connections
+    with patch_password(""), client.websocket_connect("/ws/alice"):
+        assert "alice" in server.active_connections
 
 import asyncio
 import socket
@@ -101,41 +98,55 @@ async def test_password_auth():
 
 def test_duplicate_username_replaces_old():
     client = TestClient(server.app)
-    with patch_password(""):
-        with client.websocket_connect("/ws/alice") as ws1:
-            # Drain session_token so we can read the next message
-            token_msg = ws1.receive_json()
-            assert token_msg["type"] == "session_token"
-            session_token = token_msg["data"]["token"]
+    with patch_password(""), client.websocket_connect("/ws/alice") as ws1:
+        # Drain session_token so we can read the next message
+        token_msg = ws1.receive_json()
+        assert token_msg["type"] == "session_token"
+        token_msg["data"]["token"]
 
-            # Second connection without the session token should be rejected;
-            # ws1 stays alive.
-            with client.websocket_connect("/ws/alice") as ws2:
-                rejection = ws2.receive_json()
-                assert rejection["type"] == "error"
-                assert "already in use" in rejection["data"]
+        # Second connection without the session token should be rejected;
+        # ws1 stays alive.
+        with client.websocket_connect("/ws/alice") as ws2:
+            rejection = ws2.receive_json()
+            assert rejection["type"] == "error"
+            assert "already in use" in rejection["data"]
 
 def test_p2p_message_routing():
     client = TestClient(server.app)
-    with patch_password(""):
-        with client.websocket_connect("/ws/alice") as ws_alice:
-            ws_alice.receive_json()  # drain session_token
-            with client.websocket_connect("/ws/bob") as ws_bob:
-                ws_bob.receive_json()  # drain session_token
+    with patch_password(""), client.websocket_connect("/ws/alice") as ws_alice:
+        ws_alice.receive_json()  # drain session_token
+        with client.websocket_connect("/ws/bob") as ws_bob:
+            ws_bob.receive_json()  # drain session_token
 
-                # Alice sends a message to Bob
-                payload = {
-                    "target": "bob",
-                    "type": "offer",
-                    "data": {"sdp": "dummy sdp"}
-                }
-                ws_alice.send_json(payload)
+            # Alice sends a message to Bob
+            payload = {
+                "target": "bob",
+                "type": "offer",
+                "data": {"sdp": "dummy sdp"}
+            }
+            ws_alice.send_json(payload)
 
-                # Bob should receive the message
-                received = ws_bob.receive_json()
-                assert received["sender"] == "alice"
-                assert received["type"] == "offer"
-                assert received["data"]["sdp"] == "dummy sdp"
+            # Bob should receive the message
+            received = ws_bob.receive_json()
+            assert received["sender"] == "alice"
+            assert received["type"] == "offer"
+            assert received["data"]["sdp"] == "dummy sdp"
+
+
+def test_legacy_relay_cannot_bypass_frame_limit():
+    client = TestClient(server.app)
+    with patch_password(""), client.websocket_connect("/ws/alice") as ws_alice:
+        ws_alice.receive_json()
+        with client.websocket_connect("/ws/bob") as ws_bob:
+            ws_bob.receive_json()
+            ws_alice.send_json({
+                "target": "bob",
+                "type": "p2p_relay",
+                "data": "x" * (server._RELAY_FRAME_MAX_BYTES + 1),
+            })
+            error = ws_alice.receive_json()
+            assert error["type"] == "error"
+            assert "too large" in error["data"]
 
 def test_room_join_and_state_broadcasts():
     client = TestClient(server.app)
@@ -165,22 +176,21 @@ def test_room_capacity_limit():
     usernames = ["user1", "user2", "user3", "user4"]
     websockets_list = []
 
-    with patch_password(""):
-        with ExitStack() as stack:
-            # Connect 4 users to same room
-            for name in usernames:
-                ws = stack.enter_context(client.websocket_connect(f"/ws/{name}?room=ROOM1"))
-                ws.receive_json()  # drain session_token
-                ws.receive_json()  # drain room_state (or peer_joined for earlier users)
-                websockets_list.append(ws)
+    with patch_password(""), ExitStack() as stack:
+        # Connect 4 users to same room
+        for name in usernames:
+            ws = stack.enter_context(client.websocket_connect(f"/ws/{name}?room=ROOM1"))
+            ws.receive_json()  # drain session_token
+            ws.receive_json()  # drain room_state (or peer_joined for earlier users)
+            websockets_list.append(ws)
 
-            # Try to connect 5th user
-            with client.websocket_connect("/ws/user5?room=ROOM1") as ws_fifth:
-                ws_fifth.receive_json()  # drain session_token
-                # Should receive full room error
-                data = ws_fifth.receive_json()
-                assert data["type"] == "error"
-                assert "Room is full" in data["data"]
+        # Try to connect 5th user
+        with client.websocket_connect("/ws/user5?room=ROOM1") as ws_fifth:
+            ws_fifth.receive_json()  # drain session_token
+            # Should receive full room error
+            data = ws_fifth.receive_json()
+            assert data["type"] == "error"
+            assert "Room is full" in data["data"]
 
 def test_peer_left_broadcast():
     client = TestClient(server.app)

@@ -73,6 +73,8 @@ def write_private_bytes(path: Path, data: bytes) -> None:
     additionally tighten the parent directory ACL to the current user (see
     :func:`harden_dir`) the first time the data dir is created.
     """
+    import time as _time
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
@@ -86,7 +88,24 @@ def write_private_bytes(path: Path, data: bytes) -> None:
             os.chmod(tmp, 0o600)
         except OSError:
             pass
-        os.replace(tmp, path)
+        # Windows: AV/indexer can briefly lock the file – retry once.
+        last_err = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                last_err = None
+                break
+            except PermissionError as ex:
+                last_err = ex
+                if attempt < 4:
+                    _time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+            except OSError as ex:
+                last_err = ex
+                raise
+        if last_err is not None:
+            raise last_err
         try:
             os.chmod(path, 0o600)
         except OSError:
