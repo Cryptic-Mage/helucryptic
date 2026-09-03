@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from collections import deque
 from pathlib import Path
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -455,25 +454,66 @@ def test_microphone_track_stop_stops_reducer(mock_sd):
     MockReducer.return_value.stop.assert_called_once()
 
 
-def test_noise_reducer_denoises_frame_and_preserves_layout():
+def _drained_reducer(fake_nr, sink=None, loop=None, stationary=True):
+    """A stopped _NoiseReducer with an empty queue, ready for hand-driven _emit."""
     from webrtc_engine import _NoiseReducer
 
+    r = _NoiseReducer(48000, stationary, sink or MagicMock(), loop or MagicMock(), fake_nr)
+    r.stop()
+    while not r._q.empty():
+        r._q.get_nowait()
+    fake_nr.reduce_noise.reset_mock()
+    return r
+
+
+def _boot_frame_count():
+    return round(2 * webrtc_engine._NR_PROFILE_SECONDS * 48000 / 960)
+
+
+def test_noise_reducer_passes_through_until_profile_is_built():
     fake_nr = MagicMock()
     fake_nr.reduce_noise.side_effect = lambda y, **kw: y
     sink = MagicMock()
     loop = MagicMock()
+    loop.call_soon_threadsafe.side_effect = lambda fn, arg: sink(arg)
 
-    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
+    r = _drained_reducer(fake_nr, sink, loop)
+    rng = np.random.default_rng(0)
+
+    for _ in range(_boot_frame_count() - 1):
+        r._emit(rng.normal(0, 80, (960, 1)).astype(np.int16))
+    fake_nr.reduce_noise.assert_not_called()
+
+    # The frame that completes the profile, plus the next one, get denoised.
+    r._emit(rng.normal(0, 80, (960, 1)).astype(np.int16))
+    r._emit(rng.normal(0, 80, (960, 1)).astype(np.int16))
+    assert fake_nr.reduce_noise.called
+    _, kwargs = fake_nr.reduce_noise.call_args
+    assert kwargs["y_noise"] is not None
+    assert len(kwargs["y_noise"]) >= 0.25 * 48000
+
+
+def test_noise_reducer_denoise_applies_profile_and_makeup_gain():
+    from webrtc_engine import _NoiseReducer
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y   # identity
+    r = _NoiseReducer(48000, True, MagicMock(), MagicMock(), fake_nr)
+    profile = np.zeros(24000, dtype=np.float32)
+    frame = np.full((960, 1), 1000, dtype=np.int16)
     try:
-        out = r._denoise(_fake_frame())
+        out = r._denoise(frame, profile)
     finally:
         r.stop()
 
     _, kwargs = fake_nr.reduce_noise.call_args
     assert kwargs["sr"] == 48000
     assert kwargs["stationary"] is True
+    assert kwargs["y_noise"] is profile
     assert out.dtype == np.int16
     assert out.shape == (960, 1)
+    expected = np.clip(1000 * webrtc_engine._NR_MAKEUP_GAIN, -32768, 32767)
+    assert np.allclose(out, expected)
 
 
 def test_noise_reducer_respects_non_stationary_setting():
@@ -483,7 +523,7 @@ def test_noise_reducer_respects_non_stationary_setting():
     fake_nr.reduce_noise.side_effect = lambda y, **kw: y
     r = _NoiseReducer(48000, False, MagicMock(), MagicMock(), fake_nr)
     try:
-        r._denoise(_fake_frame())
+        r._denoise(_fake_frame(), np.zeros(24000, dtype=np.float32))
     finally:
         r.stop()
 
@@ -497,9 +537,9 @@ def test_noise_reducer_denoise_falls_back_to_raw_on_error():
     fake_nr = MagicMock()
     fake_nr.reduce_noise.side_effect = RuntimeError("boom")
     r = _NoiseReducer(48000, True, MagicMock(), MagicMock(), fake_nr)
-    frame = _fake_frame()
+    frame = np.full((960, 1), 123, dtype=np.int16)
     try:
-        out = r._denoise(frame)
+        out = r._denoise(frame, np.zeros(24000, dtype=np.float32))
     finally:
         r.stop()
 
@@ -507,20 +547,12 @@ def test_noise_reducer_denoise_falls_back_to_raw_on_error():
 
 
 def test_noise_reducer_skips_denoise_under_backlog():
-    from webrtc_engine import _NoiseReducer
-
     fake_nr = MagicMock()
     fake_nr.reduce_noise.side_effect = lambda y, **kw: y
-    sink = MagicMock()
     loop = MagicMock()
 
-    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
-    r.stop()  # kill the worker thread so we can drive _emit deterministically
-
-    # Drain any shutdown sentinel, then simulate a backlog.
-    while not r._q.empty():
-        r._q.get_nowait()
-    fake_nr.reduce_noise.reset_mock()
+    r = _drained_reducer(fake_nr, loop=loop)
+    r._noise_profile = np.zeros(24000, dtype=np.float32)   # pretend profile is ready
     for _ in range(webrtc_engine._NR_OVERLOAD_FRAMES + 3):
         r._q.put_nowait(_fake_frame())
 
@@ -530,24 +562,38 @@ def test_noise_reducer_skips_denoise_under_backlog():
     loop.call_soon_threadsafe.assert_called_once()
 
 
-def test_noise_reducer_emits_denoised_frame_when_not_backlogged():
-    from webrtc_engine import _NoiseReducer
-
+def test_noise_reducer_emits_denoised_frame_when_ready():
     fake_nr = MagicMock()
     fake_nr.reduce_noise.side_effect = lambda y, **kw: y
     sink = MagicMock()
     loop = MagicMock()
 
-    r = _NoiseReducer(48000, True, sink, loop, fake_nr)
-    r.stop()
-    while not r._q.empty():
-        r._q.get_nowait()
-    fake_nr.reduce_noise.reset_mock()
+    r = _drained_reducer(fake_nr, sink, loop)
+    r._noise_profile = np.zeros(24000, dtype=np.float32)
 
-    r._emit(_fake_frame())
+    r._emit(np.full((960, 1), 500, dtype=np.int16))
 
     fake_nr.reduce_noise.assert_called_once()
     loop.call_soon_threadsafe.assert_called_once_with(sink, ANY)
+
+
+def test_noise_reducer_profile_adapts_to_quiet_frames_only():
+    from collections import deque
+
+    fake_nr = MagicMock()
+    fake_nr.reduce_noise.side_effect = lambda y, **kw: y
+    r = _drained_reducer(fake_nr)
+
+    base = np.full(960, 100.0, dtype=np.float32)
+    r._profile_frames = deque([base.copy(), base.copy()], maxlen=2)
+    r._noise_profile = np.concatenate(list(r._profile_frames))
+
+    r._update_profile(np.full((960, 1), 5000, dtype=np.int16))   # loud -> rejected
+    assert np.array_equal(r._noise_profile, np.concatenate([base, base]))
+
+    r._update_profile(np.full((960, 1), 95, dtype=np.int16))     # quiet -> folded in
+    assert np.any(r._noise_profile == 95)
+    assert r._noise_profile.shape == (1920,)
 
 
 @patch("webrtc_engine.sd")

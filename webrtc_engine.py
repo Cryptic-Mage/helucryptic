@@ -516,6 +516,13 @@ class ScreenShareTrack(VideoStreamTrack):
 # and passes it through raw. 4 frames ~= 80 ms of backlog - past that, keeping
 # audio flowing matters more than cleaning it.
 _NR_OVERLOAD_FRAMES = 4
+# Seconds of low-energy mic audio gathered as the noise profile reduce_noise()
+# needs to tell speech from background. Until it's collected (call start, or
+# while the mic is quiet) frames pass through un-denoised.
+_NR_PROFILE_SECONDS = 0.5
+# reduce_noise() attenuates the whole frame, not just the noise, by roughly this
+# factor; the denoised frame is scaled back up so voice level is preserved.
+_NR_MAKEUP_GAIN = 2.5
 
 
 def _load_noisereduce():
@@ -524,13 +531,19 @@ def _load_noisereduce():
     return noisereduce
 
 
+def _frame_rms(samples) -> float:
+    return float(np.sqrt(np.mean(samples.astype(np.float64) ** 2))) if samples.size else 0.0
+
+
 class _NoiseReducer:
     """Off-thread spectral noise reduction for 20 ms int16 mono mic frames.
 
-    The realtime audio callback hands raw frames to `submit()`; a dedicated
-    worker thread denoises each one (or passes it through under backlog) and
-    hands the result back to the event loop via `sink`. reduce_noise() costs
-    ~13 ms/frame, so it must never run on the asyncio loop or the audio thread.
+    The realtime audio callback hands raw frames to `submit()`; a worker thread
+    builds a noise profile from the quietest early frames, then denoises each
+    subsequent frame against it and hands the result back to the event loop via
+    `sink`. reduce_noise() costs ~13 ms/frame, so it must never run on the
+    asyncio loop or the audio thread. Before the profile is ready, or under
+    backlog, frames pass through untouched so audio never stalls.
     """
 
     def __init__(self, sample_rate: int, stationary: bool, sink, loop, nr_module):
@@ -541,6 +554,13 @@ class _NoiseReducer:
         self._nr = nr_module
         self._q: _queue.Queue = _queue.Queue(maxsize=32)
         self._running = True
+        # Noise-profile state. _boot_frames accumulates raw frames until there
+        # are enough to pick a profile from; after that _noise_profile holds the
+        # concatenated quiet frames and _profile_frames lets it roll forward.
+        self._boot_frames: list = []
+        self._boot_target = int(2 * _NR_PROFILE_SECONDS * sample_rate)
+        self._profile_frames: deque = deque()
+        self._noise_profile = None
         self._thread = threading.Thread(target=self._run, name="mic-denoise", daemon=True)
         self._thread.start()
 
@@ -558,17 +578,45 @@ class _NoiseReducer:
             self._emit(data)
 
     def _emit(self, data) -> None:
-        # Under backlog, skip the expensive denoise and pass the frame through.
-        out = data if self._q.qsize() > _NR_OVERLOAD_FRAMES else self._denoise(data)
+        profile = self._update_profile(data)
+        if profile is None or self._q.qsize() > _NR_OVERLOAD_FRAMES:
+            out = data          # still bootstrapping, or backlogged: pass through
+        else:
+            out = self._denoise(data, profile)
         self._loop.call_soon_threadsafe(self._sink, out)
 
-    def _denoise(self, data):
+    def _update_profile(self, data):
+        """Return the current noise profile, or None while still collecting one."""
+        samples = data.astype(np.float32).reshape(-1)
+        if self._noise_profile is None:
+            self._boot_frames.append(samples)
+            if sum(len(f) for f in self._boot_frames) < self._boot_target:
+                return None
+            # Keep the quietest half of the collected frames - the ones least
+            # likely to contain speech - as the noise profile.
+            ordered = sorted(self._boot_frames, key=_frame_rms)
+            keep = ordered[: max(1, len(ordered) // 2)]
+            self._profile_frames = deque(keep, maxlen=len(keep))
+            self._noise_profile = np.concatenate(list(self._profile_frames))
+            self._boot_frames = []
+            return self._noise_profile
+        # Steady state: fold in frames quiet enough to be background, not speech,
+        # so the profile tracks a drifting noise floor.
+        if _frame_rms(samples) <= 1.3 * _frame_rms(self._noise_profile):
+            self._profile_frames.append(samples)
+            self._noise_profile = np.concatenate(list(self._profile_frames))
+        return self._noise_profile
+
+    def _denoise(self, data, profile):
         try:
             samples = data.astype(np.float32).reshape(-1)
             reduced = self._nr.reduce_noise(
-                y=samples, sr=self._sr, stationary=self._stationary, n_fft=512,
+                y=samples, sr=self._sr, stationary=self._stationary,
+                n_fft=512, y_noise=profile,
             )
-            return np.clip(reduced, -32768, 32767).astype(np.int16).reshape(-1, 1)
+            return np.clip(
+                reduced * _NR_MAKEUP_GAIN, -32768, 32767,
+            ).astype(np.int16).reshape(-1, 1)
         except Exception:
             return data
 

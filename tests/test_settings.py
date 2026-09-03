@@ -136,8 +136,51 @@ def test_settings_ui_rendering(monkeypatch):
 
     app = FakeApp()
     client.HelucrypticApp._show_settings(app, None)
-    
+
     assert isinstance(app._settings_dlg, ft.AlertDialog)
     assert app._settings_retention_dd.value == "30"
     assert app._settings_profile_dd.value == "balanced"
+
+
+def test_settings_noise_reduce_checkbox_renders_and_saves(monkeypatch):
+    pytest.importorskip("flet")
+    import client
+
+    monkeypatch.setattr(client, "save_settings", lambda s: None)
+
+    class FakeApp:
+        settings = Settings(noise_reduce=True)
+        def _settings_on_retention_change(self, ev): pass
+        def _settings_on_profile_change(self, ev): pass
+        def _settings_do_test_turn(self, ev): pass
+        def _settings_do_pf_autodetect(self, ev): pass
+        def _settings_do_pf_test(self, ev): pass
+        def _settings_export_keys(self, ev): pass
+        def _settings_import_keys(self, ev): pass
+        def _settings_regen_keys(self, ev): pass
+        def _settings_do_switch_profile(self, ev): pass
+        def _settings_do_create_profile(self, ev): pass
+        def _close_dialog(self, dlg): pass
+        def _show_dialog(self, dlg): pass
+        def _reveal(self, card, delay=0): pass
+        def _show_my_identity(self, ev): pass
+        def _show_backup(self, ev): pass
+        def _show_restore(self, ev): pass
+        def _show_wipe(self, ev): pass
+        def _log(self, msg): pass
+        def _update_perf_parameters(self): pass
+        def _apply_port_forward(self): pass
+        _settings_section = client.HelucrypticApp._settings_section
+        _settings_save = client.HelucrypticApp._settings_save
+
+    app = FakeApp()
+    client.HelucrypticApp._show_settings(app, None)
+
+    # Checkbox reflects the stored setting...
+    assert app._settings_noise_reduce_cb.value is True
+
+    # ...and Save writes the checkbox state back onto settings.
+    app._settings_noise_reduce_cb.value = False
+    client.HelucrypticApp._settings_save(app, None)
+    assert app.settings.noise_reduce is False
 

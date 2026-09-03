@@ -4339,6 +4339,7 @@ class HelucrypticApp:
         self.settings.turn_username = self._settings_turn_user_f.value.strip()
         self.settings.turn_password = self._settings_turn_pass_f.value
         self.settings.verified_only = self._settings_verified_only_cb.value
+        self.settings.noise_reduce = self._settings_noise_reduce_cb.value
         self.settings.port_forward_enabled = self._settings_pf_enabled_cb.value
         try:
             self.settings.forwarded_port = int(self._settings_pf_port_f.value or 0)
@@ -4406,6 +4407,10 @@ class HelucrypticApp:
             "60 FPS with software encoding.",
             size=11, color="#faa61a", visible=self.settings.performance_profile == "overclock",
         )
+        self._settings_noise_reduce_cb = ft.Checkbox(
+            label="Microphone noise reduction (cleans background noise)",
+            value=self.settings.noise_reduce,
+        )
 
         self._settings_turn_url_f  = _neon_field(label="TURN URL (turn:host:port)", value=self.settings.turn_url,
                                    width=280, dense=True)
@@ -4472,6 +4477,11 @@ class HelucrypticApp:
             ("Performance", ft.Icons.SPEED, C.CYAN,
              "Video/share quality profile", [
                 self._settings_profile_dd, self._settings_overclock_warn,
+                ft.Container(height=1, bgcolor=C.BORDER),
+                self._settings_noise_reduce_cb,
+                ft.Text("Denoising uses roughly one CPU core during calls - turn it "
+                        "off on slow machines. Applies to your next call.",
+                        size=11, color=C.MUTED),
             ]),
             ("TURN relay", ft.Icons.ROUTER, C.CYAN,
              "Fallback for strict NATs", [
