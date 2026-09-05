@@ -142,7 +142,7 @@ def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> int | None:
     publicly and to that same local port. Returns the UDP external port (the
     one we bind ICE to), or None if the gateway did not grant a mapping.
     """
-    logger.info("Requesting port mapping from gateway %s with lifetime %d", gateway, lifetime)
+    logger.debug("Requesting port mapping from gateway %s with lifetime %d", gateway, lifetime)
     
     def _one(opcode: int) -> int | None:
         proto = "UDP" if opcode == OP_MAP_UDP else "TCP"
@@ -155,7 +155,7 @@ def request_mapping_over_socket(gateway: str, lifetime: int = 60) -> int | None:
                 data, _ = s.recvfrom(32)
                 resp = decode_mapping_response(data)
                 if resp.result == 0:
-                    logger.info("Successfully mapped %s external port: %d", proto, resp.external_port)
+                    logger.debug("Successfully mapped %s external port: %d", proto, resp.external_port)
                     return resp.external_port
                 else:
                     logger.warning("Gateway rejected %s map request with result code: %d", proto, resp.result)
@@ -207,7 +207,7 @@ class PortForwardManager:
         self._fail_count: int = 0
 
     async def _detect_once(self) -> None:
-        logger.info("Executing NAT-PMP detection loop cycle")
+        logger.debug("Executing NAT-PMP detection loop cycle")
         ports = []
         for _ in range(self.pool_size):
             result = self._request_fn(self.gateway)
@@ -231,9 +231,16 @@ class PortForwardManager:
             self._clear_fn()
             return
         self._fail_count = 0
+        changed = ports != self.current_ports
         self.current_ports = ports
         self.current_port = ports[0]
-        logger.info("Successfully mapped port pool: %s (selected default: %s)", ports, ports[0])
+        if changed:
+            logger.info("Mapped external port %s via %s (pool: %s)",
+                        ports[0], self.gateway, ports)
+        else:
+            # Renewal of an unchanged mapping - every 45 s, forever. Logging it
+            # at INFO buries everything else in the console.
+            logger.debug("Renewed external port %s", ports[0])
         self._publish_fn(self.local_ip, ports)
 
     async def _loop(self) -> None:

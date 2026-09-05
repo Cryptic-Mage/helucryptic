@@ -672,8 +672,18 @@ def test_forward_wrapper_assigns_from_pool_then_falls_through():
 
     import webrtc_engine as we
     calls = []
+
+    class _Transport:
+        """Stands in for a real DatagramTransport.
+
+        It must expose a settable close(): that is how the wrapper learns the
+        socket is gone and returns the forwarded port to the pool.
+        """
+        def close(self):
+            pass
+
     async def fake_orig(factory, *a, local_addr=None, **k):
-        calls.append(local_addr); return ("t","p")
+        calls.append(local_addr); return (_Transport(), "p")
     we.set_forwarded_ports("10.2.0.5", [55000, 55001])
     try:
         wrapped = we._make_bind_wrapper(fake_orig)

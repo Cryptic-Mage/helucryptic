@@ -9,6 +9,7 @@ import queue as _queue
 import tempfile
 import threading
 import time as _time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid as _uuid
@@ -174,6 +175,16 @@ async def fetch_ice_servers(signaling_url: str, password: str = "",
     try:
         payload = await asyncio.to_thread(
             _fetch_ice_blocking, signaling_url, password, timeout)
+    except urllib.error.HTTPError as ex:
+        if ex.code == 404:
+            # The signaling server predates the /turn endpoint, or it has not
+            # been redeployed. Name the fix rather than the exception class.
+            print("[turn] signaling server has no /turn endpoint (404) - "
+                  "deploy the updated server, or set a TURN URL in Settings",
+                  flush=True)
+        else:
+            print(f"[turn] relay credential request rejected: HTTP {ex.code}", flush=True)
+        return ([], 0)
     except Exception as ex:
         print(f"[turn] could not fetch relay credentials: {type(ex).__name__}", flush=True)
         return ([], 0)
@@ -366,15 +377,30 @@ class PortPoolAllocator:
     """
     def __init__(self):
         self._lock = threading.Lock()
+        self._ports: list[int] = []           # every forwarded port, as configured
         self._free: list[int] = []
         self._allocated: dict[int, int] = {}  # id(pc) -> port
         self._active: bool = False
         self._vpn_ip: str | None = None
 
     def configure(self, vpn_ip: str, ports: list[int]) -> None:
+        """Publish the forwarded ports. Idempotent for an unchanged mapping.
+
+        NAT-PMP hands back the SAME external port for every request, so the
+        caller's pool arrives as e.g. [54097, 54097, 54097]. Binding one port
+        twice fails with EADDRINUSE, so duplicates are collapsed here.
+
+        The renewal loop re-publishes every 45 s. Re-running configure() then
+        would hand a live connection's port back out and orphan its bookkeeping,
+        so an unchanged mapping is deliberately a no-op.
+        """
+        deduped = list(dict.fromkeys(int(p) for p in ports if p))
         with self._lock:
+            if self._active and self._vpn_ip == vpn_ip and self._ports == deduped:
+                return
             self._vpn_ip = vpn_ip
-            self._free = list(ports)
+            self._ports = deduped
+            self._free = list(deduped)
             self._allocated.clear()
             self._active = bool(self._free)
 
@@ -382,6 +408,7 @@ class PortPoolAllocator:
         with self._lock:
             self._active = False
             self._vpn_ip = None
+            self._ports.clear()
             self._free.clear()
             self._allocated.clear()
 
@@ -403,6 +430,19 @@ class PortPoolAllocator:
             if port is not None and port not in self._free:
                 self._free.append(port)
 
+    def release_port(self, port: int) -> None:
+        """Return a port to the pool by value.
+
+        The bind wrapper cannot see which RTCPeerConnection a socket belongs to,
+        so it releases by port when the socket closes. Without this the pool
+        drains after a few ICE restarts and every later gather silently falls
+        back to an ephemeral port - which on a symmetric NAT means no reachable
+        candidate at all.
+        """
+        with self._lock:
+            if port in self._ports and port not in self._free:
+                self._free.append(port)
+
     @property
     def vpn_ip(self) -> str | None:
         return self._vpn_ip
@@ -413,12 +453,13 @@ class PortPoolAllocator:
 
     @property
     def current_port(self) -> int:
+        """The forwarded port to advertise, independent of allocation state.
+
+        This feeds the injected srflx candidate, which must keep naming the
+        forwarded port even while that port is checked out for a live gather.
+        """
         with self._lock:
-            if self._free:
-                return self._free[0]
-            if self._allocated:
-                return next(iter(self._allocated.values()))
-            return 0
+            return self._ports[0] if self._ports else 0
 
 
 _port_allocator = PortPoolAllocator()
@@ -447,13 +488,59 @@ def clear_forwarded_port() -> None:
     _forward_port = 0
 
 
+def _release_port_on_close(transport, port: int) -> None:
+    """Hand ``port`` back to the pool once ``transport`` closes.
+
+    aioice calls create_datagram_endpoint far below any peer-connection context,
+    so the wrapper has no pc to key on. The socket's own lifetime is the honest
+    signal: while it is open the port is genuinely taken, and once it closes the
+    port is free for the next ICE restart.
+    """
+    released = False
+
+    try:
+        orig_close = transport.close
+
+        def close(*a, **kw):
+            nonlocal released
+            if not released:
+                released = True
+                _port_allocator.release_port(port)
+            return orig_close(*a, **kw)
+
+        transport.close = close
+    except (AttributeError, TypeError):
+        # A transport that exposes no settable close() cannot tell us when it
+        # goes away. Release now: handing the port back early risks a losing
+        # bind that falls through to an ephemeral port, while holding it
+        # forever drains the pool and silently kills reachability.
+        _port_allocator.release_port(port)
+
+
 def _make_bind_wrapper(orig):
     async def wrapped(protocol_factory, *args, local_addr=None, **kwargs):
+        assigned = None
         if _port_allocator.is_active and local_addr == (_port_allocator.vpn_ip, 0):
             assigned = _port_allocator.allocate()
             if assigned is not None:
                 local_addr = (_port_allocator.vpn_ip, assigned)
-        return await orig(protocol_factory, *args, local_addr=local_addr, **kwargs)
+        try:
+            transport, protocol = await orig(
+                protocol_factory, *args, local_addr=local_addr, **kwargs)
+        except OSError:
+            if assigned is None:
+                raise
+            # The forwarded port is busy - a lingering socket from a previous
+            # gather, or another application. Falling back to an ephemeral port
+            # loses reachability but still gathers; failing the bind would take
+            # the whole connection down.
+            print(f"[forward] port {assigned} busy - falling back to ephemeral", flush=True)
+            _port_allocator.release_port(assigned)
+            return await orig(protocol_factory, *args,
+                              local_addr=(_port_allocator.vpn_ip, 0), **kwargs)
+        if assigned is not None:
+            _release_port_on_close(transport, assigned)
+        return transport, protocol
     return wrapped
 
 
@@ -1303,6 +1390,13 @@ class WebRTCEngine:
             "nat_summary":     getattr(nat, "summary", "") if nat else "",
             "predicted_srflx": (f"{self._predicted_ext_ip}:{self._predicted_ext_port}"
                                 if self._predicted_ext_port else ""),
+            # The forwarded port is a real hole in an otherwise symmetric NAT,
+            # so it is what actually gets a peer through - worth showing next to
+            # the (accurate, but ephemeral-port) NAT verdict that says "strict".
+            "forwarded_srflx": (f"{self._reflected_host}:{_port_allocator.current_port}"
+                                if _port_allocator.is_active
+                                and _port_allocator.current_port
+                                and self._reflected_host else ""),
             "peers":           peers,
         }
 

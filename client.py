@@ -4176,6 +4176,7 @@ class HelucrypticApp:
             f"NAT type   : {d.get('nat_type', '(not probed)')}"
             + (f"  ({d['nat_summary']})" if d.get('nat_summary') else ""),
             f"Predicted  : {d.get('predicted_srflx') or '(none)'}",
+            f"Forwarded  : {d.get('forwarded_srflx') or '(none)'}",
             f"Peers      : {d['num_peers']}",
             f"Last error : {d['last_error'] or '(none)'}",
             "",
