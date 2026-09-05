@@ -3375,7 +3375,9 @@ class HelucrypticApp:
         self._update_main_view()                  # leave home → show conversation
         self.page.update()
         try:
-            self.msg_input.focus()
+            res = self.msg_input.focus()
+            if asyncio.iscoroutine(res):
+                self._fire_and_forget(res)
         except Exception:
             pass
         # In 1-to-1 mode, selecting an online contact establishes the P2P link

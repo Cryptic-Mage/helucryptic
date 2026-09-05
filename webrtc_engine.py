@@ -447,6 +447,7 @@ class PortPoolAllocator:
         self._lock = threading.Lock()
         self._ports: list[int] = []           # every forwarded port, as configured
         self._free: list[int] = []
+        self._in_use: set[int] = set()        # ports a socket is currently bound to
         self._allocated: dict[int, int] = {}  # id(pc) -> port
         self._active: bool = False
         self._vpn_ip: str | None = None
@@ -469,6 +470,7 @@ class PortPoolAllocator:
             self._vpn_ip = vpn_ip
             self._ports = deduped
             self._free = list(deduped)
+            self._in_use.clear()
             self._allocated.clear()
             self._active = bool(self._free)
 
@@ -478,6 +480,7 @@ class PortPoolAllocator:
             self._vpn_ip = None
             self._ports.clear()
             self._free.clear()
+            self._in_use.clear()
             self._allocated.clear()
 
     def allocate(self, pc_id: int | None = None) -> int | None:
@@ -487,6 +490,7 @@ class PortPoolAllocator:
             if not self._active or not self._free:
                 return None
             port = self._free.pop(0)
+            self._in_use.add(port)
             if pc_id is not None:
                 self._allocated[pc_id] = port
             return port
@@ -497,6 +501,7 @@ class PortPoolAllocator:
             port = self._allocated.pop(pc_id, None)
             if port is not None and port not in self._free:
                 self._free.append(port)
+                self._in_use.discard(port)
 
     def release_port(self, port: int) -> None:
         """Return a port to the pool by value.
@@ -508,6 +513,7 @@ class PortPoolAllocator:
         candidate at all.
         """
         with self._lock:
+            self._in_use.discard(port)
             if port in self._ports and port not in self._free:
                 self._free.append(port)
 
@@ -528,6 +534,23 @@ class PortPoolAllocator:
         """
         with self._lock:
             return self._ports[0] if self._ports else 0
+
+    @property
+    def bound_port(self) -> int:
+        """The forwarded port a socket is actually listening on right now, else 0.
+
+        This is what may be advertised to a peer. ``current_port`` describes the
+        NAT mapping and stays put while the port is checked out, but a gather can
+        still miss it - the pool holds one port, so an ICE restart that overlaps
+        the previous socket falls back to an ephemeral bind. Advertising the
+        forwarded port then sends the peer's connectivity checks to a port
+        nothing is listening on, which looks exactly like a dead link.
+        """
+        with self._lock:
+            for port in self._ports:
+                if port in self._in_use:
+                    return port
+            return 0
 
 
 _port_allocator = PortPoolAllocator()
@@ -1430,11 +1453,18 @@ class WebRTCEngine:
         For sequential NAT one candidate; for random strict NAT inject 2-3 lookahead
         candidates as well. No-op when prediction unavailable. Optimized: string op only."""
         ext_ip = self._reflected_host or self._predicted_ext_ip or getattr(self._nat_profile, "ext_ip", "")
-        if _port_allocator.is_active and _port_allocator.current_port and ext_ip:
+        # Only advertise the forwarded port when a socket is genuinely bound to
+        # it - see PortPoolAllocator.bound_port. Announcing a port we lost to an
+        # ephemeral fallback points the peer's checks at nothing.
+        bound = _port_allocator.bound_port if _port_allocator.is_active else 0
+        if bound and ext_ip:
             try:
-                sdp = inject_predicted_srflx(sdp, ext_ip, _port_allocator.current_port)
+                sdp = inject_predicted_srflx(sdp, ext_ip, bound)
             except Exception:
                 pass
+        elif _port_allocator.is_active and _port_allocator.current_port and ext_ip:
+            print(f"[forward] not advertising {ext_ip}:{_port_allocator.current_port} - "
+                  f"this gather fell back to an ephemeral port", flush=True)
 
         if self._predicted_ext_ip and self._predicted_ext_port:
             try:
@@ -1497,9 +1527,9 @@ class WebRTCEngine:
             # The forwarded port is a real hole in an otherwise symmetric NAT,
             # so it is what actually gets a peer through - worth showing next to
             # the (accurate, but ephemeral-port) NAT verdict that says "strict".
-            "forwarded_srflx": (f"{self._reflected_host}:{_port_allocator.current_port}"
+            "forwarded_srflx": (f"{self._reflected_host}:{_port_allocator.bound_port}"
                                 if _port_allocator.is_active
-                                and _port_allocator.current_port
+                                and _port_allocator.bound_port
                                 and self._reflected_host else ""),
             "peers":           peers,
         }
