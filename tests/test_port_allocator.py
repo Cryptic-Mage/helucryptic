@@ -246,22 +246,78 @@ def test_bound_port_is_zero_after_an_ephemeral_fallback():
         we._port_allocator.clear()
 
 
-def test_sdp_omits_the_forwarded_port_when_not_bound():
+_HEAD = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+_ON_FORWARDED = _HEAD + "a=candidate:1 1 udp 2130706431 10.2.0.2 54097 typ host\r\n"
+_ON_EPHEMERAL = _HEAD + "a=candidate:1 1 udp 2130706431 10.2.0.2 61234 typ host\r\n"
+
+
+def test_sdp_forwarded_port_reads_this_connections_own_candidates():
+    """Whether a peer connection got the forwarded port is a per-connection
+    question, and its gathered host candidates are the honest record."""
     import webrtc_engine as we
 
     we._port_allocator.configure("10.2.0.2", [54097])
     try:
-        engine = we.WebRTCEngine.__new__(we.WebRTCEngine)
-        engine._reflected_host = "146.70.142.86"
-        engine._predicted_ext_ip = ""
-        engine._predicted_ext_port = 0
-        engine._nat_profile = None
-        sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
-
-        # Nothing bound -> no srflx line promising a port we are not on.
-        assert "146.70.142.86" not in engine._augment_local_sdp(sdp)
-
-        we._port_allocator.allocate()
-        assert "146.70.142.86 54097 typ srflx" in engine._augment_local_sdp(sdp)
+        assert we.sdp_forwarded_port(_ON_FORWARDED) == 54097
+        assert we.sdp_forwarded_port(_ON_EPHEMERAL) == 0
     finally:
         we._port_allocator.clear()
+
+
+def test_sdp_forwarded_port_is_zero_without_a_mapping():
+    import webrtc_engine as we
+
+    we._port_allocator.clear()
+    assert we.sdp_forwarded_port(_ON_FORWARDED) == 0
+
+
+def _engine_with_reflected_host():
+    import webrtc_engine as we
+
+    engine = we.WebRTCEngine.__new__(we.WebRTCEngine)
+    engine._reflected_host = "146.70.142.86"
+    engine._predicted_ext_ip = ""
+    engine._predicted_ext_port = 0
+    engine._nat_profile = None
+    return engine
+
+
+def test_sdp_advertises_the_forwarded_port_when_this_connection_has_it():
+    import webrtc_engine as we
+
+    we._port_allocator.configure("10.2.0.2", [54097])
+    try:
+        out = _engine_with_reflected_host()._augment_local_sdp(_ON_FORWARDED)
+        assert "146.70.142.86 54097 typ srflx" in out
+    finally:
+        we._port_allocator.clear()
+
+
+def test_sdp_omits_the_forwarded_port_when_this_connection_missed_it():
+    """The case a process-wide check got wrong: the pool holds one port, so a
+    second peer gathers ephemerally while the first still holds it. Advertising
+    it there aims that peer's checks at another connection's socket."""
+    import webrtc_engine as we
+
+    we._port_allocator.configure("10.2.0.2", [54097])
+    try:
+        we._port_allocator.allocate()          # peer A holds the forwarded port
+        # Peer B gathered on an ephemeral port - must not claim 54097.
+        out = _engine_with_reflected_host()._augment_local_sdp(_ON_EPHEMERAL)
+        assert "146.70.142.86" not in out
+    finally:
+        we._port_allocator.clear()
+
+
+def test_double_release_clears_the_in_use_mark():
+    """Otherwise bound_port keeps claiming a port nothing is listening on."""
+    allocator = PortPoolAllocator()
+    allocator.configure("10.2.0.2", [54097])
+    allocator.allocate(pc_id=1)
+    assert allocator.bound_port == 54097
+
+    allocator.release(1)
+    allocator._allocated[1] = 54097            # simulate a stale second release
+    allocator.release(1)
+    assert allocator.bound_port == 0
+    assert allocator._free.count(54097) == 1

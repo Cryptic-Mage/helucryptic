@@ -712,3 +712,58 @@ def test_install_forward_patch_is_idempotent():
     assert patched is not first
     we.install_forward_patch(loop)
     assert loop.create_datagram_endpoint is patched  # not double-wrapped
+
+
+@pytest.mark.asyncio
+@patch("webrtc_engine.RTCPeerConnection")
+async def test_handle_ice_buffers_and_flushes_pending_candidates(mock_pc_class, engine):
+    mock_pc = MagicMock()
+    mock_pc.remoteDescription = None
+    mock_pc.addIceCandidate = AsyncMock()
+    mock_pc.signalingState = "have-local-offer"
+    mock_pc_class.return_value = mock_pc
+
+    engine.pcs["bob"] = mock_pc
+    valid_cand = "candidate:1 1 UDP 2130706431 192.168.1.100 50000 typ host"
+
+    # Candidate arrives before remote description is set
+    await engine.handle_ice({"candidate": valid_cand, "sdpMid": "0", "sdpMLineIndex": 0}, sender="bob")
+    assert "bob" in engine._pending_ice
+    assert len(engine._pending_ice["bob"]) == 1
+    mock_pc.addIceCandidate.assert_not_called()
+
+    # Now answer arrives: remoteDescription is set and pending candidates are flushed
+    mock_pc.setRemoteDescription = AsyncMock()
+    await engine.handle_answer({"sdp": "v=0\r\no=-\r\ns=-\r\nt=0 0\r\n"}, sender="bob")
+    assert "bob" not in engine._pending_ice or len(engine._pending_ice.get("bob", [])) == 0
+    mock_pc.addIceCandidate.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("webrtc_engine.RTCPeerConnection")
+async def test_add_peer_no_artificial_delay_with_strict_nat(mock_pc_class, engine):
+    import time
+    mock_pc = MagicMock()
+    mock_pc.createOffer = AsyncMock(return_value=MagicMock(sdp="v=0\r\n"))
+    mock_pc.setLocalDescription = AsyncMock()
+    mock_pc.localDescription = MagicMock(sdp="v=0\r\na=candidate:1 1 UDP 2130706431 1.2.3.4 5000 typ host\r\n")
+    mock_pc.connectionState = "new"
+    mock_pc.signalingState = "stable"
+    mock_pc_class.return_value = mock_pc
+
+    # Simulate strict NAT profile (which previously triggered 900ms delay and glare)
+    class FakeNATProfile:
+        needs_relay = True
+        nat_type = "symmetric"
+    engine._nat_profile = FakeNATProfile()
+
+    ws_send = AsyncMock()
+    t0 = time.monotonic()
+    await engine.add_peer("bob", ws_send)
+    elapsed = time.monotonic() - t0
+
+    # Should establish immediately without 900ms sleep
+    assert elapsed < 0.3
+    assert "bob" in engine.pcs
+    assert "bob" in engine.data_channels
+

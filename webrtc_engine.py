@@ -159,6 +159,29 @@ def _select_for_aiortc(servers: list, attempt: int = 0) -> list:
 _USER_AGENT = "helucryptic/1.0"
 
 
+def sdp_forwarded_port(sdp: str) -> int:
+    """The forwarded port THIS connection actually gathered on, else 0.
+
+    aioice writes a host candidate for every socket it bound, so the local SDP
+    is the one honest record of which port this particular peer connection got.
+    Asking the allocator instead answers a process-wide question: with a
+    one-port pool, a second peer gathers on an ephemeral port while the first
+    still holds the forwarded one, and advertising it there would send that
+    peer's connectivity checks into another connection's socket.
+    """
+    if not _port_allocator.is_active:
+        return 0
+    vpn_ip = _port_allocator.vpn_ip
+    if not vpn_ip:
+        return 0
+    for port in ([_port_allocator.current_port] if _port_allocator.current_port else []):
+        needle = f" {vpn_ip} {port} typ host"
+        for line in sdp.splitlines():
+            if line.startswith("a=candidate:") and needle in line:
+                return port
+    return 0
+
+
 def _http_url_for(signaling_url: str) -> str:
     """ws(s):// -> http(s):// base, trailing slash stripped."""
     url = (signaling_url or "").strip().rstrip("/")
@@ -499,9 +522,14 @@ class PortPoolAllocator:
         """Release a claimed port back into the free list."""
         with self._lock:
             port = self._allocated.pop(pc_id, None)
-            if port is not None and port not in self._free:
+            if port is None:
+                return
+            # Discard unconditionally: if the port is already back in _free
+            # (released twice), leaving it marked in-use would make bound_port
+            # claim we are still listening on it.
+            self._in_use.discard(port)
+            if port not in self._free:
                 self._free.append(port)
-                self._in_use.discard(port)
 
     def release_port(self, port: int) -> None:
         """Return a port to the pool by value.
@@ -537,14 +565,13 @@ class PortPoolAllocator:
 
     @property
     def bound_port(self) -> int:
-        """The forwarded port a socket is actually listening on right now, else 0.
+        """A forwarded port some socket is listening on right now, else 0.
 
-        This is what may be advertised to a peer. ``current_port`` describes the
-        NAT mapping and stays put while the port is checked out, but a gather can
-        still miss it - the pool holds one port, so an ICE restart that overlaps
-        the previous socket falls back to an ephemeral bind. Advertising the
-        forwarded port then sends the peer's connectivity checks to a port
-        nothing is listening on, which looks exactly like a dead link.
+        ``current_port`` describes the NAT mapping and stays put while the port
+        is checked out; this says whether anything actually holds it. Note this
+        is process-wide - to ask whether a *particular* peer connection got the
+        port, use :func:`sdp_forwarded_port`, since with a one-port pool a second
+        peer gathers on an ephemeral port while the first still holds this one.
         """
         with self._lock:
             for port in self._ports:
@@ -1119,6 +1146,7 @@ class WebRTCEngine:
         self._pre_hello_bytes:     dict[str, int]               = {}
         self._is_negotiating:      dict[str, bool]              = {}
         self._neg_dirty:           dict[str, bool]              = {}
+        self._pending_ice:         dict[str, list]              = {}
         # Peers we tried to call before their data channel was open - the
         # "call_start" ping is (re)sent from _bind_channel once it opens so the
         # callee actually rings instead of silently missing the call.
@@ -1453,10 +1481,10 @@ class WebRTCEngine:
         For sequential NAT one candidate; for random strict NAT inject 2-3 lookahead
         candidates as well. No-op when prediction unavailable. Optimized: string op only."""
         ext_ip = self._reflected_host or self._predicted_ext_ip or getattr(self._nat_profile, "ext_ip", "")
-        # Only advertise the forwarded port when a socket is genuinely bound to
-        # it - see PortPoolAllocator.bound_port. Announcing a port we lost to an
-        # ephemeral fallback points the peer's checks at nothing.
-        bound = _port_allocator.bound_port if _port_allocator.is_active else 0
+        # Only advertise the forwarded port when THIS connection gathered on it.
+        # Announcing a port we lost to an ephemeral fallback - or one another
+        # peer's socket is holding - points the peer's checks at nothing.
+        bound = sdp_forwarded_port(sdp)
         if bound and ext_ip:
             try:
                 sdp = inject_predicted_srflx(sdp, ext_ip, bound)
@@ -1638,35 +1666,20 @@ class WebRTCEngine:
             pass
 
     async def handle_punch_at(self, data: dict, sender: str, ws_send: Callable) -> None:
-        """Peer asks us to punch simultaneously - sleep until fire_at then offer.
-
-        Non-blocking, optimized: uses punch_countdown_delay to compute precise wait
-        without busy loop. If we're already connected, ignore.
-        """
+        """Peer punch sync signal - ensure PC exists and follow deterministic role assignment."""
         try:
-            import time as _t
-            fire_at = int(data.get("fire_at") or 0)
-            if not fire_at or sender in self.pcs and self.pcs[sender].connectionState in ("connected", "completed"):
+            if sender in self.pcs and self.pcs[sender].connectionState in ("connected", "completed"):
                 return
-            now_ms = int(_t.time() * 1000)
-            delay = punch_countdown_delay(now_ms, fire_at, min_delay=0.0)
-            # Clamp max wait to 2s to avoid hanging
-            delay = min(delay, 2.0)
-            if delay > 0:
-                await asyncio.sleep(delay)
-            # Ensure PC exists and drive offer (both sides offer for strict)
             if sender not in self.pcs:
                 self._init_pc(sender)
-                dc = self.pcs[sender].createDataChannel("chat", ordered=True)
-                self.data_channels[sender] = dc
-                self._bind_channel(dc, sender)
-            elif sender not in self.data_channels:
-                # PC exists but no data channel — create one on existing PC
-                dc = self.pcs[sender].createDataChannel("chat", ordered=True)
-                self.data_channels[sender] = dc
-                self._bind_channel(dc, sender)
-            # For strict, bypass alphabetical - both punch
-            await self.request_negotiation(sender)
+            # Deterministic role: only the alphabetically lower username initiates offer
+            if self.my_username < sender:
+                pc = self.pcs[sender]
+                if sender not in self.data_channels:
+                    dc = pc.createDataChannel("chat", ordered=True)
+                    self.data_channels[sender] = dc
+                    self._bind_channel(dc, sender)
+                await self.request_negotiation(sender)
         except Exception:
             pass
 
@@ -3085,12 +3098,21 @@ class WebRTCEngine:
         offer = await self.pcs[peer].createOffer()
         await self.pcs[peer].setLocalDescription(offer)
 
-        # Optimized trickle ICE: send offer IMMEDIATELY (without waiting for gathering)
-        # so peer can start hole-punching within ~100ms. Remaining candidates trickle.
         pc = self.pcs.get(peer)
         if pc is None or pc.localDescription is None:
             return
-        # Send initial offer with whatever candidates are ready (+ predicted srflx)
+
+        # Brief tick (max 40ms) to allow initial host candidates to populate into local SDP
+        if pc.localDescription and "a=candidate:" not in pc.localDescription.sdp:
+            try:
+                for _ in range(2):
+                    await asyncio.sleep(0.02)
+                    if pc.localDescription and "a=candidate:" in pc.localDescription.sdp:
+                        break
+            except Exception:
+                pass
+
+        # Optimized trickle ICE: send offer IMMEDIATELY with early/augmented candidates
         aug_sdp = self._augment_local_sdp(pc.localDescription.sdp)
         await self._send_ws({
             "target": peer,
@@ -3098,9 +3120,7 @@ class WebRTCEngine:
             "data":   {"sdp": aug_sdp, "type": "offer"},
         })
         print(f"[rtc] {self.my_username}: SENT offer to {peer} (trickle, candidates={_format_sdp_candidates(aug_sdp)})", flush=True)
-        # Trickle remaining candidates in background (non-blocking, optimized polling)
-        # Previous code waited 5s (100*0.05) before sending anything - that missed the
-        # punch window for strict NAT. Now we trickle.
+        # Trickle remaining candidates in background (non-blocking, low latency)
         self._bg(self._trickle_candidates(peer))
 
     async def _trickle_candidates(self, peer: str) -> None:
@@ -3222,14 +3242,27 @@ class WebRTCEngine:
             await pc.setRemoteDescription(
                 RTCSessionDescription(sdp=data["sdp"], type="offer")
             )
+            # Flush any early trickled candidates that arrived before setRemoteDescription
+            for cand in self._pending_ice.pop(sender, []):
+                try:
+                    await pc.addIceCandidate(cand)
+                    print(f"[rtc] {self.my_username}: flushed queued candidate for {sender}: {cand.type} {cand.protocol} {cand.ip}:{cand.port}", flush=True)
+                except Exception as ex:
+                    print(f"[rtc] {self.my_username}: error flushing queued candidate for {sender}: {ex}", flush=True)
+
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
 
-            # Wait for ICE gathering to complete before sending the SDP (non-trickle ICE)
+            # Fast answer dispatch: brief grace window (max 100ms) or until
+            # candidates/complete are ready, then send answer immediately.
+            # Remaining candidates trickle asynchronously in the background.
             if isinstance(pc.iceGatheringState, str) and pc.iceGatheringState != "complete":
                 try:
-                    for _ in range(100):
+                    for _ in range(2):
                         if pc.iceGatheringState == "complete":
+                            break
+                        sdp_cur = pc.localDescription.sdp if pc.localDescription else ""
+                        if "a=candidate:" in sdp_cur:
                             break
                         await asyncio.sleep(0.05)
                 except Exception as ex:
@@ -3241,7 +3274,8 @@ class WebRTCEngine:
                 "type":   "answer",
                 "data":   {"sdp": ans_sdp, "type": "answer"},
             })
-            print(f"[rtc] {self.my_username}: SENT answer to {sender} (candidates={_format_sdp_candidates(ans_sdp)})", flush=True)
+            print(f"[rtc] {self.my_username}: SENT answer to {sender} (trickle, candidates={_format_sdp_candidates(ans_sdp)})", flush=True)
+            self._bg(self._trickle_candidates(sender))
         except Exception as ex:
             self.last_error = f"offer from {sender}: {type(ex).__name__}: {ex}"
             print(f"[rtc] {self.my_username}: handle_offer FAILED for {sender}: {type(ex).__name__}: {ex}", flush=True)
@@ -3260,6 +3294,13 @@ class WebRTCEngine:
                     RTCSessionDescription(sdp=data["sdp"], type="answer")
                 )
                 print(f"[rtc] {self.my_username}: applied answer from {peer}", flush=True)
+                # Flush any early trickled candidates that arrived before setRemoteDescription
+                for cand in self._pending_ice.pop(peer, []):
+                    try:
+                        await pc.addIceCandidate(cand)
+                        print(f"[rtc] {self.my_username}: flushed queued candidate for {peer}: {cand.type} {cand.protocol} {cand.ip}:{cand.port}", flush=True)
+                    except Exception as ex:
+                        print(f"[rtc] {self.my_username}: error flushing queued candidate for {peer}: {ex}", flush=True)
             except Exception as ex:
                 self.last_error = f"answer from {peer}: {type(ex).__name__}"
                 print(f"[rtc] {self.my_username}: handle_answer FAILED for {peer}: {type(ex).__name__}: {ex}", flush=True)
@@ -3287,8 +3328,6 @@ class WebRTCEngine:
         SDP string with aiortc's own parser instead."""
         peer = sender or self.target_peer
         pc = self.pcs.get(peer)
-        if pc is None:
-            return
         raw = str((data or {}).get("candidate") or "")
         if not raw:
             return  # end-of-candidates marker - nothing to add
@@ -3298,6 +3337,10 @@ class WebRTCEngine:
             cand = candidate_from_sdp(sdp_str)
             cand.sdpMid = data.get("sdpMid")
             cand.sdpMLineIndex = data.get("sdpMLineIndex")
+            if pc is None or getattr(pc, "remoteDescription", None) is None:
+                self._pending_ice.setdefault(peer, []).append(cand)
+                print(f"[rtc] {self.my_username}: queued early candidate from {peer} (remoteDescription pending)", flush=True)
+                return
             await pc.addIceCandidate(cand)
             print(f"[rtc] {self.my_username}: added trickled candidate from {peer}: {cand.type} {cand.protocol} {cand.ip}:{cand.port}", flush=True)
         except Exception as ex:
@@ -3321,44 +3364,11 @@ class WebRTCEngine:
             else:
                 return
         self._init_pc(username)
-        # Coordinated punch for strict NAT: both sides punch simultaneously.
-        # If either peer is strict (random/blocked), bypass alphabetical tie-break
-        # and have BOTH create the offer after a synchronized delay via punch_at.
-        is_strict = False
-        try:
-            if not _port_allocator.is_active and self._nat_profile and getattr(self._nat_profile, "needs_relay", False):
-                is_strict = True
-        except Exception:
-            pass
-        if is_strict:
-            # Send punch sync to peer, then create offer locally after delay
-            try:
-                import time as _t
-                fire_at = int(_t.time() * 1000) + 900
-                # Send sync (non-blocking)
-                self._bg(self.send_punch_at(username, ws_send, fire_at))
-                # Wait locally for same fire_at (optimized: minimal sleep)
-                now_ms = int(_t.time() * 1000)
-                delay = punch_countdown_delay(now_ms, fire_at, min_delay=0.0)
-                if delay > 0:
-                    await asyncio.sleep(min(delay, 0.9))
-            except Exception:
-                pass
-            if username not in self.pcs:
-                return
-            pc = self.pcs[username]
-            if getattr(pc, "connectionState", None) in ("closed", "failed"):
-                return
-            if username not in self.data_channels:
-                try:
-                    dc = pc.createDataChannel("chat", ordered=True)
-                    self.data_channels[username] = dc
-                    self._bind_channel(dc, username)
-                except Exception:
-                    return
-            await self.request_negotiation(username)
-            return
-        # Normal path: tie-break alphabetically lower username creates the data channel
+        # Deterministic role assignment: alphabetically lower username creates the
+        # data channel and initiates negotiation (offerer). The other peer waits for
+        # the incoming offer (answerer).
+        # This completely eliminates simultaneous offer glare, removes multi-second
+        # delays, and avoids PC destruction during connection setup.
         if self.my_username < username:
             if username not in self.pcs:
                 return
@@ -3464,6 +3474,7 @@ class WebRTCEngine:
             self._pre_hello_bytes.pop(username, None)
         self._is_negotiating.pop(username, None)
         self._neg_dirty.pop(username, None)
+        self._pending_ice.pop(username, None)
         file_states = self._file_buffers.pop(username, {})
         for state in file_states.values():
             if isinstance(state, dict):
