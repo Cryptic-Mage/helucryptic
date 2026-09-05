@@ -2166,7 +2166,10 @@ class HelucrypticApp:
         self._refresh_contact_list()
         if not self._active_contact:
             self.engine.target_peer = sender
-        await self.engine.add_peer(sender, ws_send)
+        try:
+            await self.engine.add_peer(sender, ws_send)
+        except Exception as ex:
+            self._log(f"[rtc] {self.engine.my_username}: failed adding peer {sender}: {ex}")
 
     async def _handle_signaling_message(self, t: str, sender: str, data: dict, msg: dict, ws_send) -> None:
         if t == "offer":
@@ -3173,7 +3176,10 @@ class HelucrypticApp:
         except Exception as ex:
             self._log(f"[Error] {ex}")
             return
-        await self.engine.add_peer(username, ws_send)
+        try:
+            await self.engine.add_peer(username, ws_send)
+        except Exception as ex:
+            self._log(f"[rtc] {self.engine.my_username}: connect to {username} failed: {ex}")
 
     def _history_bubbles(self, msgs: list, default_sender: str) -> tuple[list, object, str | None]:
         """Build transcript controls for a page of history rows: date-separator

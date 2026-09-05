@@ -973,7 +973,10 @@ class WebRTCEngine:
             needs_relay = force_relay or (
                 self._nat_profile and getattr(self._nat_profile, "needs_relay", False)
             )
-            if needs_relay and len(servers) > len(_STUN_SERVERS):
+            # Only restrict strictly to relay servers if the user configured a custom TURN server.
+            # Free fallback TURN servers may fail or expire, so STUN must never be stripped without user TURN!
+            has_user_turn = bool(getattr(self.settings, "turn_url", "") or os.getenv("HELUCRYPTIC_TURN_URL"))
+            if needs_relay and has_user_turn and len(servers) > len(_STUN_SERVERS):
                 relay_servers = [
                     server for server in servers
                     if any(url.startswith(("turn:", "turns:")) for url in server.urls)
@@ -2852,16 +2855,34 @@ class WebRTCEngine:
                     await asyncio.sleep(min(delay, 0.9))
             except Exception:
                 pass
-            dc = self.pcs[username].createDataChannel("chat", ordered=True)
-            self.data_channels[username] = dc
-            self._bind_channel(dc, username)
+            if username not in self.pcs:
+                return
+            pc = self.pcs[username]
+            if getattr(pc, "connectionState", None) in ("closed", "failed"):
+                return
+            if username not in self.data_channels:
+                try:
+                    dc = pc.createDataChannel("chat", ordered=True)
+                    self.data_channels[username] = dc
+                    self._bind_channel(dc, username)
+                except Exception:
+                    return
             await self.request_negotiation(username)
             return
         # Normal path: tie-break alphabetically lower username creates the data channel
         if self.my_username < username:
-            dc = self.pcs[username].createDataChannel("chat", ordered=True)
-            self.data_channels[username] = dc
-            self._bind_channel(dc, username)
+            if username not in self.pcs:
+                return
+            pc = self.pcs[username]
+            if getattr(pc, "connectionState", None) in ("closed", "failed"):
+                return
+            if username not in self.data_channels:
+                try:
+                    dc = pc.createDataChannel("chat", ordered=True)
+                    self.data_channels[username] = dc
+                    self._bind_channel(dc, username)
+                except Exception:
+                    return
             await self.request_negotiation(username)
         # else: wait for incoming offer from the other peer
 
@@ -2931,7 +2952,7 @@ class WebRTCEngine:
         if added and dest in self.pcs:
             await self.request_negotiation(dest)
 
-    async def remove_peer(self, username: str) -> None:
+    async def remove_peer(self, username: str, keep_session: bool = False) -> None:
         pc = self.pcs.pop(username, None)
         if pc:
             _port_allocator.release(id(pc))
@@ -2940,17 +2961,18 @@ class WebRTCEngine:
             except Exception:
                 pass
         self._direct_stable_since.pop(username, None)
-        self._signaling_hello_sent.pop(username, None)
-        self._epoch_ids.pop(username, None)
-        self._send_seq.pop(username, None)
-        self._recv_window.pop(username, None)
         self.data_channels.pop(username, None)
-        self.session_keys.pop(username, None)
-        self._hello_sent.pop(username, None)
-        self._peer_hello_verified.pop(username, None)
-        self._eph_priv.pop(username, None)
-        self._pre_hello_buffers.pop(username, None)
-        self._pre_hello_bytes.pop(username, None)
+        if not keep_session:
+            self._signaling_hello_sent.pop(username, None)
+            self._epoch_ids.pop(username, None)
+            self._send_seq.pop(username, None)
+            self._recv_window.pop(username, None)
+            self.session_keys.pop(username, None)
+            self._hello_sent.pop(username, None)
+            self._peer_hello_verified.pop(username, None)
+            self._eph_priv.pop(username, None)
+            self._pre_hello_buffers.pop(username, None)
+            self._pre_hello_bytes.pop(username, None)
         self._is_negotiating.pop(username, None)
         self._neg_dirty.pop(username, None)
         file_states = self._file_buffers.pop(username, {})
@@ -3031,13 +3053,28 @@ class WebRTCEngine:
         """Remove a failed PC, then re-initiate the connection over the still-live
         signaling channel. For rooms, topology reconciliation takes over once the
         client's on_state_change callback fires; for 1-to-1 we call add_peer directly."""
-        print(f"[rtc] {self.my_username}: self-healing {peer}", flush=True)
-        await self.remove_peer(peer)
+        attempts = getattr(self, "_heal_attempts", {}).get(peer, 0)
+        last_heal = getattr(self, "_last_heal_time", {}).get(peer, 0.0)
+        now = _time.monotonic()
+        if now - last_heal > 60.0:
+            attempts = 0
+        if attempts >= 2:
+            print(f"[rtc] {self.my_username}: max self-heal attempts reached for {peer} - keeping signaling relay fallback", flush=True)
+            await self.remove_peer(peer, keep_session=True)
+            return
+
+        if not hasattr(self, "_heal_attempts"):
+            self._heal_attempts = {}
+            self._last_heal_time = {}
+        self._heal_attempts[peer] = attempts + 1
+        self._last_heal_time[peer] = now
+
+        print(f"[rtc] {self.my_username}: self-healing {peer} (attempt {attempts + 1}/2)", flush=True)
+        await self.remove_peer(peer, keep_session=True)
         if self._send_ws is None or peer in self.pcs:
             return
-        # Brief pause so both sides complete their remove_peer paths before
-        # either side re-initiates (avoids an immediate glare on re-entry).
-        await asyncio.sleep(1.0)
+        # Brief backoff pause so both sides complete their cleanup before re-initiating
+        await asyncio.sleep(2.0 * (attempts + 1))
         if peer in self.pcs:
             return
         if not self.room_id:
