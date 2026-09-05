@@ -123,6 +123,7 @@ class D:
 
 
 _EASE     = ft.AnimationCurve.EASE_OUT
+_EASE_OUT = ft.AnimationCurve.EASE_OUT
 _EASE_IO  = ft.AnimationCurve.EASE_IN_OUT
 
 

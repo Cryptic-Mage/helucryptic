@@ -443,8 +443,17 @@ except Exception as e:
     }
     with pytest.raises(RuntimeError, match="Startup fail"):
         exec(code, globals_dict)
-        
     assert restart_calls == 0
+
+
+def test_insights_panel_builds_without_name_errors():
+    from client import _EASE_OUT, HelucrypticApp
+
+    assert _EASE_OUT is not None
+    app = HelucrypticApp.__new__(HelucrypticApp)
+    app.settings = types.SimpleNamespace(security_mode="e2ee")
+    panel = app._build_insights_panel()
+    assert panel is not None
 
 
 

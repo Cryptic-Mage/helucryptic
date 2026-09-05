@@ -48,6 +48,7 @@ import paths
 import profiles
 from constants.client_constants import (
     _EASE_IO,
+    _EASE_OUT,
     DIAGNOSTICS_TXT,
     HELUCRYPTIC_SERVER_PASSWORD,
     HELUCRYPTIC_SERVER_URL,
