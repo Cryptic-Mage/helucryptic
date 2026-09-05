@@ -15,9 +15,13 @@ import xml.etree.ElementTree as ET
 logger = logging.getLogger("helucryptic.upnp")
 if not logger.handlers:
     import sys
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("[upnp] %(message)s"))
-    logger.addHandler(h)
+    _stream = sys.stderr if sys.stderr is not None else sys.stdout
+    if _stream is not None:
+        h = logging.StreamHandler(_stream)
+        h.setFormatter(logging.Formatter("[upnp] %(message)s"))
+        logger.addHandler(h)
+    else:
+        logger.addHandler(logging.NullHandler())
     logger.setLevel(logging.INFO)
     logger.propagate = False
 

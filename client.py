@@ -124,6 +124,23 @@ from webrtc_engine import (
 )
 
 
+def _get_websocket_ssl_context(url: str):
+    """Return an SSLContext configured with certifi's bundle for wss:// connections.
+    Avoids SSL: CERTIFICATE_VERIFY_FAILED on Windows systems with outdated/expired root certificates.
+    """
+    if not url.startswith("wss://"):
+        return None
+    try:
+        import ssl
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            return ssl.create_default_context()
+    except Exception:
+        return None
+
+
 def _alpha(alpha2: str, color: str) -> str:
     """8-digit hex with alpha FIRST (#AARRGGBB) - Flet/Flutter's format.
     Suffixing alpha (color+"aa") silently shifts the hue (cyan turns green)."""
@@ -1911,9 +1928,17 @@ class HelucrypticApp:
             # Explicit keepalive: ping every 20 s, declare the link dead after
             # 15 s of silence - detects half-open connections (sleep/VPN drop)
             # quickly so the auto-reconnect loop can kick in.
+            connect_kwargs = {
+                "ping_interval": 20,
+                "ping_timeout": 15,
+                "close_timeout": 5,
+                "open_timeout": 15,
+            }
+            ssl_ctx = _get_websocket_ssl_context(url)
+            if ssl_ctx is not None:
+                connect_kwargs["ssl"] = ssl_ctx
             self.ws = await websockets.connect(
-                url, ping_interval=20, ping_timeout=15,
-                close_timeout=5, open_timeout=15,
+                url, **connect_kwargs
             )
             self._update_status("SIGNALING", C.YELLOW)
             self._toast(f"Connected as “{uname}”" + (f" in {room}" if room else ""), "success")
@@ -5086,11 +5111,17 @@ async def check_signaling_auth(base_url: str, password: str = "", timeout: float
     full_url = f"{ws_base}/ws/{probe_id}{query}"
 
     try:
+        connect_kwargs = {
+            "open_timeout": timeout,
+            "close_timeout": 2.0,
+            "ping_interval": None,
+        }
+        ssl_ctx = _get_websocket_ssl_context(full_url)
+        if ssl_ctx is not None:
+            connect_kwargs["ssl"] = ssl_ctx
         ws = await websockets.connect(
             full_url,
-            open_timeout=timeout,
-            close_timeout=2.0,
-            ping_interval=None,
+            **connect_kwargs
         )
     except Exception as ex:
         err_msg = str(ex)

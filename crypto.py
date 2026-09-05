@@ -49,10 +49,14 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 
 if not logger.handlers:
-    _handler = logging.StreamHandler(sys.stderr)
-    _formatter = logging.Formatter("[crypto] %(message)s")
-    _handler.setFormatter(_formatter)
-    logger.addHandler(_handler)
+    _stream = sys.stderr if sys.stderr is not None else sys.stdout
+    if _stream is not None:
+        _handler = logging.StreamHandler(_stream)
+        _formatter = logging.Formatter("[crypto] %(message)s")
+        _handler.setFormatter(_formatter)
+        logger.addHandler(_handler)
+    else:
+        logger.addHandler(logging.NullHandler())
 
 
 def _keys_path():
