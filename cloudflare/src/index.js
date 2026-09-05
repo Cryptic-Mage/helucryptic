@@ -105,7 +105,7 @@ async function cloudflareIceServers(env, ttl) {
 
 async function handleTurn(request, env) {
   const url = new URL(request.url);
-  const expected = env.SERVER_PASSWORD || "";
+  const expected = env.HELUCRYPTIC_SERVER_PASSWORD || "";
   if (expected && (url.searchParams.get("password") || "") !== expected) {
     return new Response("Invalid server access password.", { status: 403 });
   }

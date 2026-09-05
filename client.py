@@ -45,6 +45,7 @@ import config
 import identity
 import invites
 import paths
+import secure_store
 import profiles
 from constants.client_constants import (
     _EASE_IO,
@@ -145,6 +146,55 @@ _MSG_STATUS_GLYPHS = {
     "sent":      (ft.Icons.DONE,      C.MUTED),   # left this machine
     "delivered": (ft.Icons.DONE_ALL,  C.CYAN),    # peer acked receipt
 }
+
+
+_SESSION_TOKEN_FILE = "session_token.json"
+
+
+def _session_token_path():
+    return paths.DATA_DIR / _SESSION_TOKEN_FILE
+
+
+def save_session_token(url: str, username: str, token: str) -> None:
+    """Remember the server-issued session token across restarts.
+
+    The token is what lets us evict our own stale session. Held only in memory,
+    a restart arrives with nothing to prove the lingering socket is ours, and
+    the server refuses the username until that socket's keepalive lapses -
+    locking a user out of their own name for as long as it takes.
+
+    Stored DPAPI-protected like the identity keys; the token is per-server and
+    per-username, so it is only ever replayed to the pair that issued it.
+    """
+    if not token:
+        return
+    blob = json.dumps({"url": url, "username": username, "token": token}).encode("utf-8")
+    with contextlib.suppress(Exception):
+        if secure_store.available():
+            blob = secure_store.protect(blob)
+        paths.write_private_bytes(_session_token_path(), blob)
+
+
+def load_session_token(url: str, username: str) -> str:
+    """Return the stored token for this server+username, else ""."""
+    try:
+        raw = _session_token_path().read_bytes()
+    except Exception:
+        return ""
+    try:
+        if secure_store.is_protected(raw):
+            raw = secure_store.unprotect(raw)
+        saved = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return ""
+    if saved.get("url") == url and saved.get("username") == username:
+        return str(saved.get("token") or "")
+    return ""
+
+
+def clear_session_token() -> None:
+    with contextlib.suppress(Exception):
+        _session_token_path().unlink()
 
 
 def _mark_intentional_close(ws) -> None:
@@ -282,6 +332,10 @@ class HelucrypticApp:
         # Prevents overlapping auto-reconnect attempts after an unexpected drop.
         self._ws_reconnect_active: bool        = False
         self._auth_failed: bool                = False
+        # Reason text from the server's last `error` frame. The server closes
+        # with 1008 for several unrelated refusals, so the close code alone
+        # cannot say whether reconnecting is worth it.
+        self._sig_reject_reason: str           = ""
         # Incoming-video render throttle (per sender) + encode quality. Lower in
         # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
         self._last_tile_render: dict[str, float] = {}
@@ -2049,6 +2103,10 @@ class HelucrypticApp:
             params["room"] = room
         if self._server_password:
             params["password"] = self._server_password
+        if not self._ws_session_token:
+            # Fresh process: recover the token from disk so the server can see
+            # that the socket still holding this username is our own.
+            self._ws_session_token = load_session_token(self.settings.signaling_url, uname)
         if self._ws_session_token:
             params["session_token"] = self._ws_session_token
         suffix = ("?" + urllib.parse.urlencode(params)) if params else ""
@@ -2083,6 +2141,7 @@ class HelucrypticApp:
         url, safe_url = self._build_signaling_url(uname, room)
 
         self._auth_failed = False
+        self._sig_reject_reason = ""
         print(f"[connect] dialing {safe_url}", flush=True)
         if self.ws:
             # Replacing the socket ourselves - the old listener must unwind
@@ -2164,9 +2223,20 @@ class HelucrypticApp:
                 return
             self._cleanup_signaling_disconnect(ex)
             close_code = getattr(ws, "close_code", None)
-            if self._auth_failed or close_code == 1008:
+            if self._auth_failed:
                 _dropped_unexpectedly = False
-                print(f"[signaling] Authentication rejected by server (code={close_code}). Auto-reconnect aborted.", flush=True)
+                print(f"[signaling] Authentication rejected by server (code={close_code}). "
+                      f"Auto-reconnect aborted.", flush=True)
+            elif close_code == 1008:
+                # 1008 covers a wrong password, a username still held by a
+                # previous session, and a full room. Only the first is fatal,
+                # and _handle_sig_error has already set _auth_failed for it -
+                # so anything still here is worth retrying. Reporting every
+                # 1008 as "authentication rejected" hid the real reason.
+                reason = self._sig_reject_reason or "no reason given"
+                print(f"[signaling] Server refused the session: {reason} "
+                      f"(code={close_code}) - will retry.", flush=True)
+                _dropped_unexpectedly = True
             else:
                 _dropped_unexpectedly = True
         else:
@@ -2284,6 +2354,26 @@ class HelucrypticApp:
     def _handle_sig_error(self, msg: dict, data) -> None:
         msg_text = data if isinstance(data, str) else msg.get("error", str(data))
         text_lower = str(msg_text).lower()
+        self._sig_reject_reason = str(msg_text)
+        if "already in use" in text_lower:
+            # A previous session of ours is still registered - typically our own
+            # socket from before a restart, which the server drops once its
+            # keepalive lapses. Transient, so reconnect rather than giving up;
+            # calling this an authentication failure sent people hunting for a
+            # password problem that was never there.
+            # Whatever token we replayed did not satisfy the server; discard it
+            # so the retry does not keep presenting the same rejected proof.
+            self._ws_session_token = ""
+            clear_session_token()
+            self._toast("Username still registered from a previous session - retrying…", "warn")
+            print(f"[signaling] Username collision: {msg_text} "
+                  f"(retrying - the stale session expires shortly)", flush=True)
+            return
+        if "room is full" in text_lower:
+            self.engine.last_error = f"signaling: {msg_text}"
+            self._toast(msg_text, "error")
+            print(f"[signaling] {msg_text}", flush=True)
+            return
         if "password" in text_lower or "auth" in text_lower or "access denied" in text_lower:
             self._auth_failed = True
             self.engine.last_error = f"signaling: {msg_text}"
@@ -2379,6 +2469,8 @@ class HelucrypticApp:
             self._show_room_invite_dialog(inviter, room_id)
         elif t == "session_token":
             self._ws_session_token = (data or {}).get("token", "")
+            save_session_token(self.settings.signaling_url,
+                               self.engine.my_username, self._ws_session_token)
             self._reflected_host = str((data or {}).get("reflected_host") or "")
             self._reflected_port = int((data or {}).get("reflected_port") or 0)
             self.engine.server_capabilities = (data or {}).get("capabilities", [])

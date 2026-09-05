@@ -201,3 +201,67 @@ def test_bind_wrapper_leaves_other_addresses_alone():
         assert we._port_allocator.allocate() == 54097
     finally:
         we._port_allocator.clear()
+
+
+# ---------------------------------------------------------------------------
+# bound_port: what we may advertise. current_port describes the NAT mapping;
+# bound_port describes the socket. Advertising the first when the second is
+# absent points a peer's connectivity checks at a port nothing is listening on.
+# ---------------------------------------------------------------------------
+
+def test_bound_port_is_zero_until_something_binds():
+    allocator = PortPoolAllocator()
+    allocator.configure("10.2.0.2", [54097])
+    assert allocator.current_port == 54097      # the mapping exists...
+    assert allocator.bound_port == 0            # ...but no socket holds it yet
+
+
+def test_bound_port_tracks_the_live_socket():
+    allocator = PortPoolAllocator()
+    allocator.configure("10.2.0.2", [54097])
+    allocator.allocate()
+    assert allocator.bound_port == 54097
+
+    allocator.release_port(54097)
+    # The mapping is still alive, but nothing is listening on it any more.
+    assert allocator.current_port == 54097
+    assert allocator.bound_port == 0
+
+
+def test_bound_port_is_zero_after_an_ephemeral_fallback():
+    """The pool holds one port. An ICE restart overlapping the previous socket
+    binds ephemerally - and must not advertise the forwarded port."""
+    import asyncio
+
+    import webrtc_engine as we
+
+    we._port_allocator.configure("10.2.0.2", [54097])
+    try:
+        binds = []
+        wrapped = _wrapper_over(binds, fail_ports={54097})
+        asyncio.run(wrapped(None, local_addr=("10.2.0.2", 0)))
+        assert binds[-1] == ("10.2.0.2", 0)     # fell back
+        assert we._port_allocator.bound_port == 0
+    finally:
+        we._port_allocator.clear()
+
+
+def test_sdp_omits_the_forwarded_port_when_not_bound():
+    import webrtc_engine as we
+
+    we._port_allocator.configure("10.2.0.2", [54097])
+    try:
+        engine = we.WebRTCEngine.__new__(we.WebRTCEngine)
+        engine._reflected_host = "146.70.142.86"
+        engine._predicted_ext_ip = ""
+        engine._predicted_ext_port = 0
+        engine._nat_profile = None
+        sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+
+        # Nothing bound -> no srflx line promising a port we are not on.
+        assert "146.70.142.86" not in engine._augment_local_sdp(sdp)
+
+        we._port_allocator.allocate()
+        assert "146.70.142.86 54097 typ srflx" in engine._augment_local_sdp(sdp)
+    finally:
+        we._port_allocator.clear()
