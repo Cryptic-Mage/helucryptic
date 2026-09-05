@@ -155,6 +155,19 @@ _MSG_STATUS_GLYPHS = {
 }
 
 
+def _is_ws_alive(ws) -> bool:
+    """Check if a websocket connection is open across all websockets library versions."""
+    if ws is None:
+        return False
+    if hasattr(ws, "open"):
+        return bool(ws.open)
+    if hasattr(ws, "state"):
+        return getattr(ws.state, "name", "") == "OPEN"
+    if hasattr(ws, "closed"):
+        return not ws.closed
+    return True
+
+
 def _fmt_msg_ts(iso_ts: str | None = None) -> str:
     """Human timestamp for a chat bubble, in LOCAL time. History rows store
     UTC ISO strings; live messages pass None (= now). Same-day → 'HH:MM',
@@ -1104,7 +1117,12 @@ class HelucrypticApp:
         self.palette_overlay.visible = True
         self.palette_overlay.update()
         try:
-            self.palette_search.focus()
+            res = self.palette_search.focus()
+            if asyncio.iscoroutine(res):
+                try:
+                    asyncio.get_running_loop().create_task(res)
+                except RuntimeError:
+                    pass
         except Exception:
             pass
 
@@ -4127,7 +4145,7 @@ class HelucrypticApp:
 
     def _render_diagnostics_state(self) -> str:
         d = self.engine.get_diagnostics()
-        ws_status = "connected" if (self.ws and self.ws.open) else "disconnected"
+        ws_status = "connected" if _is_ws_alive(self.ws) else "disconnected"
         lines = [
             "helucryptic - client_claude",
             f"Data dir   : {paths.DATA_DIR}"
@@ -4871,7 +4889,7 @@ class HelucrypticApp:
         level = s["level"]
         label = s["label"]
         color = getattr(C, self._STATUS_COLORS.get(level, "FAINT"))
-        if level in ("disconnected", "idle") and self.ws and self.ws.open:
+        if level in ("disconnected", "idle") and _is_ws_alive(self.ws):
             label = "SIGNALING"
             color = C.YELLOW
         self._update_status(label, color)
@@ -5518,7 +5536,10 @@ async def main(page: ft.Page) -> None:
 if __name__ == "__main__":
     import sys
     try:
-        ft.app(target=main)
+        if hasattr(ft, "run"):
+            ft.run(main)
+        else:
+            ft.app(target=main)
     except Exception as e:
         if "--dev" not in sys.argv:
             print(f"[app] Unhandled startup exception: {e}. Auto-restarting...", flush=True)
