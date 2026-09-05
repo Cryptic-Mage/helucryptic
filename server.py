@@ -24,6 +24,8 @@ from constants.server_constants import (
     SERVER_TYPES,
 )
 
+import turn_provider
+
 logger = logging.getLogger("helucryptic.server")
 
 # Security: max incoming WebSocket message size (bytes). Prevents memory DoS
@@ -449,6 +451,32 @@ async def _cleanup_connection(websocket: WebSocket, username: str) -> None:
         del rooms[room_id]
     else:
         await _notify_peer_left(room_id, username)
+
+
+@app.get("/turn")
+async def turn_credentials(password: str | None = Query(default=None)):
+    """Hand the client short-lived TURN credentials.
+
+    Behind CGNAT / symmetric NAT there is no direct UDP path between peers, so
+    a relay is the only way media and file transfer work across the WAN. The
+    secret that mints those credentials stays here rather than in the shipped
+    client. Gated by the same access password as the WebSocket, and mirrored by
+    the Cloudflare Worker (cloudflare/src/index.js) - keep the two in sync.
+    """
+    if not _password_ok(password):
+        return Response(status_code=403, content="Invalid server access password.")
+    try:
+        payload = turn_provider.cached_ice_servers()
+    except Exception as ex:
+        logger.warning("TURN credential minting failed: %s", type(ex).__name__)
+        return Response(status_code=503, content="TURN provider unavailable.")
+    return Response(
+        content=json.dumps(payload),
+        media_type="application/json",
+        # Credentials are per-deployment, not per-user, but they expire - let a
+        # proxy hold them only for a fraction of their lifetime.
+        headers={"Cache-Control": f"private, max-age={max(60, payload['ttl'] // 4)}"},
+    )
 
 
 @app.websocket("/ws/{username}")

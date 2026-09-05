@@ -93,6 +93,112 @@ _FALLBACK_TURN_SERVERS = [
     ),
 ]
 
+# aiortc/aioice honour exactly ONE stun_server and ONE turn_server per
+# RTCConfiguration (see aiortc.rtcicetransport.connection_kwargs: every URL after
+# the first of each scheme is skipped). Every list above is therefore a *priority
+# order*, not a set that gets tried in parallel - _select_for_aiortc below picks
+# the single pair that actually reaches the ICE stack, and rotates the TURN pick
+# across reconnect attempts so a UDP-blocked network still lands on TCP/TLS.
+
+
+def _flatten_turn_urls(servers: list) -> list[tuple[str, str | None, str | None]]:
+    """(url, username, credential) triples for every TURN URL, in priority order."""
+    out: list[tuple[str, str | None, str | None]] = []
+    for server in servers:
+        urls = server.urls if isinstance(server.urls, list) else [server.urls]
+        for url in urls:
+            if url.startswith(("turn:", "turns:")):
+                out.append((url, server.username, server.credential))
+    return out
+
+
+def _select_for_aiortc(servers: list, attempt: int = 0) -> list:
+    """Reduce a priority list to the one STUN + one TURN aiortc will actually use.
+
+    ``attempt`` rotates the TURN choice, so a peer that fails on UDP retries on
+    TCP and then TLS/443 instead of hammering the same blocked transport.
+    """
+    stun = next(
+        (s for s in servers
+         if any(u.startswith("stun") for u in
+                (s.urls if isinstance(s.urls, list) else [s.urls]))),
+        None,
+    )
+    turns = _flatten_turn_urls(servers)
+    picked: list = []
+    if stun is not None:
+        urls = stun.urls if isinstance(stun.urls, list) else [stun.urls]
+        first = next(u for u in urls if u.startswith("stun"))
+        picked.append(RTCIceServer(urls=[first]))
+    if turns:
+        url, username, credential = turns[attempt % len(turns)]
+        picked.append(RTCIceServer(urls=[url], username=username, credential=credential))
+    return picked or list(servers)
+
+
+def _http_url_for(signaling_url: str) -> str:
+    """ws(s):// -> http(s):// base, trailing slash stripped."""
+    url = (signaling_url or "").strip().rstrip("/")
+    if url.startswith("wss://"):
+        return "https://" + url[len("wss://"):]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://"):]
+    if url.startswith(("http://", "https://")):
+        return url
+    return "https://" + url
+
+
+def _fetch_ice_blocking(signaling_url: str, password: str, timeout: float) -> dict:
+    import urllib.parse
+    import urllib.request
+    base = _http_url_for(signaling_url)
+    query = ("?" + urllib.parse.urlencode({"password": password})) if password else ""
+    req = urllib.request.Request(f"{base}/turn{query}", headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+async def fetch_ice_servers(signaling_url: str, password: str = "",
+                            timeout: float = 8.0) -> tuple[list, int]:
+    """Ask the signaling server for short-lived TURN credentials.
+
+    Behind CGNAT / symmetric NAT there is no direct UDP path between peers, so a
+    relay is the only transport that works. Shipping a TURN secret inside the
+    client would hand it to anyone with a hex editor, so the server mints
+    expiring credentials instead (see turn_provider.py / the Worker's /turn).
+
+    Returns ``(servers, ttl)``; ``([], 0)`` when the server has no TURN provider
+    configured or is unreachable. Never raises - the caller falls back to the
+    built-in list.
+    """
+    try:
+        payload = await asyncio.to_thread(
+            _fetch_ice_blocking, signaling_url, password, timeout)
+    except Exception as ex:
+        print(f"[turn] could not fetch relay credentials: {type(ex).__name__}", flush=True)
+        return ([], 0)
+    servers = []
+    for entry in (payload.get("iceServers") or []):
+        urls = entry.get("urls") or entry.get("url")
+        if isinstance(urls, str):
+            urls = [urls]
+        if not urls:
+            continue
+        servers.append(RTCIceServer(
+            urls=list(urls),
+            username=entry.get("username") or None,
+            credential=entry.get("credential") or None,
+        ))
+    ttl = int(payload.get("ttl") or 0)
+    if servers:
+        relay_count = len(_flatten_turn_urls(servers))
+        print(f"[turn] server provided {relay_count} relay URL(s) "
+              f"via '{payload.get('provider', '?')}' (ttl={ttl}s)", flush=True)
+    else:
+        print("[turn] signaling server has no TURN provider configured", flush=True)
+    return (servers, ttl)
+
+
 MAX_PRE_HELLO_FRAMES = 64
 MAX_PRE_HELLO_BYTES = 1 * 1024 * 1024
 MAX_INCOMING_FILE_SIZE = 1 * 1024 * 1024 * 1024  # 1 GiB cap per file (down from 2 GiB) + per-peer single slot mitigates disk DoS; global total capped at 4 GiB implicitly via 4 peers
@@ -852,6 +958,14 @@ class WebRTCEngine:
         self._room_creator_name: str | None  = None
         self._reflected_host:    str          = ""   # public IP reflected by signaling server
 
+        # Server-minted TURN credentials (see fetch_ice_servers). These outrank
+        # every built-in relay because they are the only ones guaranteed live.
+        self._server_ice:        list       = []
+        self._server_ice_until:  float      = 0.0
+        # Rotates the single TURN URL aiortc accepts, so a retry after a failed
+        # connection tries the next transport instead of the same blocked one.
+        self._ice_attempt:       int        = 0
+
         # 1-to-1 compat: target_peer is set by create_offer / handle_offer
         self.target_peer: str = ""
 
@@ -929,17 +1043,39 @@ class WebRTCEngine:
     # ICE / TURN configuration (from settings - env only seeds first run)
     # ------------------------------------------------------------------
 
+    async def refresh_server_ice(self, signaling_url: str, password: str = "") -> bool:
+        """Pull short-lived TURN credentials from the signaling server.
+
+        Called once the signaling session is authenticated. Cached until shortly
+        before the credentials expire; a failed refresh keeps the previous set
+        rather than dropping to no relay at all.
+        """
+        if self._server_ice and _time.monotonic() < self._server_ice_until:
+            return True
+        servers, ttl = await fetch_ice_servers(signaling_url, password)
+        if not servers:
+            return False
+        self._server_ice = servers
+        # Refresh at three quarters of the lifetime; floor keeps a server that
+        # reports a nonsense TTL from causing a refresh storm.
+        self._server_ice_until = _time.monotonic() + max(300.0, (ttl or 3600) * 0.75)
+        return True
+
     def _ice_servers(self, force_relay: bool = False) -> list:
         servers = list(_STUN_SERVERS)
         url = getattr(self.settings, "turn_url", "") or ""
-        # A TURN relay (if configured) is what makes connections succeed behind
-        # symmetric / carrier-grade NAT where STUN alone fails.
+        # A TURN relay is what makes connections succeed behind symmetric /
+        # carrier-grade NAT where STUN alone fails. Priority order matters
+        # because aiortc consumes only the first TURN URL: an explicitly
+        # configured relay wins, then whatever the signaling server minted for
+        # us, then the public fallback.
         if url:
             servers.append(RTCIceServer(
                 urls=[url],
                 username=getattr(self.settings, "turn_username", "") or None,
                 credential=getattr(self.settings, "turn_password", "") or None,
             ))
+        servers.extend(self._server_ice)
         # Optimized fallback: only inject free relay when NAT demands it or user has
         # no TURN at all and we're in a strict-NAT scenario. Cheap STUN stays always,
         # TURN (which costs gathering time) is added lazily to avoid penalizing easy NATs.
@@ -949,10 +1085,13 @@ class WebRTCEngine:
                 needs_relay = True
         except Exception:
             pass
-        if (force_relay or needs_relay) and not url:
+        # A server-minted relay already covers the strict-NAT case; the public
+        # fallback only exists for deployments with no TURN provider at all.
+        have_relay = bool(url) or bool(self._server_ice)
+        if (force_relay or needs_relay) and not have_relay:
             # Only once, avoid duplicating if already added
             servers.extend(_FALLBACK_TURN_SERVERS)
-        elif not url and getattr(self.settings, "turn_fallback_enabled", True):
+        elif not have_relay and getattr(self.settings, "turn_fallback_enabled", True):
             # Light fallback: add TCP/443 TURN even without strict detection so UDP-blocked
             # networks still gather a relay candidate in parallel (~300ms extra, parallel)
             # This is the enterprise-firewall bypass. Guarded by setting to keep low-perf opt-out.
@@ -982,10 +1121,11 @@ class WebRTCEngine:
                     if any(url.startswith(("turn:", "turns:")) for url in server.urls)
                 ]
                 if relay_servers:
-                    return RTCConfiguration(iceServers=relay_servers)
+                    return RTCConfiguration(
+                        iceServers=_select_for_aiortc(relay_servers, self._ice_attempt))
         except Exception:
             pass
-        return RTCConfiguration(iceServers=servers)
+        return RTCConfiguration(iceServers=_select_for_aiortc(servers, self._ice_attempt))
 
     async def detect_nat(self) -> dict:
         """Probe NAT behaviour (RFC 5780) off the event loop and cache the result.
@@ -1448,6 +1588,11 @@ class WebRTCEngine:
                 self.on_state_change(peer, state)
 
             if state == "failed":
+                # aiortc uses a single TURN URL per peer connection, so a failure
+                # may just mean this transport is blocked (UDP on a locked-down
+                # network). Advance the rotation so the healing attempt gathers
+                # against the next relay URL - TCP, then TLS/443.
+                self._ice_attempt += 1
                 # Signaling may still be alive - attempt self-healing renegotiation
                 # before giving up. Retain allocated port for subsequent ICE restart.
                 if self._send_ws is not None:
@@ -2689,7 +2834,8 @@ class WebRTCEngine:
             pass
 
     async def request_negotiation(self, peer: str) -> None:
-        if self._is_negotiating.get(peer):
+        pc = self.pcs.get(peer)
+        if (pc and getattr(pc, "signalingState", "stable") != "stable") or self._is_negotiating.get(peer):
             self._neg_dirty[peer] = True
             return
         self._is_negotiating[peer] = True
@@ -2697,7 +2843,8 @@ class WebRTCEngine:
             await self._do_negotiation(peer)
         finally:
             self._is_negotiating[peer] = False
-            if self._neg_dirty.pop(peer, False):
+            if self._neg_dirty.get(peer) and (not pc or getattr(pc, "signalingState", "stable") == "stable"):
+                self._neg_dirty.pop(peer, False)
                 await self.request_negotiation(peer)
 
     # ------------------------------------------------------------------
@@ -2781,14 +2928,22 @@ class WebRTCEngine:
         peer = sender or self.target_peer
         print(f"[rtc] {self.my_username}: RECEIVED answer from {peer}", flush=True)
         if peer in self.pcs:
+            pc = self.pcs[peer]
+            if getattr(pc, "signalingState", "") != "have-local-offer":
+                print(f"[rtc] {self.my_username}: ignoring redundant answer from {peer} (state={getattr(pc, 'signalingState', None)})", flush=True)
+                return
             try:
-                await self.pcs[peer].setRemoteDescription(
+                await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=data["sdp"], type="answer")
                 )
                 print(f"[rtc] {self.my_username}: applied answer from {peer}", flush=True)
             except Exception as ex:
                 self.last_error = f"answer from {peer}: {type(ex).__name__}"
                 print(f"[rtc] {self.my_username}: handle_answer FAILED for {peer}: {type(ex).__name__}: {ex}", flush=True)
+                return
+
+            if self._neg_dirty.pop(peer, False):
+                await self.request_negotiation(peer)
 
     async def handle_ice(self, data: dict, sender: str = "") -> None:
         """Apply a trickled ICE candidate from a peer (defensive - aiortc itself

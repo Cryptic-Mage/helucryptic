@@ -18,12 +18,126 @@ const ROOM_MAX = 4;
 
 export default {
   async fetch(request, env) {
+    // TURN credentials are a plain HTTP request - they need no hub state, so
+    // they never touch the Durable Object.
+    if (new URL(request.url).pathname === "/turn") {
+      return handleTurn(request, env);
+    }
     // Route every connection to the same hub instance.
     const id = env.SIGNAL_HUB.idFromName("global");
     const stub = env.SIGNAL_HUB.get(id);
     return stub.fetch(request);
   },
 };
+
+// ---------------------------------------------------------------------------
+// TURN credential minting (1:1 port of turn_provider.py - keep both in sync).
+//
+// Peers behind CGNAT / symmetric NAT have no direct UDP path to each other, so
+// a relay is the only way media and file transfer cross the WAN. The secret
+// that mints relay credentials lives in Worker secrets, never in the shipped
+// desktop client, and what the client receives expires within a day.
+//
+// Provider is chosen by whichever secrets are set (first match wins):
+//   cloudflare - CF_TURN_KEY_ID + CF_TURN_API_TOKEN   (Cloudflare Realtime TURN)
+//   hmac       - TURN_URL + TURN_STATIC_SECRET        (coturn use-auth-secret)
+//   static     - TURN_URL + TURN_PASSWORD             (hosted provider creds)
+// ---------------------------------------------------------------------------
+const TURN_TTL_SECONDS = 24 * 3600;
+
+function turnProviderMode(env) {
+  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) return "cloudflare";
+  if (env.TURN_URL && env.TURN_STATIC_SECRET) return "hmac";
+  if (env.TURN_URL && env.TURN_PASSWORD) return "static";
+  return "none";
+}
+
+function turnUrlList(raw) {
+  return String(raw || "").split(",").map((u) => u.trim()).filter(Boolean);
+}
+
+// coturn REST API: username is "<expiry>:<label>", password is
+// base64(HMAC-SHA1(secret, username)).
+async function hmacCredentials(secret, ttl, label) {
+  const username = `${Math.floor(Date.now() / 1000) + ttl}:${label}`;
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-1" }, false, ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(username));
+  const credential = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return { username, credential };
+}
+
+async function cloudflareIceServers(env, ttl) {
+  const resp = await fetch(
+    `https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate-ice-servers`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.CF_TURN_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttl }),
+    },
+  );
+  if (!resp.ok) throw new Error(`cloudflare turn ${resp.status}`);
+  const payload = await resp.json();
+  // The API has returned both a bare object and a list across versions.
+  let servers = payload.iceServers;
+  if (servers && !Array.isArray(servers)) servers = [servers];
+  if (!Array.isArray(servers) || servers.length === 0) {
+    throw new Error("cloudflare turn: no iceServers");
+  }
+  const out = [];
+  for (const s of servers) {
+    let urls = s.urls || s.url;
+    if (typeof urls === "string") urls = [urls];
+    if (!urls || urls.length === 0) continue;
+    const entry = { urls };
+    if (s.username) entry.username = s.username;
+    if (s.credential) entry.credential = s.credential;
+    out.push(entry);
+  }
+  if (out.length === 0) throw new Error("cloudflare turn: no usable URLs");
+  return out;
+}
+
+async function handleTurn(request, env) {
+  const url = new URL(request.url);
+  const expected = env.SERVER_PASSWORD || "";
+  if (expected && (url.searchParams.get("password") || "") !== expected) {
+    return new Response("Invalid server access password.", { status: 403 });
+  }
+  const ttl = TURN_TTL_SECONDS;
+  const mode = turnProviderMode(env);
+  let iceServers = [];
+  try {
+    if (mode === "cloudflare") {
+      iceServers = await cloudflareIceServers(env, ttl);
+    } else if (mode === "hmac") {
+      const { username, credential } = await hmacCredentials(
+        env.TURN_STATIC_SECRET, ttl, "helucryptic");
+      iceServers = [{ urls: turnUrlList(env.TURN_URL), username, credential }];
+    } else if (mode === "static") {
+      iceServers = [{
+        urls: turnUrlList(env.TURN_URL),
+        username: env.TURN_USERNAME || "",
+        credential: env.TURN_PASSWORD || "",
+      }];
+    }
+  } catch (err) {
+    return new Response("TURN provider unavailable.", { status: 503 });
+  }
+  return new Response(JSON.stringify({ iceServers, ttl, provider: mode }), {
+    headers: {
+      "Content-Type": "application/json",
+      // Credentials are per-deployment, not per-user, but they expire - let a
+      // proxy hold them only for a fraction of their lifetime.
+      "Cache-Control": `private, max-age=${Math.max(60, Math.floor(ttl / 4))}`,
+    },
+  });
+}
 
 // Sliding-window rate limiting constants (mirrors server.py).
 const MSG_WINDOW_MS = 10_000;  // 10 s

@@ -2233,6 +2233,11 @@ class HelucrypticApp:
                     self._fire_and_forget(self._broadcast_capability(ws_send))
             # Probe NAT behaviour only once session is authenticated and confirmed
             self._fire_and_forget(self.engine.detect_nat())
+            # Pull relay credentials from the same server. Peers behind CGNAT /
+            # symmetric NAT have no direct UDP path, so this is what makes calls
+            # and file transfer work across the WAN rather than only on a LAN.
+            self._fire_and_forget(self.engine.refresh_server_ice(
+                self.settings.signaling_url, self._server_password))
         elif t == "presence":
             # Server-confirmed online set for our contacts.
             self._apply_presence(data.get("online", []))
