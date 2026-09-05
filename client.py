@@ -609,7 +609,7 @@ class HelucrypticApp:
                                               style=_ghost_style())
         self.btn_import_id    = ft.TextButton("Import from code", on_click=self._show_import_identity,
                                               style=_ghost_style())
-        self.username_input   = _neon_field(label="Your username", width=210)
+        self.username_input   = _neon_field(label="Your username", width=210, on_submit=self._connect_signaling)
         self.btn_connect      = ft.FilledButton("Connect", icon=ft.Icons.BOLT,
                                                 on_click=self._connect_signaling, width=210,
                                                 style=_filled_style(C.CYAN))
@@ -2493,6 +2493,9 @@ class HelucrypticApp:
             self._invite_creator_pub = info.get("creator_ed25519_pub")
             self._close_dialog(dlg)
             self._fire_and_forget(self._join_room(info["room_id"], is_creator=False))
+
+        if not info.get("password") and pw_field is not None:
+            pw_field.on_submit = do_join
 
         dlg = ft.AlertDialog(
             title=ft.Text("Join room?"),
@@ -5315,15 +5318,18 @@ class StartupScreen:
     def _build(self) -> None:
         self._pw_field  = _neon_field(
             label="Password", value="", password=True, can_reveal_password=True, width=300,
+            on_submit=self._connect,
         )
         self._pw_error  = ft.Text("", color=C.RED, size=11, visible=False)
         self._url_field = _neon_field(
             label="Server URL", value=SCHEME_WS, width=300,
             hint_text="ws://your-server-ip:8000",
+            on_submit=self._connect,
         )
         self._custom_pw_field = _neon_field(
             label="Server password (optional)", value="", password=True, can_reveal_password=True,
             width=300,
+            on_submit=self._connect,
         )
         self._url_error = ft.Text("", color=C.RED, size=11, visible=False)
 
