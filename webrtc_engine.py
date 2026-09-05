@@ -9,6 +9,8 @@ import queue as _queue
 import tempfile
 import threading
 import time as _time
+import urllib.parse
+import urllib.request
 import uuid as _uuid
 from collections import deque
 from collections.abc import Callable
@@ -149,8 +151,6 @@ def _http_url_for(signaling_url: str) -> str:
 
 
 def _fetch_ice_blocking(signaling_url: str, password: str, timeout: float) -> dict:
-    import urllib.parse
-    import urllib.request
     base = _http_url_for(signaling_url)
     query = ("?" + urllib.parse.urlencode({"password": password})) if password else ""
     req = urllib.request.Request(f"{base}/turn{query}", headers={"Accept": "application/json"})
