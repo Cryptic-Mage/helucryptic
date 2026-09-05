@@ -1259,6 +1259,12 @@ class HelucrypticApp:
         if mod and key.lower() == "k":
             self._close_palette() if getattr(self, "_palette_open", False) else self._open_palette()
         elif key == "Escape":
+            if getattr(self, "screen_overlay", None) and self.screen_overlay.visible:
+                self._close_fullscreen()
+                return
+            if getattr(self, "pip_overlay", None) and self.pip_overlay.visible:
+                self._close_fullscreen()
+                return
             if getattr(self, "_palette_open", False):
                 self._close_palette()
                 return
@@ -3367,6 +3373,10 @@ class HelucrypticApp:
         self._update_chat_header_contact(username)  # show selected conversation as context
         self._update_main_view()                  # leave home → show conversation
         self.page.update()
+        try:
+            self.msg_input.focus()
+        except Exception:
+            pass
         # In 1-to-1 mode, selecting an online contact establishes the P2P link
         # (data channel) so you can chat/call without a separate step.
         if self.ws and not self._room_id and username not in self.engine.pcs:
@@ -4869,8 +4879,8 @@ class HelucrypticApp:
                 self._settings_profile_dd, self._settings_overclock_warn,
                 ft.Container(height=1, bgcolor=C.BORDER),
                 self._settings_noise_reduce_cb,
-                ft.Text("Denoising uses roughly one CPU core during calls - turn it "
-                        "off on slow machines. Applies to your next call.",
+                ft.Text("Cleans persistent background noise and room hiss in real time "
+                        "without voice distortion. Applies to your next call.",
                         size=11, color=C.MUTED),
             ]),
             ("TURN relay", ft.Icons.ROUTER, C.CYAN,
