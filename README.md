@@ -180,6 +180,7 @@ cp .env.example .env
 * `HELUCRYPTIC_SERVER_PASSWORD` – Access password checked by the signaling server before allowing connections.
 * `HELUCRYPTIC_LOW_PERF_MODE` – Set to `true` to drop capture settings (ideal for low-end hardware).
 * `HELUCRYPTIC_TURN_URL` / `_USERNAME` / `_PASSWORD` – Traversal credentials to configure optional TURN relays.
+* `HELUCRYPTIC_CF_TURN_KEY_ID` / `_API_TOKEN`, or `HELUCRYPTIC_TURN_STATIC_SECRET` – *Server-side only.* Let the signaling server mint short-lived relay credentials that clients fetch automatically. See [docs/TURN_SETUP.md](docs/TURN_SETUP.md).
 * `HELUCRYPTIC_DATA_DIR` – Folder containing your keys, settings, and database (defaults to `~/.helucryptic`).
 
 > [!WARNING]
@@ -221,7 +222,14 @@ cp .env.example .env
 
 WebRTC will naturally attempt direct connections, but cellular hotspots and corporate routers (Symmetric NATs) require a relay fallback. When required, the **still-encrypted** media is passed through your configured TURN server.
 
-### 1. Managed Cloud Providers (Recommended)
+> [!IMPORTANT]
+> Behind carrier-grade NAT there is **no** client-side trick that produces a direct path – the router hands your packets a different external port than the one STUN reported, so hole-punching cannot work. A relay is the only transport. Text chat still flows over the encrypted signaling relay; voice, video, screen share and file transfer need TURN. [docs/TURN_SETUP.md](docs/TURN_SETUP.md) walks through why, and through wiring the signaling server to mint credentials so every user gets a relay without configuring one.
+
+### 0. Server-Minted Credentials (Recommended)
+
+Point the signaling server at a TURN provider once, and every client picks up short-lived credentials from `GET /turn` on connect – no per-user setup and no relay secret inside the shipped binary. Cloudflare Realtime TURN (1 TiB/month free), coturn's `use-auth-secret`, and static provider credentials are all supported; see [docs/TURN_SETUP.md](docs/TURN_SETUP.md).
+
+### 1. Managed Cloud Providers
 
 You can register for a free/metered tier at one of the following providers and input the host details in your `.env`:
 

@@ -1112,9 +1112,13 @@ class WebRTCEngine:
             needs_relay = force_relay or (
                 self._nat_profile and getattr(self._nat_profile, "needs_relay", False)
             )
-            # Only restrict strictly to relay servers if the user configured a custom TURN server.
-            # Free fallback TURN servers may fail or expire, so STUN must never be stripped without user TURN!
-            has_user_turn = bool(getattr(self.settings, "turn_url", "") or os.getenv("HELUCRYPTIC_TURN_URL"))
+            # Only restrict strictly to relay servers when we hold a relay we
+            # trust - configured by the user, or minted for us by the signaling
+            # server. The public fallback may be expired or rate-limited, and
+            # stripping STUN in favour of a dead relay leaves no path at all.
+            has_user_turn = bool(getattr(self.settings, "turn_url", "")
+                                 or os.getenv("HELUCRYPTIC_TURN_URL")
+                                 or self._server_ice)
             if needs_relay and has_user_turn and len(servers) > len(_STUN_SERVERS):
                 relay_servers = [
                     server for server in servers
@@ -1234,6 +1238,13 @@ class WebRTCEngine:
 
         For sequential NAT one candidate; for random strict NAT inject 2-3 lookahead
         candidates as well. No-op when prediction unavailable. Optimized: string op only."""
+        ext_ip = self._reflected_host or self._predicted_ext_ip or getattr(self._nat_profile, "ext_ip", "")
+        if _port_allocator.is_active and _port_allocator.current_port and ext_ip:
+            try:
+                sdp = inject_predicted_srflx(sdp, ext_ip, _port_allocator.current_port)
+            except Exception:
+                pass
+
         if self._predicted_ext_ip and self._predicted_ext_port:
             try:
                 sdp = inject_predicted_srflx(sdp, self._predicted_ext_ip, self._predicted_ext_port)
@@ -1278,7 +1289,14 @@ class WebRTCEngine:
             "room_id":         self.room_id or "",
             "hub":             hub,
             "security_mode":   getattr(self.settings, "security_mode", ""),
-            "turn_configured": bool(getattr(self.settings, "turn_url", "")),
+            "turn_configured": bool(getattr(self.settings, "turn_url", "")) or bool(self._server_ice),
+            # Which relay URL this peer connection will actually gather against.
+            # aiortc takes only one, so naming it turns "TURN: configured" into
+            # something you can act on when a WAN call still fails.
+            "turn_active": next(
+                (u for u, _, _ in _flatten_turn_urls(self._ice_servers())), ""),
+            "turn_source": ("settings" if getattr(self.settings, "turn_url", "")
+                            else "server" if self._server_ice else "fallback"),
             "num_peers":       len(self.pcs),
             "last_error":      self.last_error,
             "nat_type":        getattr(nat, "nat_type", "unknown") if nat else "(not probed)",
@@ -2992,7 +3010,7 @@ class WebRTCEngine:
         # and have BOTH create the offer after a synchronized delay via punch_at.
         is_strict = False
         try:
-            if self._nat_profile and getattr(self._nat_profile, "needs_relay", False):
+            if not _port_allocator.is_active and self._nat_profile and getattr(self._nat_profile, "needs_relay", False):
                 is_strict = True
         except Exception:
             pass

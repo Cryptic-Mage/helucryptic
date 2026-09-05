@@ -4167,7 +4167,9 @@ class HelucrypticApp:
             f"Security   : {d['security_mode']}",
             f"Room       : {d['room_id'] or '(none)'}"
             + (f'   hub={d["hub"] or "?"}' if d["room_id"] else ""),
-            f"TURN       : {'configured' if d['turn_configured'] else 'not configured'}",
+            f"TURN       : {'configured' if d['turn_configured'] else 'not configured'}"
+            + (f"  [{d.get('turn_source')}] {_redact_url(d.get('turn_active', ''))}"
+               if d.get('turn_active') else ""),
             f"NAT type   : {d.get('nat_type', '(not probed)')}"
             + (f"  ({d['nat_summary']})" if d.get('nat_summary') else ""),
             f"Predicted  : {d.get('predicted_srflx') or '(none)'}",
