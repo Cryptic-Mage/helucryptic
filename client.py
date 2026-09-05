@@ -241,6 +241,7 @@ class HelucrypticApp:
         self._reflected_port: int              = 0
         # Prevents overlapping auto-reconnect attempts after an unexpected drop.
         self._ws_reconnect_active: bool        = False
+        self._auth_failed: bool                = False
         # Incoming-video render throttle (per sender) + encode quality. Lower in
         # low-perf mode so old PCs aren't swamped by JPEG re-encode + repaint.
         self._last_tile_render: dict[str, float] = {}
@@ -1895,6 +1896,7 @@ class HelucrypticApp:
         self.engine.my_username = uname
         url, safe_url = self._build_signaling_url(uname, room)
 
+        self._auth_failed = False
         print(f"[connect] dialing {safe_url}", flush=True)
         if self.ws:
             try:
@@ -1915,13 +1917,18 @@ class HelucrypticApp:
             sounds.play("reactivated")
             self._fire_and_forget(self._signaling_listener())
             self._fire_and_forget(self._query_presence())   # immediate presence refresh
-            # Probe NAT behaviour once per connect (best-effort, off the UI
-            # thread). Result feeds symmetric-NAT port prediction + diagnostics.
-            self._fire_and_forget(self.engine.detect_nat())
         except Exception as ex:
-            self.engine.last_error = f"signaling: {type(ex).__name__}"
-            self._toast(f"Cannot reach server: {ex}", "error")
-            print(f"[connect] FAILED: {type(ex).__name__}: {ex}", flush=True)
+            status = getattr(ex, "status_code", None)
+            err_text = str(ex)
+            if status in (401, 403) or "403" in err_text or "Invalid server access password" in err_text:
+                self._auth_failed = True
+                self.engine.last_error = "signaling: access denied (invalid password)"
+                self._toast("Server access denied: Invalid server password.", "error")
+                print(f"[connect] Authentication failed: {ex}", flush=True)
+            else:
+                self.engine.last_error = f"signaling: {type(ex).__name__}"
+                self._toast(f"Cannot reach server: {ex}", "error")
+                print(f"[connect] FAILED: {type(ex).__name__}: {ex}", flush=True)
 
     async def _signaling_listener(self) -> None:
         # Bind to THIS socket: if _connect_signaling replaces self.ws while we
@@ -1959,14 +1966,20 @@ class HelucrypticApp:
                 # closing; don't tear down the fresh session's state.
                 return
             self._cleanup_signaling_disconnect(ex)
-            _dropped_unexpectedly = True
+            close_code = getattr(ws, "close_code", None)
+            if self._auth_failed or close_code == 1008:
+                _dropped_unexpectedly = False
+                print(f"[signaling] Authentication rejected by server (code={close_code}). Auto-reconnect aborted.", flush=True)
+            else:
+                _dropped_unexpectedly = True
         finally:
             # Auto-reconnect after an unexpected drop - for rooms AND 1-to-1
             # sessions (previously only rooms recovered; a 1-to-1 chat went
             # silently dead until the user clicked Connect again).
             if (_dropped_unexpectedly and self.ws is ws
                     and (self._room_id or self.engine.my_username)
-                    and not self._ws_reconnect_active):
+                    and not self._ws_reconnect_active
+                    and not self._auth_failed):
                 self._fire_and_forget(self._ws_reconnect_loop())
 
     async def _ws_reconnect_loop(self) -> None:
@@ -1974,13 +1987,17 @@ class HelucrypticApp:
         Backs off exponentially (2 s → 4 s → … → 30 s) and exits as soon as the
         connection is restored. Works for rooms (re-joins the room) and for
         plain 1-to-1 sessions (re-registers the username)."""
-        if self._ws_reconnect_active:
+        if self._ws_reconnect_active or self._auth_failed:
             return
         self._ws_reconnect_active = True
         delay = 2.0
         try:
             while True:
+                if self._auth_failed:
+                    return
                 await asyncio.sleep(delay)
+                if self._auth_failed:
+                    return
                 # Another path (user action or parallel loop) already reconnected.
                 if self.ws is not None:
                     try:
@@ -2059,6 +2076,13 @@ class HelucrypticApp:
 
     def _handle_sig_error(self, msg: dict, data) -> None:
         msg_text = data if isinstance(data, str) else msg.get("error", str(data))
+        text_lower = str(msg_text).lower()
+        if "password" in text_lower or "auth" in text_lower or "access denied" in text_lower:
+            self._auth_failed = True
+            self.engine.last_error = f"signaling: {msg_text}"
+            self._toast(f"Authentication failed: {msg_text}", "error")
+            print(f"[signaling] Server reported auth error: {msg_text}", flush=True)
+            return
         match = _re.search(r"User '(.+?)' is offline", msg_text)
         if match:
             username = match.group(1)
@@ -2154,6 +2178,8 @@ class HelucrypticApp:
                 self.engine.set_reflected_host(self._reflected_host)
                 if self._room_id:
                     self._fire_and_forget(self._broadcast_capability(ws_send))
+            # Probe NAT behaviour only once session is authenticated and confirmed
+            self._fire_and_forget(self.engine.detect_nat())
         elif t == "presence":
             # Server-confirmed online set for our contacts.
             self._apply_presence(data.get("online", []))
@@ -5041,15 +5067,72 @@ def _to_ws_url(base: str) -> str:
     return base
 
 
+async def check_signaling_auth(base_url: str, password: str = "", timeout: float = 6.0) -> tuple[bool, str]:
+    """Validate server connectivity and credentials with a transient probe."""
+    import secrets as _secrets
+    import json as _json
+    import urllib.parse as _urllib_parse
+
+    ws_base = _to_ws_url(base_url).rstrip("/")
+    probe_id = f"_probe_{_secrets.token_hex(4)}"
+    params = {}
+    if password:
+        params["password"] = password
+    query = ("?" + _urllib_parse.urlencode(params)) if params else ""
+    full_url = f"{ws_base}/ws/{probe_id}{query}"
+
+    try:
+        ws = await websockets.connect(
+            full_url,
+            open_timeout=timeout,
+            close_timeout=2.0,
+            ping_interval=None,
+        )
+    except Exception as ex:
+        err_msg = str(ex)
+        status = getattr(ex, "status_code", None)
+        if status in (401, 403) or "403" in err_msg or "Invalid server access password" in err_msg:
+            return False, "Invalid server access password."
+        if status == 429 or "429" in err_msg:
+            return False, "Rate limit reached. Please wait a moment."
+        return False, f"Cannot reach server: {ex}"
+
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=3.5)
+        try:
+            msg = _json.loads(raw)
+        except Exception:
+            msg = {}
+        msg_type = msg.get("type", "")
+        if msg_type == "error":
+            err = msg.get("data") or msg.get("error") or "Authentication failed"
+            return False, str(err)
+        return True, ""
+    except asyncio.TimeoutError:
+        return True, ""
+    except Exception as ex:
+        close_code = getattr(ws, "close_code", None)
+        if close_code == 1008 or "1008" in str(ex):
+            return False, "Invalid server access password."
+        return False, f"Server handshake failed: {ex}"
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Startup screen
 # ---------------------------------------------------------------------------
 
 class StartupScreen:
     def __init__(self, page: ft.Page, on_done):
-        self.page      = page
-        self.on_done   = on_done
-        self._selected = "a"
+        self.page         = page
+        self.on_done      = on_done
+        self._selected    = "a"
+        self._verify_fn   = check_signaling_auth
+        self._connect_btn = None
         self._build()
 
     def _select_a(self, e) -> None:
@@ -5070,8 +5153,8 @@ class StartupScreen:
                 self._pw_error.visible = True
                 self.page.update()
                 return
-            sounds.play("authorized")
-            self.on_done(HELUCRYPTIC_SERVER_URL, pw)
+            target_url = HELUCRYPTIC_SERVER_URL
+            target_pw  = pw
         else:
             url = self._url_field.value.strip()
             if not url.startswith((SCHEME_WS, SCHEME_WSS, SCHEME_HTTP, SCHEME_HTTPS)):
@@ -5079,8 +5162,66 @@ class StartupScreen:
                 self._url_error.visible = True
                 self.page.update()
                 return
-            # Store normalized to a WebSocket scheme (https -> wss, http -> ws)
-            self.on_done(_to_ws_url(url), self._custom_pw_field.value or "")
+            target_url = _to_ws_url(url)
+            target_pw  = self._custom_pw_field.value or ""
+
+        if self._verify_fn is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                return loop.create_task(self._do_verify_and_connect(target_url, target_pw))
+            except RuntimeError:
+                return asyncio.run(self._do_verify_and_connect(target_url, target_pw))
+        else:
+            sounds.play("authorized")
+            self.on_done(target_url, target_pw)
+
+    async def _do_verify_and_connect(self, target_url: str, target_pw: str) -> None:
+        if self._connect_btn:
+            self._connect_btn.disabled = True
+            self._connect_btn.text = "Verifying…"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+        try:
+            ok, err = await self._verify_fn(target_url, target_pw)
+            if not ok:
+                if self._selected == "a":
+                    self._pw_error.value   = err
+                    self._pw_error.visible = True
+                else:
+                    self._url_error.value   = err
+                    self._url_error.visible = True
+                if self._connect_btn:
+                    self._connect_btn.disabled = False
+                    self._connect_btn.text = "Connect"
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+                return
+        except Exception as ex:
+            if self._selected == "a":
+                self._pw_error.value   = f"Connection check failed: {ex}"
+                self._pw_error.visible = True
+            else:
+                self._url_error.value   = f"Connection check failed: {ex}"
+                self._url_error.visible = True
+            if self._connect_btn:
+                self._connect_btn.disabled = False
+                self._connect_btn.text = "Connect"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+            return
+
+        if self._connect_btn:
+            self._connect_btn.disabled = False
+            self._connect_btn.text = "Connect"
+        sounds.play("authorized")
+        self.on_done(target_url, target_pw)
 
     async def _reveal_entrance(self) -> None:
         try:
@@ -5096,7 +5237,7 @@ class StartupScreen:
 
     def _build(self) -> None:
         self._pw_field  = _neon_field(
-            label="Password", password=True, can_reveal_password=True, width=300,
+            label="Password", value=config.SERVER_PASSWORD, password=True, can_reveal_password=True, width=300,
         )
         self._pw_error  = ft.Text("", color=C.RED, size=11, visible=False)
         self._url_field = _neon_field(
@@ -5104,7 +5245,7 @@ class StartupScreen:
             hint_text="ws://your-server-ip:8000",
         )
         self._custom_pw_field = _neon_field(
-            label="Server password (optional)", password=True, can_reveal_password=True,
+            label="Server password (optional)", value=config.SERVER_PASSWORD, password=True, can_reveal_password=True,
             width=300,
         )
         self._url_error = ft.Text("", color=C.RED, size=11, visible=False)
@@ -5188,6 +5329,7 @@ class StartupScreen:
             "Connect", icon=ft.Icons.BOLT, on_click=self._connect, width=220,
             style=_filled_style(C.CYAN, C.BTN_CYAN, pad_v=14),
         )
+        self._connect_btn = connect_btn
 
         panel = ft.Container(
             opacity=0, scale=0.97,

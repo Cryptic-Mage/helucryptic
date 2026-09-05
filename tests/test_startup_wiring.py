@@ -105,6 +105,7 @@ async def test_startup_screen_connect_validation_a():
     page = FakePage()
     done_called = []
     screen = client.StartupScreen(page, on_done=lambda url, pw: done_called.append((url, pw)))
+    screen._verify_fn = None
     
     # Empty password should set error
     screen._pw_field.value = ""
@@ -116,6 +117,43 @@ async def test_startup_screen_connect_validation_a():
     screen._pw_field.value = "my_password"
     screen._connect(None)
     assert done_called == [(client.HELUCRYPTIC_SERVER_URL, "my_password")]
+
+
+@pytest.mark.asyncio
+async def test_startup_screen_with_verification():
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+        def add(self, *a, **k):
+            pass
+        def update(self, *a, **k):
+            pass
+
+    page = FakePage()
+    done_called = []
+    screen = client.StartupScreen(page, on_done=lambda url, pw: done_called.append((url, pw)))
+    screen._pw_field.value = "wrong_pw"
+
+    # 1. Verify failure prevents on_done and displays error
+    async def mock_fail(url, pw):
+        return False, "Invalid server access password."
+    screen._verify_fn = mock_fail
+    task = screen._connect(None)
+    if task:
+        await task
+    assert screen._pw_error.visible is True
+    assert screen._pw_error.value == "Invalid server access password."
+    assert len(done_called) == 0
+
+    # 2. Verify success proceeds to on_done
+    async def mock_ok(url, pw):
+        return True, ""
+    screen._verify_fn = mock_ok
+    screen._pw_field.value = "good_pw"
+    task = screen._connect(None)
+    if task:
+        await task
+    assert done_called == [(client.HELUCRYPTIC_SERVER_URL, "good_pw")]
 
 
 @pytest.mark.asyncio
@@ -131,6 +169,7 @@ async def test_startup_screen_connect_validation_b():
     page = FakePage()
     done_called = []
     screen = client.StartupScreen(page, on_done=lambda url, pw: done_called.append((url, pw)))
+    screen._verify_fn = None
     screen._select_b(None)
 
     # Invalid URL scheme
@@ -144,6 +183,25 @@ async def test_startup_screen_connect_validation_b():
     screen._custom_pw_field.value = "custom_pw"
     screen._connect(None)
     assert done_called == [("ws://localhost:8000", "custom_pw")]
+
+
+def test_auth_error_flags_and_toasts():
+    import client
+
+    class FakeApp:
+        def __init__(self):
+            self._auth_failed = False
+            self.engine = type("Engine", (object,), {"last_error": ""})()
+            self.toasts = []
+
+        def _toast(self, msg, level):
+            self.toasts.append((msg, level))
+
+    app = FakeApp()
+    client.HelucrypticApp._handle_sig_error(app, {}, "Invalid server access password.")
+    assert app._auth_failed is True
+    assert len(app.toasts) == 1
+    assert "Authentication failed" in app.toasts[0][0]
 
 
 def test_offline_peer_cleanup_on_signaling_error(monkeypatch):
