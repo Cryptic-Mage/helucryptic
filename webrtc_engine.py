@@ -383,7 +383,7 @@ MAX_HELLO_SKEW_SECONDS = 24 * 3600
 # socket, so aioice's existing STUN step auto-advertises the public mapping
 # (ExitIP:forwarded_port) as a srflx candidate - no candidate injection. The
 # feature is purely additive: if the bind fails or pool is exhausted, normal
-# gathering continues seamlessly with ephemeral ports.
+# gathering continues with ephemeral ports.
 
 class PortPoolAllocator:
     """Thread-safe port pool allocator for aioice datagram endpoint bindings.
@@ -431,7 +431,7 @@ class PortPoolAllocator:
 
     def allocate(self, pc_id: int | None = None) -> int | None:
         """Claim a port from the free pool. Returns None if pool is exhausted
-        (allowing seamless fallback to ephemeral port)."""
+        (aioice then falls back to an ephemeral port)."""
         with self._lock:
             if not self._active or not self._free:
                 return None

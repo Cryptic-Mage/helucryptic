@@ -1,16 +1,6 @@
-# Nuitka compile:
-# nuitka --standalone --onefile --include-package=aiortc --include-package=av
-#        --include-package=flet --include-package=cryptography --include-package=pyseto
-#        --include-package=sounddevice --include-package=mss --windows-disable-console
-#        client_claude.py
-#
 # ---------------------------------------------------------------------------
-# client_claude.py - a 100%-functionally-identical reskin of client.py with a
-# modern "neon cyber / crypto" UI and rich-but-tasteful motion. Every engine
-# call, signaling path, room/call/file flow and dialog from the original is
-# preserved byte-for-byte in behaviour; only the presentation layer (main
-# window, startup screen, chat bubbles, contact/participant tiles, video tiles,
-# status indicator, animated backdrop) is redesigned.
+# client.py - Desktop client for helucryptic.
+# End-to-end encrypted, peer-to-peer voice, video, text chat, and file sharing.
 # ---------------------------------------------------------------------------
 
 import asyncio
@@ -1435,9 +1425,9 @@ class HelucrypticApp:
             border=ft.Border.all(1, C.BORDER),
             content=ft.Column([
                 ft.Row([ft.Icon(ft.Icons.SHIELD_MOON, color=C.CYAN, size=15),
-                        ft.Text("Nothing to subpoena", size=12, color=C.TEXT,
+                        ft.Text("Direct P2P transport", size=12, color=C.TEXT,
                                 weight=ft.FontWeight.W_700)], spacing=8),
-                ft.Text("Messages never touch a server. This machine ↔ theirs.",
+                ft.Text("Traffic flows directly between peers after signaling.",
                         size=11, color=C.MUTED),
             ], spacing=6, tight=True),
         )
@@ -3152,15 +3142,14 @@ class HelucrypticApp:
                     self._refresh_contact_list()
                     self._close_dialog(menu)
 
-                menu.title = ft.Text("⚠ Fingerprint does NOT match")
+                menu.title = ft.Text("⚠ Fingerprint Mismatch")
                 menu.content = ft.Text(
-                    "If the fingerprint your contact reads out is different from the "
-                    "one shown, the encryption key is not theirs. That can mean a "
-                    "man-in-the-middle is intercepting the connection (or you compared "
-                    "the wrong code).\n\nThey've been left UNVERIFIED and Verified-Only "
-                    "mode is now ON, so nothing is sent to an unverified contact by "
-                    "mistake. Do not call or message them until you can re-exchange a "
-                    "fresh identity code over a trusted channel. You can remove them now.")
+                    "The fingerprint provided does not match this contact's key.\n\n"
+                    "This indicates a potential man-in-the-middle interception or an "
+                    "incorrect code comparison.\n\n"
+                    "The contact remains UNVERIFIED and Verified-Only mode is active. "
+                    "Do not exchange sensitive messages or calls until you verify a fresh "
+                    "identity code over a trusted channel.")
                 menu.actions = [
                     ft.TextButton("Remove contact", on_click=remove_and_close,
                                   style=ft.ButtonStyle(color=C.RED)),
@@ -4211,9 +4200,17 @@ class HelucrypticApp:
     def _render_diagnostics_state(self) -> str:
         d = self.engine.get_diagnostics()
         ws_status = "connected" if _is_ws_alive(self.ws) else "disconnected"
+        data_dir_str = str(paths.DATA_DIR)
+        try:
+            home = str(Path.home())
+            if data_dir_str.startswith(home):
+                data_dir_str = "~" + data_dir_str[len(home):]
+        except Exception:
+            pass
+
         lines = [
-            "helucryptic - client_claude",
-            f"Data dir   : {paths.DATA_DIR}"
+            "helucryptic client",
+            f"Data dir   : {data_dir_str}"
             + ("  (portable)" if paths.is_portable() else ""),
             f"Signaling  : {ws_status}",
             f"Server URL : {_redact_url(self.settings.signaling_url)}",

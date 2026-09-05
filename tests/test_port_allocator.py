@@ -27,7 +27,7 @@ def test_port_pool_allocator_basic_lifecycle():
     p2 = allocator.allocate(pc_id=102)
     assert p2 == 50001
 
-    # Pool exhausted -> returns None (seamless fallback to ephemeral)
+    # Pool exhausted -> returns None (falls back to ephemeral port)
     p3 = allocator.allocate(pc_id=103)
     assert p3 is None
 

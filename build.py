@@ -110,9 +110,13 @@ def main(argv: list[str]) -> int:
     else:
         print(f"[INFO] Building helucryptic (signaling: {url or 'default'})")
 
+    bundle_env = "--bundle-env" in argv
     datas = [("tracks", "tracks"), ("icon.ico", ".")]
-    if env_file.exists():
+    if bundle_env and env_file.exists():
+        print("[WARN] Embedding .env secrets directly into executable (--bundle-env).")
         datas.append((".env", "."))
+    elif env_file.exists():
+        print("[INFO] Skipping .env bundling into executable to prevent secret leaks. Use --bundle-env to include.")
 
     cmd = [
         str(py), "-m", "PyInstaller",

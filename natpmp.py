@@ -3,8 +3,7 @@
 Pure stdlib sockets - no extra dependency, safe to bundle with PyInstaller.
 
 Used to discover and keep alive a forwarded port (e.g. Proton VPN P2P port
-forwarding) so WebRTC can bind its ICE socket to it. See
-``docs/superpowers/specs/2026-06-02-vpn-forwarded-port-design.md``.
+forwarding) so WebRTC can bind its ICE socket to it.
 """
 import asyncio
 import logging
