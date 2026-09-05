@@ -8,9 +8,12 @@ the peer's messages showed "[decryption failed]" and incoming calls never rang.
 Desired behaviour:
 - UNVERIFIED (trust-on-first-use) contact re-keys  -> surface + re-pin (self-heal)
 - VERIFIED contact re-keys (possible MITM)         -> alert + abort, never accept
-- Garbage / tampered hello                          -> reject, no re-pin, no alert
 """
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 import pytest
 

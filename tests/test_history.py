@@ -1,5 +1,9 @@
 import sqlite3
-from datetime import UTC
+from datetime import timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 import pytest
 

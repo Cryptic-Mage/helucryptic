@@ -1,6 +1,10 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 from crypto import paseto_decrypt, paseto_encrypt
 from paths import DATA_DIR

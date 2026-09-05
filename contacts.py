@@ -1,6 +1,10 @@
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 from crypto import compute_fingerprint
 from paths import DATA_DIR, write_private_text

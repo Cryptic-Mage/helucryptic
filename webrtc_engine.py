@@ -27,9 +27,12 @@ except ImportError:
     cv2 = None
 
 # Pillow's BOX resampling is area-averaging - the equivalent of cv2.INTER_AREA
-# used for downscaling. Pillow replaces opencv here to keep the binary small.
 _BOX = getattr(Image, "Resampling", Image).BOX
-from datetime import UTC
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 from aiortc import (
     AudioStreamTrack,
@@ -1699,7 +1702,6 @@ class WebRTCEngine:
         if not self._send_ws or self.settings.security_mode != "e2ee":
             return
         try:
-            from datetime import UTC, datetime
             payload = {
                 "username":    self.my_username,
                 "x25519_pub":  self.keys["x25519_public"],

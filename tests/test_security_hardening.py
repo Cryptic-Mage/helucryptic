@@ -6,7 +6,11 @@
 - F-09 group key only from the room creator
 """
 import base64
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 
 import pytest
 

@@ -23,7 +23,11 @@ import string
 import sys
 import time
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from io import BytesIO
 from pathlib import Path
 
