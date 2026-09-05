@@ -1582,6 +1582,7 @@ class HelucrypticApp:
         self.engine.on_sent             = self._on_engine_sent
         self.engine.on_rtt              = self._on_engine_rtt
         self.engine.on_typing           = self._on_engine_typing
+        self.engine.on_peer_unverified  = self._on_engine_peer_unverified
 
     # --- Delivery ticks / RTT / typing (reliability made visible) ---------
 
@@ -1818,13 +1819,34 @@ class HelucrypticApp:
         self._last_tile_render[sender] = now
         self._fire_and_forget(self._update_video_tile(sender, img))
 
+    def _on_engine_peer_unverified(self, peer: str) -> None:
+        set_verified(peer, False)
+        self._session_allowed.discard(peer)
+        self._refresh_contact_list()
+        self._refresh_participant_list()
+        if self._active_contact == peer:
+            self._update_chat_header_contact(peer)
+        display = peer
+        c = get_contact(peer)
+        if c and c.nickname:
+            display = c.nickname
+        self._log(f"ℹ {display} unverified identity - verification reset on both sides.")
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
     def _on_engine_key_change(self, peer: str) -> None:
         # The contact's identity key changed after we had verified it -
         # surface a loud warning. The contact is already auto-unverified.
         # A changed key also revokes any temporary "allow for this session".
+        set_verified(peer, False)
         self._session_allowed.discard(peer)
         self._refresh_contact_list()
         self._refresh_participant_list()
+        if self._active_contact == peer:
+            self._update_chat_header_contact(peer)
+        self._fire_and_forget(self.engine.send_unverify(peer))
         display = peer
         c = get_contact(peer)
         if c and c.nickname:
@@ -3084,7 +3106,7 @@ class HelucrypticApp:
             menu.content = field
             menu.actions = [
                 ft.TextButton("Save",   on_click=save_rename),
-                ft.TextButton("Back",   on_click=show_main_menu),
+                ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(menu)),
             ]
             menu.update()
 
@@ -3094,16 +3116,34 @@ class HelucrypticApp:
                 set_verified(username, True)
                 self._refresh_contact_list()
                 self._refresh_participant_list()
+                if self._active_contact == username:
+                    self._update_chat_header_contact(username)
+                self._close_dialog(menu)
+
+            def unverify_and_close(ev):
+                set_verified(username, False)
+                self._session_allowed.discard(username)
+                self._refresh_contact_list()
+                self._refresh_participant_list()
+                if self._active_contact == username:
+                    self._update_chat_header_contact(username)
+                self._fire_and_forget(self.engine.send_unverify(username))
+                self._log(f"ℹ Verification removed for {c.nickname or username} (both parties synced).")
                 self._close_dialog(menu)
 
             def doesnt_match(ev):
                 set_verified(username, False)
                 self.settings.verified_only = True
                 save_settings(self.settings)
+                self._session_allowed.discard(username)
                 self._refresh_contact_list()
                 self._refresh_participant_list()
+                if self._active_contact == username:
+                    self._update_chat_header_contact(username)
+                self._fire_and_forget(self.engine.send_unverify(username))
 
                 def remove_and_close(ev2):
+                    self._fire_and_forget(self.engine.send_unverify(username))
                     delete_contact(username)
                     if self._active_contact == username:
                         self._active_contact = ""
@@ -3140,16 +3180,27 @@ class HelucrypticApp:
                         "(call, in person, Signal). Only mark verified if they match "
                         "exactly.", size=11, color=C.MUTED),
             ], tight=True, spacing=8)
-            menu.actions = [
-                ft.FilledButton("Matches - Verify", icon=ft.Icons.VERIFIED,
-                                on_click=mark_verified, style=_filled_style(C.GREEN, C.BTN_GREEN)),
-                ft.TextButton("Doesn't match", on_click=doesnt_match,
-                              style=ft.ButtonStyle(color=C.RED)),
-                ft.TextButton("Back", on_click=show_main_menu),
-            ]
+            if c.verified:
+                menu.actions = [
+                    ft.FilledButton("Unverify", icon=ft.Icons.VERIFIED_OUTLINED,
+                                    on_click=unverify_and_close,
+                                    style=_filled_style(C.YELLOW, C.MUTED)),
+                    ft.TextButton("Doesn't match", on_click=doesnt_match,
+                                  style=ft.ButtonStyle(color=C.RED)),
+                    ft.TextButton("Back", on_click=show_main_menu),
+                ]
+            else:
+                menu.actions = [
+                    ft.FilledButton("Matches - Verify", icon=ft.Icons.VERIFIED,
+                                    on_click=mark_verified, style=_filled_style(C.GREEN, C.BTN_GREEN)),
+                    ft.TextButton("Doesn't match", on_click=doesnt_match,
+                                  style=ft.ButtonStyle(color=C.RED)),
+                    ft.TextButton("Back", on_click=show_main_menu),
+                ]
             menu.update()
 
         def do_remove(e):
+            self._fire_and_forget(self.engine.send_unverify(username))
             delete_contact(username)
             if self._active_contact == username:
                 self._active_contact = ""
@@ -4479,6 +4530,7 @@ class HelucrypticApp:
         contacts = lc()
         for c in contacts:
             c.verified = False
+            self._fire_and_forget(self.engine.send_unverify(c.username))
         sc(contacts)
         self._log("[Keys] Identity keys regenerated. Contact verifications reset.")
         self._refresh_contact_list()

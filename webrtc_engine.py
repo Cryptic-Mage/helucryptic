@@ -115,6 +115,23 @@ def _flatten_turn_urls(servers: list) -> list[tuple[str, str | None, str | None]
     return out
 
 
+def _format_sdp_candidates(sdp: str) -> str:
+    """Extract candidate lines from SDP for diagnostic logging."""
+    items = []
+    for line in (sdp or "").splitlines():
+        if line.startswith("a=candidate:"):
+            parts = line[12:].strip().split()
+            if len(parts) >= 8:
+                proto = parts[2].lower()
+                ip = parts[4]
+                port = parts[5]
+                typ = parts[7]
+                items.append(f"{typ}:{proto}:{ip}:{port}")
+            else:
+                items.append(line[12:].strip())
+    return "[" + ", ".join(items) + "]" if items else "[]"
+
+
 def _select_for_aiortc(servers: list, attempt: int = 0) -> list:
     """Reduce a priority list to the one STUN + one TURN aiortc will actually use.
 
@@ -1085,6 +1102,7 @@ class WebRTCEngine:
         self.on_rtt:           Callable | None = None  # (peer: str, rtt_ms: float)
         self.on_sent:          Callable | None = None  # (peer, msg_id) - queued chat left the outbox
         self.on_typing:        Callable | None = None  # (peer: str) - peer is composing
+        self.on_peer_unverified: Callable | None = None  # (peer: str) - peer removed verification
 
         # --- Reliability layer (heartbeat + outbox + delivery acks) ----------
         # App-layer heartbeat: detects a logically-dead-but-"open" channel that
@@ -2065,6 +2083,11 @@ class WebRTCEngine:
                 # (possible MITM): alert the user and abort - never auto-accept.
                 if prior.verified:
                     print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
+                    try:
+                        from contacts import set_verified
+                        set_verified(peer, False)
+                    except Exception:
+                        pass
                     if self.on_key_change:
                         self.on_key_change(peer)
                     self._bg(self.remove_peer(peer))
@@ -2094,6 +2117,11 @@ class WebRTCEngine:
                 )
                 if key_changed:
                     print(f"[crypto] KEY CHANGED for verified contact {peer}! Aborting connection.", flush=True)
+                    try:
+                        from contacts import set_verified
+                        set_verified(peer, False)
+                    except Exception:
+                        pass
                     if self.on_key_change:
                         self.on_key_change(peer)
                     # Tear down the peer connection immediately
@@ -2387,6 +2415,14 @@ class WebRTCEngine:
 
         if t == "membership":
             await self._handle_membership(frame, peer)
+            return
+
+        if t == "unverify":
+            if self.on_peer_unverified:
+                try:
+                    self.on_peer_unverified(peer)
+                except Exception:
+                    pass
             return
 
         if t == "chat":
@@ -2737,6 +2773,22 @@ class WebRTCEngine:
             except Exception:
                 pass
 
+    async def send_unverify(self, peer: str) -> None:
+        """Notify peer that verification has been removed so both sides unverify in sync."""
+        payload = {"__type": "unverify"}
+        ch = self.data_channels.get(peer)
+        if ch and getattr(ch, "readyState", None) == "open":
+            try:
+                ch.send(json.dumps(payload))
+                return
+            except Exception:
+                pass
+        if self._send_ws is not None:
+            try:
+                await self.send_via_relay(peer, payload)
+            except Exception:
+                pass
+
     async def _send_ack(self, peer: str, msg_id: str) -> None:
         frame = self._encrypt_frame_for({"__type": "ack", "id": msg_id}, peer)
         ch = self.data_channels.get(peer)
@@ -2898,12 +2950,13 @@ class WebRTCEngine:
         if pc is None or pc.localDescription is None:
             return
         # Send initial offer with whatever candidates are ready (+ predicted srflx)
+        aug_sdp = self._augment_local_sdp(pc.localDescription.sdp)
         await self._send_ws({
             "target": peer,
             "type":   "offer",
-            "data":   {"sdp": self._augment_local_sdp(pc.localDescription.sdp), "type": "offer"},
+            "data":   {"sdp": aug_sdp, "type": "offer"},
         })
-        print(f"[rtc] {self.my_username}: SENT offer to {peer} (trickle)", flush=True)
+        print(f"[rtc] {self.my_username}: SENT offer to {peer} (trickle, candidates={_format_sdp_candidates(aug_sdp)})", flush=True)
         # Trickle remaining candidates in background (non-blocking, optimized polling)
         # Previous code waited 5s (100*0.05) before sending anything - that missed the
         # punch window for strict NAT. Now we trickle.
@@ -2974,7 +3027,8 @@ class WebRTCEngine:
         await self.request_negotiation(target)
 
     async def handle_offer(self, sender: str, data: dict, ws_send: Callable) -> None:
-        print(f"[rtc] {self.my_username}: RECEIVED offer from {sender}", flush=True)
+        in_sdp = (data or {}).get("sdp", "")
+        print(f"[rtc] {self.my_username}: RECEIVED offer from {sender} (candidates={_format_sdp_candidates(in_sdp)})", flush=True)
         self.target_peer = sender
         self._send_ws    = ws_send
         self._bg(self._send_signaling_hello(sender))
@@ -3026,19 +3080,21 @@ class WebRTCEngine:
                 except Exception as ex:
                     print(f"[rtc] Error waiting for ICE gathering: {ex}", flush=True)
 
+            ans_sdp = self._augment_local_sdp(pc.localDescription.sdp)
             await ws_send({
                 "target": sender,
                 "type":   "answer",
-                "data":   {"sdp": self._augment_local_sdp(pc.localDescription.sdp), "type": "answer"},
+                "data":   {"sdp": ans_sdp, "type": "answer"},
             })
-            print(f"[rtc] {self.my_username}: SENT answer to {sender}", flush=True)
+            print(f"[rtc] {self.my_username}: SENT answer to {sender} (candidates={_format_sdp_candidates(ans_sdp)})", flush=True)
         except Exception as ex:
             self.last_error = f"offer from {sender}: {type(ex).__name__}: {ex}"
             print(f"[rtc] {self.my_username}: handle_offer FAILED for {sender}: {type(ex).__name__}: {ex}", flush=True)
 
     async def handle_answer(self, data: dict, sender: str = "") -> None:
         peer = sender or self.target_peer
-        print(f"[rtc] {self.my_username}: RECEIVED answer from {peer}", flush=True)
+        in_sdp = (data or {}).get("sdp", "")
+        print(f"[rtc] {self.my_username}: RECEIVED answer from {peer} (candidates={_format_sdp_candidates(in_sdp)})", flush=True)
         if peer in self.pcs:
             pc = self.pcs[peer]
             if getattr(pc, "signalingState", "") != "have-local-offer":
@@ -3078,6 +3134,7 @@ class WebRTCEngine:
             cand.sdpMid = data.get("sdpMid")
             cand.sdpMLineIndex = data.get("sdpMLineIndex")
             await pc.addIceCandidate(cand)
+            print(f"[rtc] {self.my_username}: added trickled candidate from {peer}: {cand.type} {cand.protocol} {cand.ip}:{cand.port}", flush=True)
         except Exception as ex:
             print(f"[rtc] {self.my_username}: dropping bad ICE candidate from {peer}: "
                   f"{type(ex).__name__}: {ex}", flush=True)
