@@ -3143,6 +3143,7 @@ class HelucrypticApp:
         try:
             return ft.Semantics(
                 label=f"Chat with {display}, {'online' if is_online else 'offline'}{', verified' if verified else ''}",
+                # pyrefly: ignore [unexpected-keyword]
                 button=True, container=True, child=tile,
             )
         except Exception:
