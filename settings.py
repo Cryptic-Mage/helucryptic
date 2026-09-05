@@ -46,6 +46,10 @@ class Settings:
     # Port forwarding (VPN/router) - bind ICE to a reachable forwarded port
     port_forward_enabled: bool = False
     forwarded_port: int = 0
+    # True when the user typed the port themselves (a static router forward we
+    # cannot verify). Auto-discovered NAT-PMP/UPnP ports set this False so a
+    # mapping that has since died stops counting towards hub reachability.
+    forwarded_port_manual: bool = False
     # Trust: when on, block 1-to-1 actions with unverified contacts.
     verified_only: bool = False
 

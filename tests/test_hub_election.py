@@ -7,10 +7,11 @@ from webrtc_engine import elect_hub, reachability_tier
 
 
 class S:  # minimal settings stand-in
-    def __init__(self, turn="", pf=False, port=0):
+    def __init__(self, turn="", pf=False, port=0, manual=True):
         self.turn_url = turn
         self.port_forward_enabled = pf
         self.forwarded_port = port
+        self.forwarded_port_manual = manual
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +73,80 @@ def test_record_capability_and_elect():
     assert e.current_hub() == "bob"
 
 
-def test_current_hub_falls_back_to_lowest_username_when_creator_unknown():
-    # Non-creator peer that hasn't yet learned the creator's name: election must
-    # still be deterministic (alphabetically lowest known member).
+def test_current_hub_defers_when_creator_unknown_and_all_tier_0():
+    """No hub beats "the wrong hub".
+
+    With every member at tier 0 the creator is the tie-break, so a peer that has
+    not yet seen the creator's announcement cannot decide. Guessing the
+    alphabetically lowest member (the old behaviour) made peers disagree - see
+    test_hub_is_consistent_across_peers_that_disagree_about_the_creator.
+    """
     e = _engine("bob")
     e.set_room("ROOM", is_creator=False)       # _room_creator_name stays None
     e.record_capability("carol", tier=0, epoch=1)
-    assert e.current_hub() == "bob"            # all tier 0 -> lowest of {bob, carol}
+    assert e.current_hub() == ""
+
+
+def test_current_hub_elects_a_lone_best_tier_peer_without_knowing_the_creator():
+    """A single member above tier 0 is the hub whether or not it is the creator."""
+    e = _engine("bob")
+    e.set_room("ROOM", is_creator=False)
+    e.record_capability("carol", tier=2, epoch=1)
+    assert e.current_hub() == "carol"
+
+
+def test_hub_is_consistent_across_peers_that_disagree_about_the_creator():
+    """The property the old alphabetical fallback broke.
+
+    Two peers with identical capability data must never name different relays
+    just because one has heard from the creator and the other has not.
+    """
+    knows = _engine("alice")
+    knows.set_room("ROOM", is_creator=False)
+    knows.set_room_creator("carol")
+    knows.record_capability("bob", tier=0, epoch=1)
+    knows.record_capability("carol", tier=0, epoch=1)
+
+    waiting = _engine("bob")
+    waiting.set_room("ROOM", is_creator=False)
+    waiting.record_capability("alice", tier=0, epoch=1)
+    waiting.record_capability("carol", tier=0, epoch=1)
+
+    # "" means "not yet decided", never a competing answer.
+    assert waiting.current_hub() == ""
+    assert knows.current_hub() == "carol"
+
+
+def test_restarted_peer_can_update_its_capability():
+    """Epoch counters restart at 1 when a peer's process does.
+
+    Someone who restarts *with* port forwarding must be able to become the hub;
+    treating their fresh epoch as stale froze them at their old capability.
+    """
+    e = _engine("alice")
+    e.set_room("ROOM", is_creator=True)
+    for epoch in (1, 2, 3, 4, 5):
+        e.record_capability("bob", tier=0, epoch=epoch)
+    assert e.current_hub() == "alice"
+
+    e.record_capability("bob", tier=2, epoch=1)   # bob restarted, now forwarded
+    assert e.current_hub() == "bob"
+
+
+def test_dead_auto_mapping_does_not_claim_tier_2():
+    """A persisted auto-discovered port is only credible while it is mapped.
+
+    Otherwise a peer whose NAT-PMP lease died keeps winning the election and the
+    room relays through someone nobody can reach.
+    """
+    auto = S(pf=True, port=54097, manual=False)
+    assert reachability_tier(auto, current_port=None) == 0
+    assert reachability_tier(auto, current_port=54097) == 2
+
+    # A hand-configured static forward has no live mapping to check, so it
+    # stays trusted.
+    manual = S(pf=True, port=54097, manual=True)
+    assert reachability_tier(manual, current_port=None) == 2
 
 
 def test_stale_epoch_discarded():
@@ -132,3 +200,18 @@ def test_capability_payload_bumps_epoch():
     p1 = e.capability_payload(); p2 = e.capability_payload()
     assert p2["epoch"] == p1["epoch"] + 1
     assert p1["creator"] is True and "tier" in p1
+
+
+def test_injection_skips_a_candidate_aioice_already_gathered():
+    """A forwarded port crosses the NAT unchanged, so STUN reflects that exact
+    address - injecting it again advertised the same candidate twice."""
+    from webrtc_engine import inject_predicted_srflx
+    sdp = (
+        "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+        "a=candidate:1 1 udp 2130706431 10.2.0.2 54097 typ host\r\n"
+        "a=candidate:2 1 udp 1694498815 146.70.142.86 54097 typ srflx "
+        "raddr 10.2.0.2 rport 54097\r\n"
+    )
+    assert inject_predicted_srflx(sdp, "146.70.142.86", 54097) == sdp
+    # A different port is still a genuinely new candidate.
+    assert "146.70.142.86 45000" in inject_predicted_srflx(sdp, "146.70.142.86", 45000)

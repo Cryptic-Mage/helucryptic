@@ -170,7 +170,7 @@ def test_settings_noise_reduce_checkbox_renders_and_saves(monkeypatch):
         def _show_wipe(self, ev): pass
         def _log(self, msg): pass
         def _update_perf_parameters(self): pass
-        def _apply_port_forward(self): pass
+        def _apply_port_forward(self, restart=False): pass
         _settings_section = client.HelucrypticApp._settings_section
         _settings_save = client.HelucrypticApp._settings_save
 

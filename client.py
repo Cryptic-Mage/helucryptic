@@ -5,6 +5,7 @@
 
 import asyncio
 import base64
+import contextlib
 import json
 import re as _re
 import secrets
@@ -143,6 +144,20 @@ _MSG_STATUS_GLYPHS = {
     "sent":      (ft.Icons.DONE,      C.MUTED),   # left this machine
     "delivered": (ft.Icons.DONE_ALL,  C.CYAN),    # peer acked receipt
 }
+
+
+def _mark_intentional_close(ws) -> None:
+    """Tag a socket we are closing on purpose, so the listener does not reconnect.
+
+    Marked on the socket itself rather than on the app, because a reconnect can
+    replace self.ws while the old listener is still unwinding.
+    """
+    with contextlib.suppress(Exception):
+        ws._helu_intentional_close = True
+
+
+def _was_closed_intentionally(ws) -> bool:
+    return bool(getattr(ws, "_helu_intentional_close", False))
 
 
 def _is_ws_alive(ws) -> bool:
@@ -307,6 +322,7 @@ class HelucrypticApp:
         self._chat_empty_hint: ft.Control | None = None
 
         self._pf_manager = None  # PortForwardManager when port-forwarding is on
+        self._pf_starting = False  # a _start_port_forward is mid-flight
         # Background loops are tracked so a profile switch can stop this session's
         # loops cleanly before the next profile's app takes over.
         self._bg_tasks: list = []
@@ -367,16 +383,40 @@ class HelucrypticApp:
         except Exception:
             pass
 
-    def _apply_port_forward(self) -> None:
-        """(Re)start or stop the forwarded-port manager from current settings."""
-        if self._pf_manager is not None:
-            self._fire_and_forget(self._pf_manager.stop())
-            self._pf_manager = None
-        clear_forwarded_port()
-        if self.settings.port_forward_enabled:
-            self._fire_and_forget(self._start_port_forward())
+    def _apply_port_forward(self, restart: bool = False) -> None:
+        """(Re)start or stop the forwarded-port manager from current settings.
+
+        Idempotent, because it is called from three places: startup, Settings,
+        and every connect. Only ``restart=True`` (the setting itself changed)
+        tears down a healthy mapping - otherwise repeated calls would stop and
+        re-request the mapping, and each in-flight start would orphan the
+        previous manager, leaving several renewal loops running at once.
+        """
+        if not self.settings.port_forward_enabled:
+            if self._pf_manager is not None:
+                self._fire_and_forget(self._pf_manager.stop())
+                self._pf_manager = None
+            clear_forwarded_port()
+            return
+        if restart:
+            if self._pf_manager is not None:
+                self._fire_and_forget(self._pf_manager.stop())
+                self._pf_manager = None
+            clear_forwarded_port()
+        elif self._pf_manager is not None or self._pf_starting:
+            return  # already mapped, or a mapping is on its way
+        self._fire_and_forget(self._start_port_forward())
 
     async def _start_port_forward(self) -> None:
+        if self._pf_starting:
+            return
+        self._pf_starting = True
+        try:
+            await self._start_port_forward_inner()
+        finally:
+            self._pf_starting = False
+
+    async def _start_port_forward_inner(self) -> None:
         primary_gw = await asyncio.to_thread(discover_gateway)
         # Build an ordered candidate list (.1 first, then .254 and .2 for
         # non-standard subnets, then PROTON_GATEWAY as a final fallback).
@@ -403,14 +443,19 @@ class HelucrypticApp:
             # configured port (e.g. a static router forward without NAT-PMP).
             return self.settings.forwarded_port or None
 
-        self._pf_manager = PortForwardManager(
+        manager = PortForwardManager(
             gateway=gw, local_ip=ip,
             request_fn=request_fn,
             publish_fn=self._publish_forwarded_port,
             clear_fn=clear_forwarded_port,
             pool_size=3,
         )
-        self._pf_manager.start()
+        # Gateway discovery is slow enough that the setting can have been turned
+        # off, or another start can have won, while we were waiting.
+        if not self.settings.port_forward_enabled or self._pf_manager is not None:
+            return
+        self._pf_manager = manager
+        manager.start()
 
     def _publish_forwarded_port(self, ip: str, ports) -> None:
         # PortForwardManager now publishes a LIST of mapped ports (one per peer
@@ -420,6 +465,9 @@ class HelucrypticApp:
         first = port_list[0] if port_list else 0
         if first and self.settings.forwarded_port != first:
             self.settings.forwarded_port = first
+            # Discovered, not typed by the user: this port is only credible
+            # while the mapping above is live (see reachability_tier).
+            self.settings.forwarded_port_manual = False
             try:
                 save_settings(self.settings)
             except Exception:
@@ -1948,11 +1996,18 @@ class HelucrypticApp:
             print("[connect] aborted: empty username", flush=True)
             return
         self.engine.my_username = uname
+        # A forwarded port is the one thing that gets a symmetric-NAT peer
+        # through without a relay, so make sure the mapping is live before ICE
+        # gathers. No-op when the setting is off or a mapping already exists.
+        self._apply_port_forward()
         url, safe_url = self._build_signaling_url(uname, room)
 
         self._auth_failed = False
         print(f"[connect] dialing {safe_url}", flush=True)
         if self.ws:
+            # Replacing the socket ourselves - the old listener must unwind
+            # quietly instead of racing a reconnect against this dial.
+            _mark_intentional_close(self.ws)
             try:
                 await self.ws.close()
             except Exception:
@@ -2034,6 +2089,19 @@ class HelucrypticApp:
                 print(f"[signaling] Authentication rejected by server (code={close_code}). Auto-reconnect aborted.", flush=True)
             else:
                 _dropped_unexpectedly = True
+        else:
+            # Reaching here means `async for` ended without raising. websockets
+            # exits the iterator SILENTLY when the connection closes with code
+            # 1000/1001 or with no close code at all - and "no close code" is
+            # exactly what a vanished internet link looks like once keepalive
+            # gives up. Only the exception path used to count as a drop, so the
+            # session went quiet and never came back.
+            if self.ws is ws and not _was_closed_intentionally(ws) and not self._auth_failed:
+                print("[signaling] Connection closed without an error "
+                      f"(code={getattr(ws, 'close_code', None)}) - treating as a drop.",
+                      flush=True)
+                self._cleanup_signaling_disconnect(ConnectionError("connection lost"))
+                _dropped_unexpectedly = True
         finally:
             # Auto-reconnect after an unexpected drop - for rooms AND 1-to-1
             # sessions (previously only rooms recovered; a 1-to-1 chat went
@@ -2061,12 +2129,11 @@ class HelucrypticApp:
                 if self._auth_failed:
                     return
                 # Another path (user action or parallel loop) already reconnected.
-                if self.ws is not None:
-                    try:
-                        if not self.ws.closed:
-                            return
-                    except Exception:
-                        pass
+                # _is_ws_alive covers every websockets version; `.closed` only
+                # exists on the legacy protocol, and the bare except that used
+                # to guard it turned "attribute missing" into "still connected".
+                if _is_ws_alive(self.ws):
+                    return
                 uname = self.username_input.value.strip()
                 if not uname:
                     return
@@ -2075,13 +2142,11 @@ class HelucrypticApp:
                 try:
                     await self._connect_signaling(None, room=self._room_id)
                     # _connect_signaling swallows connect errors, so confirm the
-                    # socket is actually live before declaring success.
-                    ok = False
-                    try:
-                        ok = self.ws is not None and not self.ws.closed
-                    except Exception:
-                        ok = self.ws is not None
-                    if ok:
+                    # socket is actually live before declaring success. Falling
+                    # back to "self.ws is not None" (as the old .closed guard did
+                    # on AttributeError) declared victory over a dead socket and
+                    # ended the retry loop after a single attempt.
+                    if _is_ws_alive(self.ws):
                         return  # success - new listener takes over
                     delay = min(delay * 2, 30.0)
                 except Exception as ex:
@@ -2640,6 +2705,8 @@ class HelucrypticApp:
             hub = self.engine.current_hub()
             if hub == self.engine.my_username:
                 self.hub_banner.value = "🛰 You are the relay - others' audio/video pass through you"
+            elif not hub:
+                self.hub_banner.value = "🛰 Electing a relay…"
             else:
                 self.hub_banner.value = f"🛰 Relayed by {hub} - media passes through them"
             self.hub_banner.visible = True
@@ -3806,7 +3873,7 @@ class HelucrypticApp:
             pass
 
     def _show_volume(self, e=None) -> None:
-        cur = float(getattr(self.engine, "_volume", 4.0))
+        cur = float(getattr(self.engine, "_volume", 1.0))
         val = ft.Text(f"{cur:.1f}×", size=12, color=C.SUBTLE,
                       text_align=ft.TextAlign.CENTER)
 
@@ -3818,7 +3885,7 @@ class HelucrypticApp:
             except Exception:
                 pass
 
-        slider = ft.Slider(min=0, max=8, divisions=16, value=cur,
+        slider = ft.Slider(min=0, max=4, divisions=16, value=cur,
                            expand=True, active_color=C.CYAN, on_change=on_change)
         dlg = ft.AlertDialog(
             title=ft.Text("Call volume"),
@@ -4106,6 +4173,7 @@ class HelucrypticApp:
                 err.value = 'Type WIPE exactly to confirm'; err.visible = True; self.page.update(); return
             # Close active connections first, then delete local data.
             if self.ws:
+                _mark_intentional_close(self.ws)
                 try:
                     await self.ws.close()
                 except Exception:
@@ -4345,6 +4413,7 @@ class HelucrypticApp:
             except Exception:
                 pass
         if self.ws:
+            _mark_intentional_close(self.ws)
             try:
                 await self.ws.close()
             except Exception:
@@ -4575,13 +4644,18 @@ class HelucrypticApp:
         self.settings.noise_reduce = self._settings_noise_reduce_cb.value
         self.settings.port_forward_enabled = self._settings_pf_enabled_cb.value
         try:
-            self.settings.forwarded_port = int(self._settings_pf_port_f.value or 0)
+            typed = int(self._settings_pf_port_f.value or 0)
         except ValueError:
-            self.settings.forwarded_port = 0
+            typed = 0
+        if typed != self.settings.forwarded_port:
+            # The user set this by hand - trust it even with no live mapping,
+            # since a static router forward is invisible to NAT-PMP/UPnP.
+            self.settings.forwarded_port_manual = bool(typed)
+        self.settings.forwarded_port = typed
         save_settings(self.settings)
         self._log(f"[Settings] Saved settings (mode={self.settings.security_mode}, retention={self.settings.retention_days} days).")
         self._update_perf_parameters()
-        self._apply_port_forward()
+        self._apply_port_forward(restart=True)
         self._close_dialog(self._settings_dlg)
 
     def _show_settings(self, e) -> None:
@@ -4858,6 +4932,7 @@ class HelucrypticApp:
 
     async def _shutdown_websocket(self) -> None:
         if self.ws:
+            _mark_intentional_close(self.ws)
             try:
                 await self.ws.close()
             except Exception:

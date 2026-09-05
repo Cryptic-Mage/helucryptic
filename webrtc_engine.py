@@ -156,6 +156,9 @@ def _select_for_aiortc(servers: list, attempt: int = 0) -> list:
     return picked or list(servers)
 
 
+_USER_AGENT = "helucryptic/1.0"
+
+
 def _http_url_for(signaling_url: str) -> str:
     """ws(s):// -> http(s):// base, trailing slash stripped."""
     url = (signaling_url or "").strip().rstrip("/")
@@ -171,7 +174,13 @@ def _http_url_for(signaling_url: str) -> str:
 def _fetch_ice_blocking(signaling_url: str, password: str, timeout: float) -> dict:
     base = _http_url_for(signaling_url)
     query = ("?" + urllib.parse.urlencode({"password": password})) if password else ""
-    req = urllib.request.Request(f"{base}/turn{query}", headers={"Accept": "application/json"})
+    # Cloudflare's edge answers the default "Python-urllib/x.y" User-Agent with
+    # a 403 (error 1010, banned browser signature) before the Worker ever runs,
+    # so identify the app properly.
+    req = urllib.request.Request(
+        f"{base}/turn{query}",
+        headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
+    )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -227,6 +236,41 @@ async def fetch_ice_servers(signaling_url: str, password: str = "",
     return (servers, ttl)
 
 
+def raise_video_bitrate_ceiling(max_bitrate: int | None = None,
+                               start_bitrate: int | None = None) -> None:
+    """Lift aiortc's built-in video bitrate clamp.
+
+    aiortc hard-codes MAX_BITRATE at 1.5 Mbps for VP8 and 3 Mbps for H.264, and
+    starts every encoder at 500 kbps / 1 Mbps. Those numbers suit a webcam
+    thumbnail, not a 1080p screen share: at 1.5 Mbps a 1920x1080@30 stream gets
+    ~0.02 bits/pixel, which is why a sender capturing 1080p is received looking
+    like 360p. The codec modules read these as globals on every call, so
+    rebinding them changes the clamp for encoders created afterwards.
+
+    This raises a ceiling; it does not pin a rate. REMB congestion control still
+    decides the actual bitrate, so a genuinely slow link still backs off.
+    """
+    ceiling = config.VIDEO_MAX_BITRATE if max_bitrate is None else max_bitrate
+    start = config.VIDEO_START_BITRATE if start_bitrate is None else start_bitrate
+    for module_name in ("aiortc.codecs.vpx", "aiortc.codecs.h264"):
+        try:
+            module = __import__(module_name, fromlist=["MAX_BITRATE"])
+        except Exception:
+            continue
+        try:
+            if ceiling > getattr(module, "MAX_BITRATE", 0):
+                module.MAX_BITRATE = ceiling
+            # Keep the start inside [MIN, MAX] so the encoder's own clamp is a
+            # no-op rather than silently overriding us.
+            floor = getattr(module, "MIN_BITRATE", 0)
+            module.DEFAULT_BITRATE = max(floor, min(start, module.MAX_BITRATE))
+        except Exception:
+            continue
+
+
+raise_video_bitrate_ceiling()
+
+
 MAX_PRE_HELLO_FRAMES = 64
 MAX_PRE_HELLO_BYTES = 1 * 1024 * 1024
 MAX_INCOMING_FILE_SIZE = 1 * 1024 * 1024 * 1024  # 1 GiB cap per file (down from 2 GiB) + per-peer single slot mitigates disk DoS; global total capped at 4 GiB implicitly via 4 peers
@@ -271,6 +315,13 @@ def inject_predicted_srflx(sdp: str, ip: str, port: int) -> str:
         return sdp
     line = build_srflx_candidate_line(ip, port)
     if line in sdp:
+        return sdp
+    # aioice may already have gathered this exact address via STUN - a forwarded
+    # port survives the NAT unchanged, so its reflexive candidate IS the port we
+    # inject. The gathered line differs textually (own foundation/priority), so
+    # match on the address instead and avoid advertising it twice.
+    if any(ln.startswith("a=candidate:") and f" {ip} {port} typ srflx" in ln
+           for ln in sdp.splitlines()):
         return sdp
     lines = sdp.splitlines()
 
@@ -574,10 +625,19 @@ def install_forward_patch(loop) -> None:
 # ---------------------------------------------------------------------------
 
 def reachability_tier(settings, current_port=None, reflected_host=None) -> int:
-    """0=behind NAT  1=has public address (STUN/TURN/reflected)  2=forwarded port."""
-    if (current_port and current_port > 0) or (
-            getattr(settings, "port_forward_enabled", False)
-            and getattr(settings, "forwarded_port", 0)):
+    """0=behind NAT  1=has public address (STUN/TURN/reflected)  2=forwarded port.
+
+    Tier 2 requires a mapping that is actually live, or a port the user forwarded
+    by hand on a router we cannot query. The persisted ``forwarded_port`` alone
+    is not enough: it is written from auto-discovery, so a mapping that has since
+    died would keep claiming top reachability, win the hub election, and leave
+    the room relaying through a peer nobody can reach.
+    """
+    if current_port and current_port > 0:
+        return 2
+    if (getattr(settings, "port_forward_enabled", False)
+            and getattr(settings, "forwarded_port", 0)
+            and getattr(settings, "forwarded_port_manual", False)):
         return 2
     if getattr(settings, "turn_url", "") or reflected_host:
         return 1
@@ -784,16 +844,37 @@ class ScreenShareTrack(VideoStreamTrack):
 
 
 # Frames queued ahead of the denoise worker before it gives up on this frame
-# and passes it through raw. 4 frames ~= 80 ms of backlog - past that, keeping
+# and passes it through raw. 8 frames ~= 160 ms of backlog - past that, keeping
 # audio flowing matters more than cleaning it.
-_NR_OVERLOAD_FRAMES = 4
+_NR_OVERLOAD_FRAMES = 8
 # Seconds of low-energy mic audio gathered as the noise profile reduce_noise()
 # needs to tell speech from background. Until it's collected (call start, or
 # while the mic is quiet) frames pass through un-denoised.
 _NR_PROFILE_SECONDS = 0.5
-# reduce_noise() attenuates the whole frame, not just the noise, by roughly this
-# factor; the denoised frame is scaled back up so voice level is preserved.
-_NR_MAKEUP_GAIN = 2.5
+# reduce_noise() attenuates the whole frame, not just the noise; a gentle
+# makeup gain restores speech level without amplifying residual background hiss.
+_NR_MAKEUP_GAIN = 1.1
+# Playout jitter buffer threshold: number of samples (~40 ms @ 48 kHz, 2 frames)
+# buffered before playback drains or recovers from starvation. Absorbs WAN jitter.
+_JITTER_BUFFER_SAMPLES = 1920
+
+
+def _soft_limit(x: np.ndarray, threshold: float = 28000.0, ceiling: float = 32760.0) -> np.ndarray:
+    """Apply transparent soft-knee saturation to audio samples above threshold.
+
+    Samples with amplitude <= threshold pass through completely untouched (bit-exact linear).
+    Samples exceeding threshold are smoothly compressed toward ceiling using tanh,
+    preventing harsh square-wave clipping, odd-harmonic buzz, and metallic crackles.
+    """
+    over = np.abs(x) > threshold
+    if not np.any(over):
+        return x
+    res = x.copy()
+    sign = np.sign(x[over])
+    diff = np.abs(x[over]) - threshold
+    margin = ceiling - threshold
+    res[over] = sign * (threshold + margin * np.tanh(diff / margin))
+    return res
 
 
 def _load_noisereduce():
@@ -881,9 +962,13 @@ class _NoiseReducer:
     def _denoise(self, data, profile):
         try:
             samples = data.astype(np.float32).reshape(-1)
+            # padding=512 accelerates STFT from ~22ms down to ~1.5ms per 20ms frame,
+            # avoiding worker queue backlog. prop_decrease=0.75 leaves a subtle natural
+            # noise floor that eliminates "musical noise" (metallic whistling/bubbling).
             reduced = self._nr.reduce_noise(
                 y=samples, sr=self._sr, stationary=self._stationary,
-                n_fft=512, y_noise=profile,
+                n_fft=512, y_noise=profile, padding=512,
+                prop_decrease=0.75,
             )
             return np.clip(
                 reduced * _NR_MAKEUP_GAIN, -32768, 32767,
@@ -1126,10 +1211,11 @@ class WebRTCEngine:
         # deque + partial-head consumption avoids the O(n) full-buffer copy that
         # np.concatenate did on every 20 ms frame (GC churn on weak hardware).
         self._play_chunks: dict[str, deque] = {}
+        self._play_buffering: set[str] = set()
         self._play_lock = threading.Lock()
-        # Playback gain applied in the audio callback. Adjustable live from the
-        # UI (no reconnection needed) since _play_callback reads it every block.
-        self._volume: float = 4.0
+        # Playback gain applied in the audio callback. Default 1.0 (unity gain)
+        # prevents digital clipping distortion; adjustable live from the UI.
+        self._volume: float = 1.0
 
         # Diagnostics state (read by get_diagnostics; cheap, no secrets).
         self._ice_states:      dict[str, str] = {}
@@ -1446,8 +1532,15 @@ class WebRTCEngine:
         self._room_creator_name = name
 
     def record_capability(self, peer: str, tier: int, epoch: int) -> None:
-        """Store a peer's reachability tier for hub election; stale epochs are ignored."""
-        if epoch <= self._cap_epoch.get(peer, 0):
+        """Store a peer's reachability tier for hub election; stale epochs are ignored.
+
+        Epoch 1 is always accepted: counters start at 1, so it means the peer's
+        process is fresh. Without that exception a peer who restarts is frozen
+        at whatever capability we last saw - someone who comes back *with* port
+        forwarding could never be elected hub, because every announcement from
+        the new process looks stale next to the old counter.
+        """
+        if epoch != 1 and epoch <= self._cap_epoch.get(peer, 0):
             return
         self._cap_epoch[peer] = epoch
         self._cap_tier[peer] = tier
@@ -1474,10 +1567,24 @@ class WebRTCEngine:
                 "creator": self.is_room_creator}
 
     def current_hub(self) -> str:
-        """Return the elected hub username given current capability records."""
+        """Return the elected hub username, or "" while the outcome is ambiguous.
+
+        The creator breaks ties, and peers learn who it is from its capability
+        announcement - which may not have arrived yet. Inventing a stand-in (the
+        alphabetically first member, as this used to) makes peers disagree about
+        the hub and route media to different relays. So when the creator is
+        unknown we only elect where the answer cannot depend on it: a single
+        best-tier member above tier 0 is the hub on every peer either way.
+        Otherwise return "" and let the next announcement settle it - callers all
+        test ``hub == my_username``, so nobody acts as relay meanwhile.
+        """
         members = dict(self._cap_tier)
         members[self.my_username] = self._my_tier()   # always include self
-        creator = self._room_creator_name or min([self.my_username, *members.keys()])
+        creator = self._room_creator_name
+        if creator is None:
+            best = max(members.values())
+            top = [u for u, t in members.items() if t == best]
+            return top[0] if best > 0 and len(top) == 1 else ""
         return elect_hub(members, creator)
 
     # ------------------------------------------------------------------
@@ -1714,6 +1821,10 @@ class WebRTCEngine:
             print(f"[rtc] {self.my_username}: pc[{peer}] connection -> {state}", flush=True)
             if state != "connected":
                 self._direct_stable_since.pop(peer, None)
+            elif self._neg_dirty.pop(peer, False):
+                # A renegotiation deferred while ICE was checking. Now that the
+                # pair is live, an ICE restart is cheap and recoverable.
+                self._bg(self.request_negotiation(peer))
             if self.on_state_change:
                 self.on_state_change(peer, state)
 
@@ -2998,6 +3109,18 @@ class WebRTCEngine:
         except Exception:
             pass
 
+    def _ice_still_settling(self, peer: str) -> bool:
+        """True while ICE is gathering or running connectivity checks.
+
+        Re-offering in this window restarts ICE with a fresh ufrag, throwing away
+        every check in flight and forcing the peer to re-gather. A symmetric-NAT
+        peer draws new ports on each gather, so a restart also invalidates the
+        candidates we were just told about - repeat that and the pair can never
+        converge, no matter how reachable either side is.
+        """
+        pc = self.pcs.get(peer)
+        return bool(pc) and getattr(pc, "connectionState", "") in ("new", "connecting")
+
     async def request_negotiation(self, peer: str) -> None:
         pc = self.pcs.get(peer)
         if (pc and getattr(pc, "signalingState", "stable") != "stable") or self._is_negotiating.get(peer):
@@ -3008,7 +3131,9 @@ class WebRTCEngine:
             await self._do_negotiation(peer)
         finally:
             self._is_negotiating[peer] = False
-            if self._neg_dirty.get(peer) and (not pc or getattr(pc, "signalingState", "stable") == "stable"):
+            if (self._neg_dirty.get(peer)
+                    and (not pc or getattr(pc, "signalingState", "stable") == "stable")
+                    and not self._ice_still_settling(peer)):
                 self._neg_dirty.pop(peer, False)
                 await self.request_negotiation(peer)
 
@@ -3110,8 +3235,18 @@ class WebRTCEngine:
                 print(f"[rtc] {self.my_username}: handle_answer FAILED for {peer}: {type(ex).__name__}: {ex}", flush=True)
                 return
 
-            if self._neg_dirty.pop(peer, False):
-                await self.request_negotiation(peer)
+            # A renegotiation queued during glare must not fire here. Our own
+            # offer has only just been answered, so ICE is about to run its
+            # checks; re-offering now restarts it before a single pair has been
+            # tried. Hold the request until the connection is up - on_state
+            # flushes it - or until ICE gives up and self-healing takes over.
+            if self._neg_dirty.get(peer):
+                if self._ice_still_settling(peer):
+                    print(f"[rtc] {self.my_username}: deferring renegotiation with "
+                          f"{peer} until ICE settles", flush=True)
+                else:
+                    self._neg_dirty.pop(peer, False)
+                    await self.request_negotiation(peer)
 
     async def handle_ice(self, data: dict, sender: str = "") -> None:
         """Apply a trickled ICE candidate from a peer (defensive - aiortc itself
@@ -3632,7 +3767,9 @@ class WebRTCEngine:
         # backlog.
         mix = np.zeros(frames, dtype=np.int32)
         with self._play_lock:
-            for peer in self._play_chunks:
+            for peer in list(self._play_chunks.keys()):
+                if peer in self._play_buffering:
+                    continue
                 dq    = self._play_chunks[peer]
                 need  = frames
                 taken = 0
@@ -3648,10 +3785,19 @@ class WebRTCEngine:
                         dq[0]  = chunk[need:]
                         taken += need
                         need   = 0
-        # Apply the live, user-adjustable playback gain, then clip to int16.
+                # If the peer ran out of audio mid-block or completely, smooth the
+                # boundary to avoid a DC step pop and re-enter jitter buffering.
+                if not dq:
+                    self._play_buffering.add(peer)
+                    if 0 < taken < frames:
+                        fade_len = min(16, taken)
+                        ramp = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+                        mix[taken - fade_len:taken] = (mix[taken - fade_len:taken] * ramp).astype(np.int32)
+        # Apply the live, user-adjustable playback gain, then smooth-limit peaks
+        # above 28,000 to prevent harsh square-wave digital clipping / crackling.
         boosted = mix.astype(np.float32) * float(self._volume)
-        np.clip(boosted, -32768, 32767, out=boosted)
-        outdata[:, 0] = boosted.astype(np.int16)
+        boosted = _soft_limit(boosted)
+        outdata[:, 0] = np.clip(boosted, -32768, 32767).astype(np.int16)
 
     def set_volume(self, factor: float) -> None:
         """Set the call playback gain (applied live in the audio thread)."""
@@ -3679,12 +3825,14 @@ class WebRTCEngine:
         self._incoming_audio_active.add(key)
         with self._play_lock:
             self._play_chunks[key] = deque()
+            self._play_buffering.add(key)
         try:
             self._ensure_output_stream()
         except Exception:
             self._incoming_audio_active.discard(key)
             with self._play_lock:
                 self._play_chunks.pop(key, None)
+                self._play_buffering.discard(key)
             return
 
         # Initialize the resampler to output packed s16, mono layout, 48000Hz rate.
@@ -3709,9 +3857,11 @@ class WebRTCEngine:
                         if dq is None:
                             break
                         dq.append(samples)
+                        total = sum(len(c) for c in dq)
+                        if key in self._play_buffering and total >= _JITTER_BUFFER_SAMPLES:
+                            self._play_buffering.discard(key)
                         # Bound the backlog so we never drift far behind: drop oldest
                         # whole chunks until under the cap.
-                        total = sum(len(c) for c in dq)
                         while total > MAX_BUFFERED and len(dq) > 1:
                             total -= len(dq.popleft())
             except Exception:
@@ -3719,6 +3869,7 @@ class WebRTCEngine:
         self._incoming_audio_active.discard(key)
         with self._play_lock:
             self._play_chunks.pop(key, None)
+            self._play_buffering.discard(key)
         self._teardown_media_if_idle()
 
     # ------------------------------------------------------------------

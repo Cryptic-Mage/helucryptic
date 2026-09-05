@@ -79,6 +79,21 @@ SCREEN_FPS        = _int_range("HELUCRYPTIC_SCREEN_FPS",        10 if LOW_PERF_M
 JPEG_QUALITY      = _int_range("HELUCRYPTIC_JPEG_QUALITY",      45 if LOW_PERF_MODE else 55, 1, 100)
 TILE_RENDER_FPS   = _int_range("HELUCRYPTIC_TILE_RENDER_FPS",   5 if LOW_PERF_MODE else 10, 1, 60)
 
+# Ceiling for the video encoder, in bits/second. aiortc ships a hard 1.5 Mbps
+# cap for VP8 (3 Mbps for H.264) which predates anyone screen-sharing at 1080p:
+# 1920x1080@30 inside 1.5 Mbps is ~0.02 bits/pixel, so the receiver sees a
+# smeared image that looks like 360p no matter what the capture settings say.
+# Raising the cap does NOT force the bitrate - congestion control still governs
+# via REMB - it only stops the library clamping a healthy link down to a crawl.
+VIDEO_MAX_BITRATE = _int_range("HELUCRYPTIC_VIDEO_MAX_BITRATE",
+                               2_000_000 if LOW_PERF_MODE else 8_000_000,
+                               250_000, 40_000_000)
+# Where the encoder starts before any REMB feedback arrives. aiortc's 500 kbps
+# default takes tens of seconds of AIMD ramping to reach a usable rate.
+VIDEO_START_BITRATE = _int_range("HELUCRYPTIC_VIDEO_START_BITRATE",
+                                 1_000_000 if LOW_PERF_MODE else 2_500_000,
+                                 250_000, 40_000_000)
+
 # --- TURN (optional NAT relay) ----------------------------------------------
 # Public STUN alone fails behind symmetric / carrier-grade NAT. Provide a TURN
 # relay here to make those connections succeed. Fallback over 443/tcp is auto-
