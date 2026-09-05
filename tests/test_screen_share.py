@@ -115,3 +115,12 @@ async def test_start_screen_share_fails_when_pc_missing():
     assert "bob" not in e._screen_peers
     assert "bob" not in e._screen_senders
 
+
+@pytest.mark.asyncio
+async def test_screen_share_ended_dispatches_on_video_end():
+    e = _engine()
+    ended = []
+    e.on_video_end = lambda p: ended.append(p)
+    await e._dispatch_frame({"__type": "screen_share_ended"}, "alice")
+    assert ended == ["alice"]
+

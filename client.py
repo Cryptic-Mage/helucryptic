@@ -1413,12 +1413,34 @@ class HelucrypticApp:
         Deliberately restrained: solid accents, no gradients, no glow bloom."""
         mono = _t_FONTS["mono"]
         self._spark_bars = [
-            ft.Container(width=5, height=6, border_radius=3, bgcolor=C.CYAN,
-                         animate=_anim(D.MED, _EASE_IO))
+            ft.Container(
+                width=5, height=6, border_radius=ft.BorderRadius.all(3),
+                bgcolor=C.BORDER2,
+                animate=_anim(220, _EASE_OUT),
+            )
             for _ in range(20)
         ]
-        self.insight_rtt  = ft.Text("- ms", size=20, color=C.TEXT,
-                                    weight=ft.FontWeight.W_800, font_family=mono)
+        self.insight_rtt = ft.Text(
+            "- ms", size=20, color=C.TEXT,
+            weight=ft.FontWeight.W_800, font_family=mono,
+        )
+        self.insight_quality = ft.Text(
+            "IDLE", size=9, color=C.MUTED, font_family=mono,
+            weight=ft.FontWeight.W_700,
+        )
+        self.insight_rtt_container = ft.Container(
+            content=ft.Column([
+                self.insight_rtt,
+                self.insight_quality,
+            ], spacing=1, tight=True),
+            scale=1.0,
+            animate_scale=_anim(180, _EASE_OUT),
+        )
+        self.insight_live_dot = ft.Container(
+            width=7, height=7, border_radius=4, bgcolor=C.MUTED,
+            animate_opacity=_anim(300, _EASE_IO),
+            animate_scale=_anim(300, _EASE_IO),
+        )
         self.insight_live = ft.Text("idle", size=10, color=C.MUTED, font_family=mono)
         latency = self._insight_card([
             ft.Row([
@@ -1426,15 +1448,16 @@ class HelucrypticApp:
                 ft.Text("LINK LATENCY", size=10, color=C.MUTED, font_family=mono,
                         weight=ft.FontWeight.W_800),
                 ft.Container(expand=True),
+                self.insight_live_dot,
                 self.insight_live,
-            ], spacing=8),
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([
-                self.insight_rtt,
+                self.insight_rtt_container,
                 ft.Container(expand=True),
                 ft.Container(
                     content=ft.Row(self._spark_bars, spacing=3, tight=True,
                                    vertical_alignment=ft.CrossAxisAlignment.END),
-                    height=34, alignment=ft.Alignment.BOTTOM_RIGHT),
+                    height=36, alignment=ft.Alignment.BOTTOM_RIGHT),
             ], vertical_alignment=ft.CrossAxisAlignment.END),
         ])
 
@@ -1494,27 +1517,71 @@ class HelucrypticApp:
         )
         return self._insights_panel
 
+    def _trigger_latency_pulse(self) -> None:
+        async def _pulse():
+            try:
+                if hasattr(self, "insight_rtt_container") and self.insight_rtt_container is not None:
+                    self.insight_rtt_container.scale = 1.08
+                    self.insight_rtt_container.update()
+                    await asyncio.sleep(0.18)
+                    self.insight_rtt_container.scale = 1.0
+                    self.insight_rtt_container.update()
+            except Exception:
+                pass
+        self._fire_and_forget(_pulse())
+
     async def _insights_loop(self) -> None:
-        """Feed the latency sparkline once a second from the real heartbeat
+        """Feed the latency sparkline at a smooth real-time cadence from real heartbeat
         RTTs (best/lowest across live peers). Idle when nothing is connected."""
+        _tick = 0
         while True:
             try:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.3)
+                _tick += 1
                 rtts = list(self._peer_rtt.values())
                 if rtts:
-                    rtt = min(rtts)
-                    h = 6 + min(28, int(rtt * 0.30))
-                    self.insight_rtt.value  = f"{int(rtt)} ms"
+                    base_rtt = min(rtts)
+                    if base_rtt < 60:
+                        tier_color, quality_str = C.GREEN, "OPTIMAL"
+                    elif base_rtt < 120:
+                        tier_color, quality_str = C.CYAN, "GOOD"
+                    elif base_rtt < 200:
+                        tier_color, quality_str = C.YELLOW, "FAIR"
+                    else:
+                        tier_color, quality_str = C.RED, "POOR"
+
+                    h = 6 + min(26, int(base_rtt * 0.28))
+
+                    self.insight_rtt.value  = f"{int(base_rtt)} ms"
+                    self.insight_rtt.color  = tier_color
+                    self.insight_quality.value = quality_str
+                    self.insight_quality.color = tier_color
                     self.insight_live.value = "live"
                     self.insight_live.color = C.GREEN
+                    self.insight_live_dot.bgcolor = C.GREEN
+                    self.insight_live_dot.shadow = _glow(C.GREEN + "66", blur=8)
+                    self.insight_live_dot.opacity = 1.0 if (_tick % 2 == 0) else 0.65
+
+                    for i in range(len(self._spark_bars) - 1):
+                        self._spark_bars[i].height = self._spark_bars[i + 1].height
+                        self._spark_bars[i].bgcolor = self._spark_bars[i + 1].bgcolor
+                    self._spark_bars[-1].height = h
+                    self._spark_bars[-1].bgcolor = tier_color
                 else:
-                    h = 6
                     self.insight_rtt.value  = "- ms"
+                    self.insight_rtt.color  = C.TEXT
+                    self.insight_quality.value = "IDLE"
+                    self.insight_quality.color = C.MUTED
                     self.insight_live.value = "idle"
                     self.insight_live.color = C.MUTED
-                heights = [b.height for b in self._spark_bars[1:]] + [h]
-                for bar, hh in zip(self._spark_bars, heights):
-                    bar.height = hh
+                    self.insight_live_dot.bgcolor = C.MUTED
+                    self.insight_live_dot.shadow = None
+                    self.insight_live_dot.opacity = 0.5
+
+                    for bar in self._spark_bars:
+                        bar.height = 6
+                        bar.bgcolor = C.BORDER2
+
                 try:
                     self._insights_panel.update()
                 except Exception:
@@ -1553,7 +1620,7 @@ class HelucrypticApp:
     def _update_call_status(self, active: bool = True) -> None:
         """Call whenever call/share state changes to keep the header pill current."""
         voice   = self._in_voice_call
-        screen  = self._in_screen_share
+        screen  = self._in_screen_share or bool(getattr(self, "_video_tiles", None))
         if not active or not (voice or screen):
             self.call_status_pill.visible = False
             try: self.call_status_pill.update()
@@ -1562,7 +1629,12 @@ class HelucrypticApp:
         if screen and voice:
             icon, label, color = ft.Icons.PRESENT_TO_ALL, "Sharing + in call", C.MAGENTA
         elif screen:
-            icon, label, color = ft.Icons.SCREEN_SHARE, "Sharing screen", C.MAGENTA
+            if self._in_screen_share:
+                icon, label, color = ft.Icons.SCREEN_SHARE, "Sharing screen", C.MAGENTA
+            else:
+                senders = list(self._video_tiles.keys()) if getattr(self, "_video_tiles", None) else []
+                sender_label = f"{senders[0]}'s screen" if len(senders) == 1 else "Viewing screen"
+                icon, label, color = ft.Icons.SCREEN_SHARE, sender_label, C.MAGENTA
         else:
             icon, label, color = ft.Icons.CALL, "In call", C.GREEN
         self.call_status_icon.name          = icon
@@ -1647,6 +1719,7 @@ class HelucrypticApp:
 
     def _on_engine_rtt(self, peer: str, rtt_ms: float) -> None:
         self._peer_rtt[peer] = rtt_ms
+        self._trigger_latency_pulse()
         # Cheap repaints only: the open 1-to-1 header, or the room roster row.
         # Heartbeats tick every ~15 s per peer, so this stays light.
         if peer == self._active_contact and not self._room_id:
@@ -3673,6 +3746,7 @@ class HelucrypticApp:
         self.btn_screen.icon_color = C.SUBTLE
         self.btn_screen.tooltip    = SHARE_SCREEN_TXT
         self._update_call_status(True)   # may still be in a voice call
+        self._toast("Screen sharing stopped", "info")
         self._log("[Screen sharing stopped]")
         self._refresh_call_controls()
         self.page.update()
@@ -3754,6 +3828,8 @@ class HelucrypticApp:
             tile = self._video_tiles[sender]
             tile.src = "data:image/jpeg;base64," + b64
             tile.update()
+            if not self._fullscreen_sender:
+                self._fullscreen_sender = sender
             if self._fullscreen_sender == sender:
                 if self.screen_overlay.visible:
                     self._fs_img.src = tile.src
@@ -3808,6 +3884,9 @@ class HelucrypticApp:
         self.page.update()
         self._reveal(tile)
         self._notify_sharing(sender)
+        self._update_call_status(True)
+        # Automatically expand/open the screen viewer popup so subsequent shares pop up reliably
+        self._open_fullscreen(sender)
         if self.screen_overlay.visible:
             self._rebuild_share_switcher()
         return img
@@ -3820,6 +3899,8 @@ class HelucrypticApp:
         ]
         if not self._tile_row.controls:
             self._tile_row.visible = False
+        self._log(f"🖥 {sender} stopped sharing their screen.")
+        self._toast(f"{sender} stopped sharing screen", "info")
         if self._fullscreen_sender == sender:
             # the stream we were viewing ended - switch to another or close
             others = [s for s in self._video_tiles if s != sender]
@@ -3829,6 +3910,7 @@ class HelucrypticApp:
                 self._close_fullscreen()
         elif self.screen_overlay.visible:
             self._rebuild_share_switcher()
+        self._update_call_status(True)
         self.page.update()
 
     # ------------------------------------------------------------------
@@ -3837,6 +3919,7 @@ class HelucrypticApp:
 
     def _notify_sharing(self, sender: str) -> None:
         self._log(f"🖥 {sender} is sharing their screen - click their tile to view it full screen.")
+        self._toast(f"{sender} is sharing screen", "info")
         try:
             sounds.play("message")
         except Exception:
