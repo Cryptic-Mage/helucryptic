@@ -60,6 +60,8 @@ _session_tokens:   dict[str, str]    = {}   # username → session token (preven
 _conn_times: dict[str, deque] = {}
 _CONN_WINDOW = 60.0
 _CONN_MAX    = 20
+# Sweep expired IPs once the map grows past this; cheap and amortised.
+_CONN_PRUNE_AT = 1024
 # Message rate: max 100 signaling messages per username per 10 s.
 _msg_times: dict[str, deque] = {}
 _MSG_WINDOW = 10.0
@@ -68,6 +70,7 @@ _MSG_MAX    = 100
 _byte_times: dict[str, deque] = {}
 _BYTE_WINDOW = 10.0
 _BYTE_MAX    = 655360
+_PRESENCE_MAX_QUERY = 64   # usernames per presence request (contact lists are small)
 _RELAY_FRAME_MAX_BYTES = 24576  # 24 KiB wire cap for relay (16 KiB plaintext + PASETO overhead)
 SERVER_CAPABILITIES = ["relay_e2ee_v1", "signaling_hello_v1"]
 
@@ -83,8 +86,52 @@ def reset_server_state() -> None:
     _byte_times.clear()
 
 
+# Behind a reverse proxy the socket peer is the PROXY, not the client. Using it
+# puts every user in one rate-limit bucket (20 connections/min for the whole
+# deployment) and reports the proxy's address as `reflected_host` - which the
+# client feeds into its srflx candidate injection and reachability tier. The
+# Cloudflare Worker gets this right via CF-Connecting-IP; this is the parity.
+#
+# Opt-in, because a forwarded header is client-supplied unless a trusted proxy
+# overwrites it: trusting it by default would let anyone spoof their IP and walk
+# straight past the connection rate limit.
+_TRUST_PROXY_HEADERS = (
+    os.getenv("HELUCRYPTIC_TRUST_PROXY_HEADERS", "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+
+def _client_ip(websocket: WebSocket) -> str:
+    """The client's real address, honouring proxy headers when configured."""
+    if _TRUST_PROXY_HEADERS:
+        # X-Forwarded-For is "client, proxy1, proxy2" - the client is first.
+        fwd = websocket.headers.get("x-forwarded-for") or ""
+        first = fwd.split(",")[0].strip()
+        if first:
+            return first
+        real = (websocket.headers.get("x-real-ip") or "").strip()
+        if real:
+            return real
+    return websocket.client.host if websocket.client else "unknown"
+
+
+def _prune_conn_times(now: float) -> None:
+    """Drop IPs whose connection window has fully expired.
+
+    _conn_times is keyed by address and, unlike the per-username limiters, has
+    no disconnect hook to clean it up - every IP that ever connected stayed
+    resident forever, so the map grew without bound for the process lifetime.
+    """
+    stale = [ip for ip, dq in _conn_times.items()
+             if not dq or dq[-1] < now - _CONN_WINDOW]
+    for ip in stale:
+        _conn_times.pop(ip, None)
+
+
 def _conn_rate_ok(ip: str) -> bool:
     now = time.monotonic()
+    if len(_conn_times) > _CONN_PRUNE_AT:
+        _prune_conn_times(now)
     dq  = _conn_times.setdefault(ip, deque())
     while dq and dq[0] < now - _CONN_WINDOW:
         dq.popleft()
@@ -191,11 +238,31 @@ async def _handle_room_joining(websocket: WebSocket, username: str, room: str) -
         await websocket.close()
         return False
 
-    # --- Re-join: clean up stale entry ---
-    if username in existing:
-        await _cleanup_rejoin_stale_entry(username, existing, room)
+    # Claim the slot NOW, before any await. Every send below yields to the event
+    # loop, and two joins arriving together would both pass the capacity check
+    # above and both add themselves afterwards - a 4-person room reaching 5+.
+    # The membership set is the lock; the roster we report is taken before the
+    # claim so the joiner still sees only the peers that preceded it.
+    rejoining = username in existing
+    existing_peers = [u for u in rooms.get(room, set()) if u != username]
+    rooms.setdefault(room, set()).add(username)
+    room_of[username] = room
 
-    existing_peers = list(rooms.get(room, set()))
+    async def _release() -> None:
+        """Undo the claim when the join cannot be completed."""
+        members = rooms.get(room)
+        if members is not None:
+            members.discard(username)
+            if not members:
+                rooms.pop(room, None)
+        if room_of.get(username) == room:
+            room_of.pop(username, None)
+
+    # --- Re-join: clean up stale entry ---
+    if rejoining:
+        await _cleanup_rejoin_stale_entry(username, existing, room)
+        rooms.setdefault(room, set()).add(username)
+        room_of[username] = room
     logger.info("User '%s' joining room '%s'. Current peers: %s", username, room, existing_peers)
 
     # Notify existing peers that a new peer joined
@@ -209,10 +276,9 @@ async def _handle_room_joining(websocket: WebSocket, username: str, room: str) -
         }))
     except Exception as e:
         logger.exception("Failed to send room state to '%s': %s", username, e)
+        await _release()
         return False
 
-    rooms.setdefault(room, set()).add(username)
-    room_of[username] = room
     return True
 
 
@@ -231,6 +297,14 @@ async def _handle_websocket_message(websocket: WebSocket, username: str, payload
         data = payload.get("data")
         raw_wanted = data.get("usernames") if isinstance(data, dict) else None
         wanted = raw_wanted if isinstance(raw_wanted, list) else []
+        # Cap the query: a 64 KiB frame can carry thousands of names, and at 100
+        # messages / 10 s one client could drive a large lookup+echo loop on a
+        # server shared by everyone. It doubles as a brake on presence sweeps
+        # used to enumerate who is online.
+        if len(wanted) > _PRESENCE_MAX_QUERY:
+            logger.warning("User '%s' sent oversized presence query (%d names) - truncating",
+                           username, len(wanted))
+            wanted = wanted[:_PRESENCE_MAX_QUERY]
         online = [u for u in wanted if isinstance(u, str) and u in active_connections]
         logger.debug("User '%s' requested presence check for: %s. Online: %s", username, wanted, online)
         try:
@@ -404,8 +478,11 @@ async def _establish_connection_session(websocket: WebSocket, username: str) -> 
         "type": "session_token",
         "data": {
             "token": new_token,
-            "reflected_host": client.host if client else None,
-            "reflected_port": client.port if client else None,
+            # The client injects this as the IP of its srflx candidate, so a
+            # proxy address here would advertise an endpoint that answers for
+            # nobody. Behind a proxy the source port is meaningless too.
+            "reflected_host": _client_ip(websocket),
+            "reflected_port": (client.port if client and not _TRUST_PROXY_HEADERS else None),
             "capabilities": SERVER_CAPABILITIES,
         },
     }))
@@ -497,7 +574,7 @@ async def websocket_endpoint(
                     Response(status_code=403, content="Origin not allowed."))
                 return
 
-        client_ip = websocket.client.host if websocket.client else "unknown"
+        client_ip = _client_ip(websocket)
         if not _conn_rate_ok(client_ip):
             logger.warning("Connection rate limit exceeded for IP '%s'", client_ip)
             await websocket.send_denial_response(

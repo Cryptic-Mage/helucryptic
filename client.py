@@ -14,11 +14,12 @@ import string
 import sys
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
+
 try:
     from datetime import UTC
 except ImportError:
-    UTC = timezone.utc
+    UTC = UTC
 from io import BytesIO
 from pathlib import Path
 
@@ -45,8 +46,8 @@ import config
 import identity
 import invites
 import paths
-import secure_store
 import profiles
+import secure_store
 from constants.client_constants import (
     _EASE_IO,
     _EASE_OUT,
@@ -114,6 +115,7 @@ from webrtc_engine import (
     WebRTCEngine,
     clear_forwarded_port,
     set_forwarded_ports,
+    test_forwarded_port,
 )
 
 
@@ -323,6 +325,11 @@ class HelucrypticApp:
         self._session_allowed: set[str]        = set()
         # Shared access token sent to the signaling server (validated server-side).
         self._server_password: str             = HELUCRYPTIC_SERVER_PASSWORD
+        # Started when the signaling handshake completes.  Peer negotiation
+        # joins this task before it creates an RTCPeerConnection, preventing a
+        # fast room-state or offer frame from starting ICE before the relay
+        # credentials needed by symmetric-NAT peers are ready.
+        self._turn_refresh_task: asyncio.Task | None = None
         # Session token issued by the server on connect; resent on reconnect to
         # prove we own this username slot (prevents third-party eviction).
         self._ws_session_token: str            = ""
@@ -378,6 +385,7 @@ class HelucrypticApp:
 
         self._pf_manager = None  # PortForwardManager when port-forwarding is on
         self._pf_starting = False  # a _start_port_forward is mid-flight
+        self._verified_forward_port = 0  # port proven reachable by STUN, else 0
         # Background loops are tracked so a profile switch can stop this session's
         # loops cleanly before the next profile's app takes over.
         self._bg_tasks: list = []
@@ -452,6 +460,7 @@ class HelucrypticApp:
                 self._fire_and_forget(self._pf_manager.stop())
                 self._pf_manager = None
             clear_forwarded_port()
+            self._verified_forward_port = 0
             return
         if restart:
             if self._pf_manager is not None:
@@ -480,7 +489,14 @@ class HelucrypticApp:
         ip = await asyncio.to_thread(local_ip_for, gw)
 
         async def request_fn(gateway: str):
-            # Optimized: try UPnP first (most home routers) - stdlib SSDP, no dep
+            # NAT-PMP first: it answers in milliseconds (or resets instantly when
+            # unsupported), whereas the UPnP SSDP sweep always burns its full 2 s
+            # timeout. The old order paid that 2 s on every cycle for the VPNs
+            # where NAT-PMP is the mechanism that actually works.
+            for candidate in candidates:
+                port = await asyncio.to_thread(request_mapping_over_socket, candidate)
+                if port is not None:
+                    return port
             try:
                 import upnp as _upnp
                 upnp_res = await asyncio.to_thread(_upnp.try_upnp_mapping, 0, 0)
@@ -489,14 +505,14 @@ class HelucrypticApp:
                     return p
             except Exception:
                 pass
-            # Try each NAT-PMP candidate in order; stop at the first successful mapping.
-            for candidate in candidates:
-                port = await asyncio.to_thread(request_mapping_over_socket, candidate)
-                if port is not None:
-                    return port
-            # No NAT-PMP response from any gateway - fall back to the manually
-            # configured port (e.g. a static router forward without NAT-PMP).
-            return self.settings.forwarded_port or None
+            # Nothing answered. Only a port the user configured BY HAND may stand
+            # in here - it describes a static router forward we cannot query.
+            # Reusing an auto-discovered port would resurrect a mapping from a
+            # previous network (VPN on, different router) and report it as live,
+            # so ICE would bind to and advertise an endpoint nothing forwards.
+            if getattr(self.settings, "forwarded_port_manual", False):
+                return self.settings.forwarded_port or None
+            return None
 
         manager = PortForwardManager(
             gateway=gw, local_ip=ip,
@@ -516,6 +532,34 @@ class HelucrypticApp:
         # PortForwardManager now publishes a LIST of mapped ports (one per peer
         # for a relay hub). Bind the whole pool; persist the first for the UI.
         port_list = list(ports) if isinstance(ports, (list, tuple)) else [ports]
+        first = port_list[0] if port_list else 0
+        # A mapping the gateway granted is not proof of reachability. Behind
+        # carrier-grade NAT the home router happily maps a port while the ISP
+        # NAT in front of it forwards nothing, so we would bind ICE to that port
+        # and advertise a public endpoint that silently drops every packet -
+        # every connectivity check wasted on an address that cannot answer.
+        # test_forwarded_port settles it: STUN from the mapped port and see
+        # whether the public port comes back unchanged.
+        if first and self._verified_forward_port != first:
+            self._fire_and_forget(self._verify_and_publish(ip, port_list))
+            return
+        self._commit_forwarded_port(ip, port_list)
+
+    async def _verify_and_publish(self, ip: str, port_list) -> None:
+        port = port_list[0]
+        ok, msg = await asyncio.to_thread(test_forwarded_port, ip, port)
+        if not ok:
+            self._verified_forward_port = 0
+            clear_forwarded_port()
+            print(f"[forward] {ip}:{port} is not reachable from outside - {msg}. "
+                  f"Not advertising it; a relay is required on this network.",
+                  flush=True)
+            return
+        self._verified_forward_port = port
+        print(f"[forward] verified {msg}", flush=True)
+        self._commit_forwarded_port(ip, port_list)
+
+    def _commit_forwarded_port(self, ip: str, port_list) -> None:
         set_forwarded_ports(ip, port_list)
         first = port_list[0] if port_list else 0
         if first and self.settings.forwarded_port != first:
@@ -2309,6 +2353,7 @@ class HelucrypticApp:
         self._room_peers[sender] = "connecting"
         self._refresh_participant_list()
         await self._broadcast_capability(ws_send)
+        await self._ensure_turn_credentials()
         await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
         await self._apply_active_call_to_hub()
         self._refresh_hub_indicator()
@@ -2331,6 +2376,7 @@ class HelucrypticApp:
             self._room_peers[peer] = "connecting"
         self._refresh_participant_list()
         await self._broadcast_capability(ws_send)
+        await self._ensure_turn_credentials()
         await self.engine.reconcile_room_connections(list(self._room_peers.keys()), ws_send)
         await self._apply_active_call_to_hub()
         self._refresh_hub_indicator()
@@ -2432,12 +2478,40 @@ class HelucrypticApp:
         if not self._active_contact:
             self.engine.target_peer = sender
         try:
+            await self._ensure_turn_credentials()
             await self.engine.add_peer(sender, ws_send)
         except Exception as ex:
             self._log(f"[rtc] {self.engine.my_username}: failed adding peer {sender}: {ex}")
 
+    async def _ensure_turn_credentials(self) -> bool:
+        """Wait for the handshake's relay request before starting ICE.
+
+        A manually configured TURN URL is already available.  Otherwise this
+        joins the request started by ``session_token`` so an immediately
+        following room state, contact request, or offer uses the server-minted
+        relay instead of attempting a doomed STUN-only symmetric-NAT path.
+        A failed request remains non-fatal: direct ICE keeps its normal
+        fallback behaviour and diagnostics.
+        """
+        if getattr(self.settings, "turn_url", "") or self.engine._server_ice:
+            return True
+        task = self._turn_refresh_task
+        if task is None:
+            task = self._fire_and_forget(self.engine.refresh_server_ice(
+                self.settings.signaling_url, self._server_password))
+            self._turn_refresh_task = task
+        if task is None:
+            return False
+        try:
+            return bool(await asyncio.shield(task))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
     async def _handle_signaling_message(self, t: str, sender: str, data: dict, msg: dict, ws_send) -> None:
         if t == "offer":
+            await self._ensure_turn_credentials()
             await self.engine.handle_offer(sender, data, ws_send)
         elif t == "answer":
             await self.engine.handle_answer(data, sender=sender)
@@ -2485,8 +2559,9 @@ class HelucrypticApp:
             # Pull relay credentials from the same server. Peers behind CGNAT /
             # symmetric NAT have no direct UDP path, so this is what makes calls
             # and file transfer work across the WAN rather than only on a LAN.
-            self._fire_and_forget(self.engine.refresh_server_ice(
-                self.settings.signaling_url, self._server_password))
+            self._turn_refresh_task = self._fire_and_forget(
+                self.engine.refresh_server_ice(
+                    self.settings.signaling_url, self._server_password))
         elif t == "presence":
             # Server-confirmed online set for our contacts.
             self._apply_presence(data.get("online", []))
@@ -2948,7 +3023,7 @@ class HelucrypticApp:
         self.contact_list.controls.clear()
         contacts = load_contacts()
         # Filter-as-you-type (matches nickname OR username, case-insensitive).
-        query = (getattr(self, "contact_search", None) and self.contact_search.value or "").strip().lower()
+        query = ((getattr(self, "contact_search", None) and self.contact_search.value) or "").strip().lower()
         if query:
             contacts = [c for c in contacts
                         if query in (c.nickname or "").lower() or query in c.username.lower()]
@@ -3483,6 +3558,7 @@ class HelucrypticApp:
             await self.ws.send(json.dumps(payload))
         # Tell the peer we want to connect (they'll add_peer us too), then add
         # them on our side. add_peer's alphabetical tie-break decides who offers.
+        await self._ensure_turn_credentials()
         try:
             await self.ws.send(json.dumps({"target": username, "type": "connect_request"}))
         except Exception as ex:
@@ -5457,8 +5533,8 @@ def _to_ws_url(base: str) -> str:
 
 async def check_signaling_auth(base_url: str, password: str = "", timeout: float = 6.0) -> tuple[bool, str]:
     """Validate server connectivity and credentials with a transient probe."""
-    import secrets as _secrets
     import json as _json
+    import secrets as _secrets
     import urllib.parse as _urllib_parse
 
     ws_base = _to_ws_url(base_url).rstrip("/")
@@ -5502,7 +5578,7 @@ async def check_signaling_auth(base_url: str, password: str = "", timeout: float
             err = msg.get("data") or msg.get("error") or "Authentication failed"
             return False, str(err)
         return True, ""
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False, "Server verification timed out. Please try again."
     except Exception as ex:
         close_code = getattr(ws, "close_code", None)
@@ -5949,7 +6025,7 @@ def restart_app() -> None:
 
 async def main(page: ft.Page) -> None:
     await asyncio.sleep(0)
-    _install_log_capture()   
+    _install_log_capture()
     # mirror stdout/stderr into the in-app diagnostics log
     # Suppress aiortc SCTP "Cannot send data, not connected" noise: these are
     # background Tasks inside aiortc that try to flush a dead DTLS transport.

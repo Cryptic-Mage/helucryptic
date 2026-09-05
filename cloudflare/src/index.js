@@ -144,8 +144,10 @@ const MSG_WINDOW_MS = 10_000;  // 10 s
 const MSG_MAX = 100;     // max signaling messages per user per window
 const CONN_WINDOW_MS = 60_000; // 60 s
 const CONN_MAX = 20;     // max new connections per IP per window
+const CONN_PRUNE_AT = 1024; // sweep expired IPs once the map grows past this
 const BYTE_WINDOW_MS = 10_000; // 10 s
 const BYTE_MAX = 655360; // 640 KiB per 10 s (~64 KiB/s sustained, 256 KiB burst)
+const PRESENCE_MAX_QUERY = 64;   // usernames per presence request
 const RELAY_FRAME_MAX_BYTES = 24576; // 24 KiB wire cap for relay frames
 const SERVER_CAPABILITIES = ["relay_e2ee_v1", "signaling_hello_v1"];
 
@@ -176,8 +178,20 @@ export class SignalHub {
   // Per-IP connection rate limit (mirrors server.py _conn_rate_ok). These
   // timestamps live only in memory; if the Durable Object hibernates the
   // window simply resets, which is harmless (Cloudflare's edge also shields us).
+  // _connTimes is keyed by address and, unlike the per-username limiters, has
+  // no disconnect hook - every IP that ever connected stayed resident for the
+  // lifetime of the Durable Object.
+  _pruneConnTimes(now) {
+    for (const [ip, times] of this._connTimes) {
+      if (!times.length || times[times.length - 1] < now - CONN_WINDOW_MS) {
+        this._connTimes.delete(ip);
+      }
+    }
+  }
+
   _connRateOk(ip) {
     const now = Date.now();
+    if (this._connTimes.size > CONN_PRUNE_AT) this._pruneConnTimes(now);
     let times = this._connTimes.get(ip);
     if (!times) { times = []; this._connTimes.set(ip, times); }
     const cutoff = now - CONN_WINDOW_MS;
@@ -437,8 +451,15 @@ export class SignalHub {
     // The client sends the usernames it cares about (its local contacts)
     // and we reply with the subset that currently hold a live connection.
     if (type === "presence") {
-      const wanted = payload.data?.usernames || [];
-      const online = wanted.filter((u) => this._findUser(u) !== null);
+      // Must tolerate a malformed shape: `usernames` that is not an array made
+      // .filter() throw straight out of webSocketMessage, which server.py has
+      // always guarded against. Capped for the same reason server.py caps it -
+      // a 64 KiB frame holds thousands of names, and this Durable Object is
+      // shared by every user on the deployment.
+      const raw = payload.data?.usernames;
+      const wanted = Array.isArray(raw) ? raw.slice(0, PRESENCE_MAX_QUERY) : [];
+      const online = wanted.filter(
+        (u) => typeof u === "string" && this._findUser(u) !== null);
       ws.send(JSON.stringify({
         sender: "system",
         type: "presence",

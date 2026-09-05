@@ -64,38 +64,61 @@ def _ssdp_discover(timeout: float = 2.0) -> list[str]:
             pass
     return urls
 
+def _lan_url_ok(url: str) -> bool:
+    """True only for an http(s) URL whose host is a literal private LAN address.
+
+    SSDP is answered by whatever is on the local network, so every URL derived
+    from it is attacker-controlled input. Anything but a private IP literal is
+    refused: a hostname would have to be resolved to be judged, and the name
+    could resolve differently between the check and the fetch.
+    """
+    import ipaddress
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname or ""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # A hostname, not an address. The old code detected external domains
+        # here and then fell through to fetch them anyway (`pass`), which left
+        # a rogue LAN device free to point us at any host on the internet.
+        return False
+    if ip.is_link_local or ip.is_loopback:
+        # 169.254.169.254 is the cloud metadata endpoint; link-local is never a
+        # legitimate IGD, so the whole range goes.
+        return False
+    return bool(ip.is_private)
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: validating only the first URL is no guard at all if a
+    private-IP LOCATION can 302 us onward to the metadata service."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        logger.debug("UPnP refused redirect to %r", str(newurl)[:120])
+        return None
+
+
+_upnp_opener = urllib.request.build_opener(_NoRedirects)
+
+
 def _get_igd_control_url(location_url: str, timeout: float = 2.5) -> tuple[str, str] | None:
     """Fetch device description and extract WANIPConnection control URL."""
-    # SSRF guard: only fetch http(s) URLs on private LAN ranges (never file://, cloud metadata, etc.)
     try:
-        parsed = urllib.parse.urlparse(location_url)
-        if parsed.scheme not in ("http", "https"):
-            logger.debug("UPnP discovery rejected non-http LOCATION %r", location_url[:120])
+        if not _lan_url_ok(location_url):
+            logger.debug("UPnP discovery rejected LOCATION %r", location_url[:120])
             return None
-        host = parsed.hostname or ""
-        # Block cloud metadata and loopback abuse - SSDP should only point to LAN devices
-        if host in ("169.254.169.254", "metadata.google.internal") or host.startswith("169.254."):
-            logger.debug("UPnP discovery rejected metadata LOCATION %r", location_url[:120])
-            return None
-        # Basic private-range check: allow RFC1918, link-local, localhost; reject public internet hosts
-        # to prevent a rogue LAN device redirecting us to an external attacker.
-        # We still allow it if it's clearly a LAN IP, otherwise log and block.
-        import ipaddress
-        try:
-            ip = ipaddress.ip_address(host)
-            if not (ip.is_private or ip.is_link_local or ip.is_loopback):
-                logger.debug("UPnP discovery rejected non-private LOCATION host %r", host)
-                return None
-        except ValueError:
-            # hostname, not IP - allow only if it looks like a local router name
-            # (reject obvious external hosts)
-            if "." in host and not host.endswith((".local", ".lan", ".home")) and host.count(".") >= 2:
-                # allow LAN hostnames that are single-label or .local, but not full internet domains with fetch
-                pass  # still allow, but scheme check already limited risk
-        with urllib.request.urlopen(location_url, timeout=timeout) as resp:
-            xml = resp.read()
+        with _upnp_opener.open(location_url, timeout=timeout) as resp:
+            # Read one byte past the cap rather than the whole body: a hostile
+            # device could otherwise stream indefinitely and we would only
+            # notice after buffering all of it.
+            xml = resp.read(32769)
             if len(xml) > 32768:
-                logger.debug("UPnP description too large (%d bytes) from %s - rejecting", len(xml), location_url)
+                logger.debug("UPnP description too large from %s - rejecting", location_url)
                 return None
         root = ET.fromstring(xml)
         ns = {"d": "urn:schemas-upnp-org:device-1-0"}
@@ -105,12 +128,22 @@ def _get_igd_control_url(location_url: str, timeout: float = 2.5) -> tuple[str, 
             curl = svc.find("d:controlURL", ns)
             if st is not None and curl is not None and ("WANIPConnection" in st.text or "WANPPPConnection" in st.text):
                 base = urllib.parse.urljoin(location_url, curl.text.strip())
-                # Also try to find eventSubURL not needed
+                # controlURL comes out of the device's own XML and may be an
+                # absolute URL, in which case urljoin hands back that URL
+                # verbatim - so the destination has to clear the same bar as
+                # the LOCATION did before we POST a SOAP body to it.
+                if not _lan_url_ok(base):
+                    logger.debug("UPnP rejected controlURL %r", base[:120])
+                    return None
                 return base, st.text.strip()
         # fallback brute force
         for elem in root.iter():
             if elem.tag.endswith("controlURL") and elem.text:
-                return urllib.parse.urljoin(location_url, elem.text.strip()), ""
+                base = urllib.parse.urljoin(location_url, elem.text.strip())
+                if not _lan_url_ok(base):
+                    logger.debug("UPnP rejected controlURL %r", base[:120])
+                    return None
+                return base, ""
     except Exception as e:
         logger.debug("UPnP description fetch failed %s: %s", location_url, e)
     return None
@@ -134,9 +167,12 @@ def _soap_add_mapping(control_url: str, service_type: str, internal_ip: str, int
         "Content-Type": 'text/xml; charset="utf-8"',
         "SOAPAction": f'"{service_type}#AddPortMapping"',
     }
+    if not _lan_url_ok(control_url):
+        logger.debug("UPnP refused SOAP to non-LAN control URL %r", control_url[:120])
+        return False
     try:
         req = urllib.request.Request(control_url, data=body.encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+        with _upnp_opener.open(req, timeout=3.0) as resp:
             code = resp.status
             return 200 <= code < 300
     except Exception as e:
@@ -204,8 +240,8 @@ def try_upnp_mapping(internal_port: int = 0, external_port: int = 0, lifetime: i
                     body = f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddress xmlns:u="{service_type}"/></s:Body></s:Envelope>'
                     headers = {"Content-Type": 'text/xml', "SOAPAction": f'"{service_type}#GetExternalIPAddress"'}
                     req = urllib.request.Request(control_url, data=body.encode(), headers=headers, method="POST")
-                    with urllib.request.urlopen(req, timeout=2.0) as resp:
-                        xml = resp.read().decode(errors="ignore")
+                    with _upnp_opener.open(req, timeout=2.0) as resp:
+                        xml = resp.read(32769).decode(errors="ignore")
                         m = re.search(r"<NewExternalIPAddress>([^<]+)</", xml)
                         if m:
                             ext_ip = m.group(1).strip()
@@ -232,9 +268,12 @@ def try_upnp_unmap(external_port: int, control_url_hint: str | None = None) -> N
         "Content-Type": 'text/xml; charset="utf-8"',
         "SOAPAction": '"urn:schemas-upnp-org:service:WANIPConnection:1#DeletePortMapping"',
     }
+    if not _lan_url_ok(control_url_hint):
+        logger.debug("UPnP refused unmap to non-LAN control URL %r", str(control_url_hint)[:120])
+        return
     try:
         req = urllib.request.Request(control_url_hint, data=body.encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+        with _upnp_opener.open(req, timeout=3.0) as resp:
             logger.debug("UPnP unmapped port %d (status %d)", external_port, resp.status)
     except Exception as e:
         logger.debug("UPnP DeletePortMapping failed for port %d: %s", external_port, e)

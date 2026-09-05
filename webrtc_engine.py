@@ -1,11 +1,13 @@
 import asyncio
 import base64 as _b64
 import concurrent.futures
+import contextlib
 import hashlib
 import hmac
 import json
 import os
 import queue as _queue
+import ssl
 import tempfile
 import threading
 import time as _time
@@ -31,11 +33,12 @@ except ImportError:
 
 # Pillow's BOX resampling is area-averaging - the equivalent of cv2.INTER_AREA
 _BOX = getattr(Image, "Resampling", Image).BOX
-from datetime import datetime, timezone
+from datetime import datetime
+
 try:
     from datetime import UTC
 except ImportError:
-    UTC = timezone.utc
+    UTC = UTC
 
 from aiortc import (
     AudioStreamTrack,
@@ -158,6 +161,20 @@ def _select_for_aiortc(servers: list, attempt: int = 0) -> list:
 
 _USER_AGENT = "helucryptic/1.0"
 
+_tls_ctx = None
+
+
+def _tls_context():
+    """Shared TLS context trusting certifi's roots (built once - ~135 ms)."""
+    global _tls_ctx
+    if _tls_ctx is None:
+        try:
+            import certifi
+            _tls_ctx = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _tls_ctx = ssl.create_default_context()
+    return _tls_ctx
+
 
 def sdp_forwarded_port(sdp: str) -> int:
     """The forwarded port THIS connection actually gathered on, else 0.
@@ -204,7 +221,11 @@ def _fetch_ice_blocking(signaling_url: str, password: str, timeout: float) -> di
         f"{base}/turn{query}",
         headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # Verify against certifi's bundle rather than the system store. Windows
+    # machines with an outdated root set fail here with a bare URLError, which
+    # is why the WebSocket path already does this - the two must agree, or TURN
+    # silently stops working on exactly the machines that need it most.
+    with urllib.request.urlopen(req, timeout=timeout, context=_tls_context()) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -727,14 +748,14 @@ async def test_turn(turn_url: str, username: str = "", password: str = "") -> tu
                     await asyncio.sleep(0.05)
             try:
                 await asyncio.wait_for(wait_gathering(), timeout=8.0)
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 return (False, "Timed out contacting TURN server")
 
         sdp = pc.localDescription.sdp if pc.localDescription else ""
         if "typ relay" in sdp:
             return (True, "Relay reachable")
         return (False, "No relay candidate - check URL/credentials")
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         return (False, "Timed out contacting TURN server")
     except Exception as ex:
         return (False, f"Error: {type(ex).__name__}")
@@ -1280,6 +1301,7 @@ class WebRTCEngine:
         self._nat_profile = None          # nat_discovery.NatProfile | None
         self._predicted_ext_port: int = 0
         self._predicted_ext_ip:   str = ""
+        self._nat_probe_task = None   # in-flight detect_nat(), shared by callers
 
     # ------------------------------------------------------------------
     # ICE / TURN configuration (from settings - env only seeds first run)
@@ -1373,6 +1395,17 @@ class WebRTCEngine:
             pass
         return RTCConfiguration(iceServers=_select_for_aiortc(servers, self._ice_attempt))
 
+    def _nat_summary_dict(self) -> dict:
+        """detect_nat()'s return shape, built from the cached profile."""
+        profile = self._nat_profile
+        if profile is None:
+            return {"nat_type": "unknown", "summary": "not probed",
+                    "ext_ip": "", "predicted_port": 0, "needs_relay": False}
+        return {"nat_type": profile.nat_type, "summary": profile.summary,
+                "ext_ip": profile.ext_ip,
+                "predicted_port": self._predicted_ext_port,
+                "needs_relay": getattr(profile, "needs_relay", False)}
+
     async def detect_nat(self) -> dict:
         """Probe NAT behaviour (RFC 5780) off the event loop and cache the result.
 
@@ -1381,9 +1414,20 @@ class WebRTCEngine:
         offer/answer (see _augment_local_sdp). For RANDOM strict NAT, also
         triggers optimized birthday spray in background. Best-effort; never raises.
         """
+        # Probing takes ~2.7 s of STUN round trips and needs nothing from the
+        # signaling session, so it is kicked off the moment Connect is clicked
+        # and runs alongside the WebSocket dial. The post-handshake call then
+        # joins the in-flight probe instead of repeating it.
+        existing = self._nat_probe_task
+        if existing is not None and not existing.done():
+            with contextlib.suppress(Exception):
+                await asyncio.shield(existing)
+            return self._nat_summary_dict()
         try:
             import nat_discovery
-            profile = await asyncio.to_thread(nat_discovery.discover)
+            task = asyncio.ensure_future(asyncio.to_thread(nat_discovery.discover))
+            self._nat_probe_task = task
+            profile = await task
             self._nat_profile = profile
             pred = nat_discovery.predict_next_port(profile)
             if pred:
@@ -1458,7 +1502,7 @@ class WebRTCEngine:
             # Fire spray without blocking caller - but await chunk with timeout 3s
             try:
                 await asyncio.wait_for(asyncio.gather(*[_one(p) for p in chunk]), timeout=3.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             # Also inject 2 extra predicted SDP candidates for lookahead 2,3
             for la in (2, 3):
