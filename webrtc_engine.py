@@ -1015,6 +1015,7 @@ class WebRTCEngine:
         self.on_rtt:           Callable | None = None  # (peer: str, rtt_ms: float)
         self.on_sent:          Callable | None = None  # (peer, msg_id) - queued chat left the outbox
         self.on_typing:        Callable | None = None  # (peer: str) - peer is composing
+        self.on_peer_unverified: Callable | None = None  # (peer: str) - peer removed verification
 
         # --- Reliability layer (heartbeat + outbox + delivery acks) ----------
         # App-layer heartbeat: detects a logically-dead-but-"open" channel that
@@ -2322,6 +2323,14 @@ class WebRTCEngine:
             await self._handle_membership(frame, peer)
             return
 
+        if t == "unverify":
+            if self.on_peer_unverified:
+                try:
+                    self.on_peer_unverified(peer)
+                except Exception:
+                    pass
+            return
+
         if t == "chat":
             sender = peer
             msg_id = None
@@ -2667,6 +2676,22 @@ class WebRTCEngine:
         if ch and getattr(ch, "readyState", None) == "open":
             try:
                 ch.send(json.dumps({"__type": "__typing"}))
+            except Exception:
+                pass
+
+    async def send_unverify(self, peer: str) -> None:
+        """Notify peer that verification has been removed so both sides unverify in sync."""
+        payload = {"__type": "unverify"}
+        ch = self.data_channels.get(peer)
+        if ch and getattr(ch, "readyState", None) == "open":
+            try:
+                ch.send(json.dumps(payload))
+                return
+            except Exception:
+                pass
+        if self._send_ws is not None:
+            try:
+                await self.send_via_relay(peer, payload)
             except Exception:
                 pass
 
