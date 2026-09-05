@@ -1813,6 +1813,9 @@ class HelucrypticApp:
             display = c.nickname
         self._log(f"⚠ SECURITY: {display}'s identity key changed - verification removed. "
                   f"Re-verify their fingerprint out-of-band before trusting.")
+        def _dismiss(e):
+            self._close_dialog(dlg)
+
         dlg = ft.AlertDialog(
             title=ft.Text("⚠ Contact key changed"),
             content=ft.Text(
@@ -1822,7 +1825,7 @@ class HelucrypticApp:
                 f"or man-in-the-middle attempt.\n\nVerification has been removed. "
                 f"Confirm their new fingerprint out-of-band before trusting it."
             ),
-            actions=[ft.TextButton("Understood", on_click=lambda e: self._close_dialog(dlg))],
+            actions=[ft.TextButton("Understood", on_click=_dismiss)],
         )
         self._show_dialog(dlg)
         self.page.update()
@@ -3022,43 +3025,54 @@ class HelucrypticApp:
         if not c:
             return
 
+        def show_main_menu(e=None):
+            is_connected = username in self.engine.pcs
+            menu.title = ft.Text(c.nickname or username)
+            menu.content = ft.Column([
+                ft.TextButton("Rename",           on_click=do_rename),
+                ft.TextButton("View Fingerprint", on_click=do_fingerprint),
+                *([ ft.TextButton(
+                        "Disconnect",
+                        icon=ft.Icons.LINK_OFF,
+                        on_click=do_disconnect,
+                        style=ft.ButtonStyle(color=C.YELLOW),
+                    )] if is_connected else []),
+                ft.TextButton("Remove Contact",   on_click=do_remove),
+            ], tight=True, spacing=0)
+            menu.actions = [
+                ft.TextButton("Close", on_click=lambda ev: self._close_dialog(menu)),
+            ]
+            menu.update()
+
         def do_rename(e):
-            self._close_dialog(menu)
             field = _neon_field(label="Nickname", value=c.nickname, autofocus=True)
             def save_rename(ev):
                 rename_contact(username, field.value.strip())
                 self._refresh_contact_list()
                 self._refresh_participant_list()
-                self._close_dialog(rename_dlg)
-            rename_dlg = ft.AlertDialog(
-                title=ft.Text("Rename contact"), content=field,
-                actions=[
-                    ft.TextButton("Save",   on_click=save_rename),
-                    ft.TextButton("Cancel", on_click=lambda ev: self._close_dialog(rename_dlg)),
-                ],
-            )
-            self._show_dialog(rename_dlg)
+                self._close_dialog(menu)
+            menu.title = ft.Text("Rename contact")
+            menu.content = field
+            menu.actions = [
+                ft.TextButton("Save",   on_click=save_rename),
+                ft.TextButton("Back",   on_click=show_main_menu),
+            ]
+            menu.update()
 
         def do_fingerprint(e):
-            self._close_dialog(menu)
             fp = c.fingerprint or "(no key exchanged yet)"
             def mark_verified(ev):
                 set_verified(username, True)
                 self._refresh_contact_list()
                 self._refresh_participant_list()
-                self._close_dialog(fp_dlg)
+                self._close_dialog(menu)
 
             def doesnt_match(ev):
-                # A mismatch means the key you're seeing is NOT your contact's -
-                # possible man-in-the-middle, or you compared the wrong code.
-                # Keep them unverified, turn on Verified-Only so nothing is sent
-                # to them unintentionally, and offer to remove them.
                 set_verified(username, False)
                 self.settings.verified_only = True
                 save_settings(self.settings)
                 self._refresh_contact_list()
                 self._refresh_participant_list()
-                self._close_dialog(fp_dlg)
 
                 def remove_and_close(ev2):
                     delete_contact(username)
@@ -3067,48 +3081,44 @@ class HelucrypticApp:
                         self.chat_log.controls.clear()
                         self._update_main_view()   # fall back to home
                     self._refresh_contact_list()
-                    self._close_dialog(warn)
+                    self._close_dialog(menu)
 
-                warn = ft.AlertDialog(
-                    title=ft.Text("⚠ Fingerprint does NOT match"),
-                    content=ft.Text(
-                        "If the fingerprint your contact reads out is different from the "
-                        "one shown, the encryption key is not theirs. That can mean a "
-                        "man-in-the-middle is intercepting the connection (or you compared "
-                        "the wrong code).\n\nThey've been left UNVERIFIED and Verified-Only "
-                        "mode is now ON, so nothing is sent to an unverified contact by "
-                        "mistake. Do not call or message them until you can re-exchange a "
-                        "fresh identity code over a trusted channel. You can remove them now."),
-                    actions=[
-                        ft.TextButton("Remove contact", on_click=remove_and_close,
-                                      style=ft.ButtonStyle(color=C.RED)),
-                        ft.TextButton("Keep (unverified)", on_click=lambda e2: self._close_dialog(warn)),
-                    ],
-                )
-                self._show_dialog(warn)
-
-            fp_dlg = ft.AlertDialog(
-                title=ft.Text(f"Fingerprint - {c.nickname or username}"),
-                content=ft.Column([
-                    ft.Container(
-                        content=ft.Text(fp, font_family="monospace", size=13, color=C.TEXT,
-                                        selectable=True),
-                        padding=ft.Padding.all(10), border_radius=R.MD,
-                        bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER),
-                    ),
-                    ft.Text("Compare every character with your contact out-of-band "
-                            "(call, in person, Signal). Only mark verified if they match "
-                            "exactly.", size=11, color=C.MUTED),
-                ], tight=True, spacing=8),
-                actions=[
-                    ft.FilledButton("Matches - Verify", icon=ft.Icons.VERIFIED,
-                                    on_click=mark_verified, style=_filled_style(C.GREEN, C.BTN_GREEN)),
-                    ft.TextButton("Doesn't match", on_click=doesnt_match,
+                menu.title = ft.Text("⚠ Fingerprint does NOT match")
+                menu.content = ft.Text(
+                    "If the fingerprint your contact reads out is different from the "
+                    "one shown, the encryption key is not theirs. That can mean a "
+                    "man-in-the-middle is intercepting the connection (or you compared "
+                    "the wrong code).\n\nThey've been left UNVERIFIED and Verified-Only "
+                    "mode is now ON, so nothing is sent to an unverified contact by "
+                    "mistake. Do not call or message them until you can re-exchange a "
+                    "fresh identity code over a trusted channel. You can remove them now.")
+                menu.actions = [
+                    ft.TextButton("Remove contact", on_click=remove_and_close,
                                   style=ft.ButtonStyle(color=C.RED)),
-                    ft.TextButton("Close", on_click=lambda ev: self._close_dialog(fp_dlg)),
-                ],
-            )
-            self._show_dialog(fp_dlg)
+                    ft.TextButton("Keep (unverified)", on_click=lambda e2: self._close_dialog(menu)),
+                ]
+                menu.update()
+
+            menu.title = ft.Text(f"Fingerprint - {c.nickname or username}")
+            menu.content = ft.Column([
+                ft.Container(
+                    content=ft.Text(fp, font_family="monospace", size=13, color=C.TEXT,
+                                    selectable=True),
+                    padding=ft.Padding.all(10), border_radius=R.MD,
+                    bgcolor=C.ELEV, border=ft.Border.all(1, C.BORDER),
+                ),
+                ft.Text("Compare every character with your contact out-of-band "
+                        "(call, in person, Signal). Only mark verified if they match "
+                        "exactly.", size=11, color=C.MUTED),
+            ], tight=True, spacing=8)
+            menu.actions = [
+                ft.FilledButton("Matches - Verify", icon=ft.Icons.VERIFIED,
+                                on_click=mark_verified, style=_filled_style(C.GREEN, C.BTN_GREEN)),
+                ft.TextButton("Doesn't match", on_click=doesnt_match,
+                              style=ft.ButtonStyle(color=C.RED)),
+                ft.TextButton("Back", on_click=show_main_menu),
+            ]
+            menu.update()
 
         def do_remove(e):
             delete_contact(username)
@@ -3119,8 +3129,6 @@ class HelucrypticApp:
             self._refresh_contact_list()
             self._close_dialog(menu)
 
-        is_connected = username in self.engine.pcs
-
         def do_disconnect(e):
             self._close_dialog(menu)
             self._fire_and_forget(self.engine.remove_peer(username))
@@ -3130,19 +3138,11 @@ class HelucrypticApp:
 
         menu = ft.AlertDialog(
             title=ft.Text(c.nickname or username),
-            content=ft.Column([
-                ft.TextButton("Rename",           on_click=do_rename),
-                ft.TextButton("View Fingerprint", on_click=do_fingerprint),
-                *([ ft.TextButton(
-                        "Disconnect",
-                        icon=ft.Icons.LINK_OFF,
-                        on_click=do_disconnect,
-                        style=ft.ButtonStyle(color=C.YELLOW),
-                    )] if is_connected else []),
-                ft.TextButton("Remove Contact",   on_click=do_remove),
-            ], tight=True, spacing=0),
+            content=ft.Container(),
+            actions=[]
         )
         self._show_dialog(menu)
+        show_main_menu()
 
     def _select_contact(self, username: str) -> None:
         self._active_contact = username
@@ -4832,9 +4832,17 @@ class HelucrypticApp:
         self.page.show_dialog(dlg)
 
     def _close_dialog(self, dlg=None) -> None:
-        # pop_dialog() dismisses the current (top) dialog; the arg is ignored.
-        _ = dlg
-        self.page.pop_dialog()
+        try:
+            if dlg is not None:
+                dlg.open = False
+                dlg.update()
+            else:
+                self.page.pop_dialog()
+        except Exception:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
 
     async def _retention_background_loop(self) -> None:
         while True:
@@ -5026,7 +5034,10 @@ class HelucrypticApp:
         self.chat_log.controls.append(
             ft.Container(content=chip, padding=ft.Padding.symmetric(horizontal=8, vertical=6)))
         self._last_bubble_sender = None   # a system line breaks bubble grouping
-        self.page.update()
+        try:
+            self.page.update()
+        except Exception:
+            pass
 
     def _toast(self, text: str, level: str = "info") -> None:
         """Surface a transient system/connection message as a toast OVERLAY
@@ -5450,6 +5461,8 @@ async def main(page: ft.Page) -> None:
             return
         lp.default_exception_handler(ctx)
         if exc is not None:
+            if isinstance(exc, RuntimeError) and "destroyed session" in str(exc).lower():
+                return
             import sys
             ignore_types = (
                 asyncio.CancelledError,
