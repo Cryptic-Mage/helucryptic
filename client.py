@@ -1477,7 +1477,7 @@ class HelucrypticApp:
             ft.Container(
                 width=5, height=6, border_radius=ft.BorderRadius.all(3),
                 bgcolor=C.BORDER2,
-                animate=_anim(220, _EASE_OUT),
+                animate=_anim(220),
             )
             for _ in range(20)
         ]
@@ -1495,7 +1495,7 @@ class HelucrypticApp:
                 self.insight_quality,
             ], spacing=1, tight=True),
             scale=1.0,
-            animate_scale=_anim(180, _EASE_OUT),
+            animate_scale=_anim(180),
         )
         self.insight_live_dot = ft.Container(
             width=7, height=7, border_radius=4, bgcolor=C.MUTED,
@@ -5502,7 +5502,7 @@ async def check_signaling_auth(base_url: str, password: str = "", timeout: float
             return False, str(err)
         return True, ""
     except asyncio.TimeoutError:
-        return True, ""
+        return False, "Server verification timed out. Please try again."
     except Exception as ex:
         close_code = getattr(ws, "close_code", None)
         if close_code == 1008 or "1008" in str(ex):
@@ -5526,6 +5526,7 @@ class StartupScreen:
         self._selected    = "a"
         self._verify_fn   = check_signaling_auth
         self._connect_btn = None
+        self._connecting  = False
         self._build()
 
     def _select_a(self, e) -> None:
@@ -5539,6 +5540,9 @@ class StartupScreen:
             self._on_radio_change(None)
 
     def _connect(self, e) -> None:
+        if getattr(self, "_connecting", False):
+            return
+
         if self._selected == "a":
             pw = self._pw_field.value or ""
             if not pw:
@@ -5558,6 +5562,7 @@ class StartupScreen:
             target_url = _to_ws_url(url)
             target_pw  = self._custom_pw_field.value or ""
 
+        self._connecting = True
         if self._verify_fn is not None:
             try:
                 loop = asyncio.get_running_loop()
@@ -5569,52 +5574,141 @@ class StartupScreen:
             self.on_done(target_url, target_pw)
 
     async def _do_verify_and_connect(self, target_url: str, target_pw: str) -> None:
-        if self._connect_btn:
-            self._connect_btn.disabled = True
-            self._connect_btn.text = "Verifying…"
-            try:
-                self.page.update()
-            except Exception:
-                pass
-
+        success = False
         try:
-            ok, err = await self._verify_fn(target_url, target_pw)
-            if not ok:
-                if self._selected == "a":
-                    self._pw_error.value   = err
-                    self._pw_error.visible = True
-                else:
-                    self._url_error.value   = err
-                    self._url_error.visible = True
-                if self._connect_btn:
-                    self._connect_btn.disabled = False
-                    self._connect_btn.text = "Connect"
+            if self._connect_btn:
+                self._connect_btn.disabled = True
+                self._connect_btn.text = "Connecting…"
+            self._pw_field.disabled = True
+            self._url_field.disabled = True
+            self._custom_pw_field.disabled = True
+
+            # Transition form out -> loading card in
+            if getattr(self, "_form_container", None) is not None:
+                self._form_container.opacity = 0
+                self._form_container.scale = 0.96
                 try:
                     self.page.update()
                 except Exception:
                     pass
-                return
-        except Exception as ex:
-            if self._selected == "a":
-                self._pw_error.value   = f"Connection check failed: {ex}"
-                self._pw_error.visible = True
-            else:
-                self._url_error.value   = f"Connection check failed: {ex}"
-                self._url_error.visible = True
-            if self._connect_btn:
-                self._connect_btn.disabled = False
-                self._connect_btn.text = "Connect"
-            try:
-                self.page.update()
-            except Exception:
-                pass
-            return
+                await asyncio.sleep(0.12)
+                self._form_container.visible = False
 
-        if self._connect_btn:
-            self._connect_btn.disabled = False
-            self._connect_btn.text = "Connect"
-        sounds.play("authorized")
-        self.on_done(target_url, target_pw)
+            if getattr(self, "_loading_container", None) is not None:
+                self._loading_ring.color = C.CYAN
+                self._loading_status.value = "Connecting to server…"
+                self._loading_status.color = C.WHITE
+                self._loading_subtext.value = "Verifying access credentials"
+                self._loading_container.border = ft.Border.all(1, C.BORDER2)
+                self._loading_container.shadow = _glow(C.CYAN + "33", blur=28, spread=-2)
+                self._loading_container.visible = True
+                self._loading_container.opacity = 1
+                self._loading_container.scale = 1.0
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+            err_msg = ""
+            if self._verify_fn is None:
+                success = True
+            else:
+                try:
+                    ok, err = await self._verify_fn(target_url, target_pw)
+                    if ok:
+                        success = True
+                    else:
+                        err_msg = err or "Verification failed"
+                except Exception as ex:
+                    err_msg = f"Connection check failed: {ex}"
+
+            if success:
+                if getattr(self, "_loading_container", None) is not None:
+                    self._loading_status.value = "Access Granted"
+                    self._loading_status.color = C.GREEN
+                    self._loading_subtext.value = "Launching secure workspace…"
+                    self._loading_ring.color = C.GREEN
+                    self._loading_container.border = ft.Border.all(2, C.GREEN)
+                    self._loading_container.shadow = _glow(C.GREEN + "55", blur=32, spread=-2)
+                try:
+                    sounds.play("authorized")
+                except Exception:
+                    pass
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+                await asyncio.sleep(0.35)
+                if getattr(self, "_panel", None) is not None:
+                    self._panel.opacity = 0
+                    self._panel.scale = 1.03
+                    try:
+                        self.page.update()
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.18)
+                self.on_done(target_url, target_pw)
+            else:
+                if getattr(self, "_loading_container", None) is not None:
+                    self._loading_status.value = "Access Denied"
+                    self._loading_status.color = C.RED
+                    self._loading_subtext.value = err_msg
+                    self._loading_ring.color = C.RED
+                    self._loading_container.border = ft.Border.all(2, C.RED)
+                    self._loading_container.shadow = _glow(C.RED + "55", blur=32, spread=-2)
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+                await asyncio.sleep(0.65)
+
+                if getattr(self, "_loading_container", None) is not None:
+                    self._loading_container.opacity = 0
+                    self._loading_container.scale = 0.96
+                    try:
+                        self.page.update()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.15)
+                    self._loading_container.visible = False
+                    self._loading_container.border = ft.Border.all(1, C.BORDER2)
+                    self._loading_container.shadow = _glow(C.CYAN + "33", blur=28, spread=-2)
+
+                self._pw_field.disabled = False
+                self._url_field.disabled = False
+                self._custom_pw_field.disabled = False
+                if self._connect_btn:
+                    self._connect_btn.disabled = False
+                    self._connect_btn.text = "Connect"
+
+                if self._selected == "a":
+                    self._pw_error.value = err_msg
+                    self._pw_error.visible = True
+                else:
+                    self._url_error.value = err_msg
+                    self._url_error.visible = True
+
+                if getattr(self, "_form_container", None) is not None:
+                    self._form_container.visible = True
+                    self._form_container.opacity = 1
+                    self._form_container.scale = 1.0
+                try:
+                    self.page.update()
+                    target_field = self._pw_field if self._selected == "a" else self._custom_pw_field
+                    res = target_field.focus()
+                    if asyncio.iscoroutine(res):
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(res)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        finally:
+            if not success:
+                self._connecting = False
 
     async def _reveal_entrance(self) -> None:
         try:
@@ -5629,20 +5723,36 @@ class StartupScreen:
             pass
 
     def _build(self) -> None:
+        def _clear_pw_error(e):
+            if self._pw_error.visible:
+                self._pw_error.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+        def _clear_custom_pw_error(e):
+            if self._url_error.visible:
+                self._url_error.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
         self._pw_field  = _neon_field(
             label="Password", value="", password=True, can_reveal_password=True, width=300,
-            on_submit=self._connect,
+            on_submit=self._connect, on_change=_clear_pw_error,
         )
         self._pw_error  = ft.Text("", color=C.RED, size=11, visible=False)
         self._url_field = _neon_field(
             label="Server URL", value=SCHEME_WS, width=300,
             hint_text="ws://your-server-ip:8000",
-            on_submit=self._connect,
+            on_submit=self._connect, on_change=_clear_custom_pw_error,
         )
         self._custom_pw_field = _neon_field(
             label="Server password (optional)", value="", password=True, can_reveal_password=True,
             width=300,
-            on_submit=self._connect,
+            on_submit=self._connect, on_change=_clear_custom_pw_error,
         )
         self._url_error = ft.Text("", color=C.RED, size=11, visible=False)
 
@@ -5727,6 +5837,46 @@ class StartupScreen:
         )
         self._connect_btn = connect_btn
 
+        self._loading_ring = ft.ProgressRing(width=44, height=44, stroke_width=3, color=C.CYAN)
+        self._loading_status = ft.Text("Connecting to server…", size=16, weight=ft.FontWeight.W_700, color=C.WHITE, text_align=ft.TextAlign.CENTER)
+        self._loading_subtext = ft.Text("Verifying access credentials", size=12, color=C.MUTED, text_align=ft.TextAlign.CENTER)
+
+        self._loading_container = ft.Container(
+            width=340,
+            visible=False,
+            opacity=0,
+            scale=0.96,
+            border=ft.Border.all(1, C.BORDER2),
+            border_radius=R.LG,
+            padding=ft.Padding.symmetric(horizontal=24, vertical=36),
+            bgcolor=C.PANEL,
+            shadow=_glow(C.CYAN + "33", blur=28, spread=-2),
+            animate_opacity=_anim(D.MED, _EASE_IO),
+            animate_scale=_anim(D.MED, _EASE_IO),
+            content=ft.Column([
+                ft.Container(height=6),
+                ft.Row([self._loading_ring], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Container(height=16),
+                self._loading_status,
+                ft.Container(height=4),
+                self._loading_subtext,
+                ft.Container(height=8),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
+        )
+
+        self._form_container = ft.Container(
+            content=ft.Column([
+                radio_group,
+                ft.Container(height=28),
+                connect_btn,
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=0),
+            animate_opacity=_anim(D.MED, _EASE_IO),
+            animate_scale=_anim(D.MED, _EASE_IO),
+            opacity=1,
+            scale=1.0,
+            visible=True,
+        )
+
         panel = ft.Container(
             opacity=0, scale=0.97,
             animate_opacity=_anim(D.SLOW, _EASE_IO),
@@ -5735,9 +5885,8 @@ class StartupScreen:
                 ft.Container(height=34),
                 hero,
                 ft.Container(height=24),
-                radio_group,
-                ft.Container(height=28),
-                connect_btn,
+                self._form_container,
+                self._loading_container,
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
         )
         self._panel = panel

@@ -456,6 +456,147 @@ def test_insights_panel_builds_without_name_errors():
     assert panel is not None
 
 
+@pytest.mark.asyncio
+async def test_startup_screen_has_loading_and_form_containers():
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+        def add(self, *a, **k):
+            pass
+        def update(self, *a, **k):
+            pass
+
+    page = FakePage()
+    screen = client.StartupScreen(page, on_done=lambda url, pw: None)
+    assert screen._form_container is not None
+    assert screen._loading_container is not None
+    assert screen._form_container.visible is True
+    assert screen._loading_container.visible is False
+
+
+@pytest.mark.asyncio
+async def test_startup_screen_transition_flow_success(monkeypatch):
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+        def add(self, *a, **k):
+            pass
+        def update(self, *a, **k):
+            pass
+
+    page = FakePage()
+    done_called = []
+    screen = client.StartupScreen(page, on_done=lambda u, p: done_called.append((u, p)))
+    screen._pw_field.value = "valid_password"
+
+    # Fast forward sleep to make test instant
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda sec: orig_sleep(0))
+
+    async def mock_ok(url, pw):
+        return True, ""
+
+    screen._verify_fn = mock_ok
+    task = screen._connect(None)
+    if task:
+        await task
+
+    assert screen._loading_status.value == "Access Granted"
+    assert screen._loading_ring.color == client.C.GREEN
+    assert done_called == [(client.HELUCRYPTIC_SERVER_URL, "valid_password")]
+
+
+@pytest.mark.asyncio
+async def test_startup_screen_transition_flow_failure(monkeypatch):
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+        def add(self, *a, **k):
+            pass
+        def update(self, *a, **k):
+            pass
+
+    page = FakePage()
+    done_called = []
+    screen = client.StartupScreen(page, on_done=lambda u, p: done_called.append((u, p)))
+    screen._pw_field.value = "wrong_password"
+
+    # Fast forward sleep to make test instant
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda sec: orig_sleep(0))
+
+    async def mock_fail(url, pw):
+        return False, "Incorrect credentials"
+
+    screen._verify_fn = mock_fail
+    task = screen._connect(None)
+    if task:
+        await task
+
+    assert len(done_called) == 0
+    # After failure sequence finishes, form is back, loading container is hidden, error is displayed
+    assert screen._form_container.visible is True
+    assert screen._loading_container.visible is False
+    assert screen._pw_field.disabled is False
+    assert screen._pw_error.visible is True
+    assert screen._pw_error.value == "Incorrect credentials"
+    assert screen._connecting is False
+
+
+@pytest.mark.asyncio
+async def test_startup_screen_connect_guards_concurrent_calls():
+    class FakePage:
+        def __init__(self):
+            self.controls = []
+        def add(self, *a, **k):
+            pass
+        def update(self, *a, **k):
+            pass
+
+    page = FakePage()
+    screen = client.StartupScreen(page, on_done=lambda u, p: None)
+    screen._pw_field.value = "my_password"
+
+    call_count = 0
+    async def slow_verify(url, pw):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.05)
+        return True, ""
+
+    screen._verify_fn = slow_verify
+
+    # Trigger connect twice rapidly
+    t1 = screen._connect(None)
+    t2 = screen._connect(None)  # Must be ignored because screen._connecting is True
+
+    assert t2 is None
+    if t1:
+        await t1
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_check_signaling_auth_timeout_fails(monkeypatch):
+    class FakeWS:
+        async def recv(self):
+            await asyncio.sleep(10)
+        async def close(self):
+            pass
+
+    async def fake_connect(*a, **k):
+        return FakeWS()
+
+    monkeypatch.setattr(client.websockets, "connect", fake_connect)
+
+    # Calling check_signaling_auth with short timeout should return False, not True
+    ok, err = await client.check_signaling_auth("ws://localhost:9999", "pw", timeout=0.01)
+    assert ok is False
+    assert "timed out" in err.lower()
+
+
+
+
 
 
 
