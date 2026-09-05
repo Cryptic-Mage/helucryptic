@@ -5237,7 +5237,7 @@ class StartupScreen:
 
     def _build(self) -> None:
         self._pw_field  = _neon_field(
-            label="Password", value=config.SERVER_PASSWORD, password=True, can_reveal_password=True, width=300,
+            label="Password", value="", password=True, can_reveal_password=True, width=300,
         )
         self._pw_error  = ft.Text("", color=C.RED, size=11, visible=False)
         self._url_field = _neon_field(
@@ -5245,7 +5245,7 @@ class StartupScreen:
             hint_text="ws://your-server-ip:8000",
         )
         self._custom_pw_field = _neon_field(
-            label="Server password (optional)", value=config.SERVER_PASSWORD, password=True, can_reveal_password=True,
+            label="Server password (optional)", value="", password=True, can_reveal_password=True,
             width=300,
         )
         self._url_error = ft.Text("", color=C.RED, size=11, visible=False)
